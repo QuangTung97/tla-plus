@@ -289,11 +289,19 @@ Next ==
     \/ Terminated
 
 
+Spec == Init /\ [][Next]_vars
+
+FairSpec == Spec /\ WF_vars(Next)
+
+
 Inv ==
     TerminateCond =>
         \A c \in Client: \A k \in client_keys[c]:
             /\ client_states[c][k] = server_state[k]
             /\ outer_states[c][k] = server_state[k]
+
+
+AlwaysTerminate == <> TerminateCond
 
 
 ChannelInv ==
@@ -326,5 +334,8 @@ channelPushRecvOrAppend ==
 
 ChannelPushInv ==
     [][channelPushRecvOrAppend]_channels
+
+
+Symm == Permutations(Key)
 
 ====
