@@ -133,7 +133,7 @@ handleWaitEntryChanged(c, k) ==
             /\ UNCHANGED channels
             /\ UNCHANGED client_channel
             /\ client_queue' = [client_queue EXCEPT ![c] = @ \union {k}]
-            /\ UNCHANGED client_states \* TODO re check
+            /\ UNCHANGED client_states
             /\ UNCHANGED push_back_list
 
 ServerCheckWaitList(k, c) ==
