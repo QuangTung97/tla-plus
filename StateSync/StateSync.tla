@@ -316,6 +316,15 @@ ChannelInv ==
 LockedCorrectly ==
     (server_pc = "Init" /\ \A c \in Client: client_pc[c] = "Init") => ~locked
 
+
+allChannelConsumedExceptWaiting ==
+    \A i \in DOMAIN channels:
+        (\A c \in Client: consume_channel[c] # i) => channels[i].status = "Consumed"
+
+AllChannelConsumed ==
+    TerminateCond => allChannelConsumedExceptWaiting
+
+
 channelPushOrRecv ==
     \A index \in 1..Len(channels):
         LET
