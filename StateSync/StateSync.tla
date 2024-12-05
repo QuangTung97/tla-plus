@@ -3,12 +3,14 @@ EXTENDS TLC, Integers, Sequences
 
 CONSTANTS Key, Client, nil
 
-VARIABLES server_state, wait_list, client_keys, client_states,
+VARIABLES server_state, wait_list, push_back_list,
+    client_keys, client_states,
     next_val, server_pc, client_pc, locked,
     channels, client_channel, client_queue,
     consume_channel, outer_states
 
-vars == <<server_state, wait_list, client_keys, client_states,
+vars == <<server_state, wait_list, push_back_list,
+    client_keys, client_states,
     next_val, server_pc, client_pc, locked,
     channels, client_channel, client_queue,
     consume_channel, outer_states>>
@@ -39,10 +41,11 @@ ClientState == {"Init", "ClientCheckQueue", "GetFromQueue", "WaitOnChan"}
 TypeOK ==
     /\ server_state \in KevVal
     /\ wait_list \in [Key -> SUBSET Client]
+    /\ push_back_list \in [Key -> SUBSET Client]
     /\ next_val \in (min_val-1)..max_val
     /\ client_keys \in [Client -> SUBSET Key]
     /\ client_states \in [Client -> KevVal]
-    /\ server_pc \in {"Init", "CheckWaitList"}
+    /\ server_pc \in {"Init", "CheckWaitList", "SetBackWaitList"}
     /\ client_pc \in [Client -> ClientState]
     /\ locked \in BOOLEAN
     /\ channels \in Seq(Channel)
@@ -55,6 +58,7 @@ TypeOK ==
 Init ==
     /\ server_state = emptyKV
     /\ wait_list = [k \in Key |-> {}]
+    /\ push_back_list = [k \in Key |-> {}]
     /\ client_keys \in [Client -> SUBSET Key]
     /\ \A c \in Client: client_keys[c] # {} \* client keys should not be empty
     /\ client_states = [c \in Client |-> emptyKV]
@@ -89,7 +93,7 @@ SetServerState(k) ==
     /\ next_val' = next_val + 1
     /\ server_state' = [server_state EXCEPT ![k] = next_val']
 
-    /\ UNCHANGED wait_list
+    /\ UNCHANGED <<wait_list, push_back_list>>
     /\ UNCHANGED channels
     /\ UNCHANGED client_channel
     /\ UNCHANGED client_queue
@@ -114,6 +118,7 @@ handleWaitEntryNoChange(c, k) ==
     /\ UNCHANGED channels
     /\ UNCHANGED client_states
     /\ UNCHANGED client_queue
+    /\ push_back_list' = [push_back_list EXCEPT ![k] = @ \union {c}]
 
 handleWaitEntryChanged(c, k) ==
     IF client_channel[c] # nil
@@ -121,8 +126,12 @@ handleWaitEntryChanged(c, k) ==
             /\ setOutputChan(c, k)
             /\ client_states' = [client_states EXCEPT ![c][k] = server_state[k]]
             /\ client_queue' = [client_queue EXCEPT ![c] = @ \union {k}]
+            /\ UNCHANGED push_back_list
         ELSE
             /\ UNCHANGED channels
+            /\ client_queue' = [client_queue EXCEPT ![c] = @ \union {k}]
+            /\ UNCHANGED client_states \* TODO re check
+            /\ UNCHANGED push_back_list
 
 ServerCheckWaitList(k, c) ==
     /\ server_pc = "CheckWaitList"
@@ -135,8 +144,8 @@ ServerCheckWaitList(k, c) ==
 
     /\ IF waitListEmptyNew
         THEN
-            /\ server_pc' = "Init"
-            /\ locked' = FALSE
+            /\ server_pc' = "SetBackWaitList"
+            /\ UNCHANGED locked
         ELSE
             /\ UNCHANGED server_pc
             /\ UNCHANGED locked
@@ -144,6 +153,18 @@ ServerCheckWaitList(k, c) ==
     /\ UNCHANGED server_state
     /\ UNCHANGED client_channel
     /\ UNCHANGED <<client_keys, client_pc, consume_channel, outer_states>>
+    /\ UNCHANGED next_val
+
+ServerSetBackWaitList ==
+    /\ server_pc = "SetBackWaitList"
+    /\ server_pc' = "Init"
+    /\ locked' = FALSE
+    /\ wait_list' = push_back_list
+    /\ UNCHANGED push_back_list
+    /\ UNCHANGED server_state
+    /\ UNCHANGED channels
+    /\ UNCHANGED <<client_channel, client_queue>>
+    /\ UNCHANGED client_vars
     /\ UNCHANGED next_val
 
 
@@ -165,7 +186,7 @@ GetState(c) ==
     /\ UNCHANGED next_val
     /\ UNCHANGED <<server_pc, server_state>>
     /\ UNCHANGED <<consume_channel, outer_states>>
-    /\ UNCHANGED wait_list
+    /\ UNCHANGED <<wait_list, push_back_list>>
 
 
 ClientCheckQueue(c) ==
@@ -185,7 +206,7 @@ ClientCheckQueue(c) ==
     /\ UNCHANGED <<server_pc, server_state>>
     /\ UNCHANGED next_val
     /\ UNCHANGED <<outer_states>>
-    /\ UNCHANGED wait_list
+    /\ UNCHANGED <<wait_list, push_back_list>>
 
 
 GetFromQueue(c, k) ==
@@ -201,6 +222,7 @@ GetFromQueue(c, k) ==
             /\ UNCHANGED client_states
             /\ UNCHANGED locked
             /\ UNCHANGED consume_channel
+            /\ UNCHANGED push_back_list
         ELSE
             /\ clientGoto(c, "WaitOnChan")
             /\ locked' = FALSE
@@ -210,6 +232,7 @@ GetFromQueue(c, k) ==
             /\ UNCHANGED client_queue
             /\ client_states' = [client_states EXCEPT ![c][k] = server_state[k]]
             /\ UNCHANGED wait_list
+            /\ UNCHANGED push_back_list
     /\ UNCHANGED <<server_pc, server_state>>
     /\ UNCHANGED client_keys
     /\ UNCHANGED next_val
@@ -233,6 +256,7 @@ ConsumeFromChan(c) ==
         /\ UNCHANGED consume_channel
         /\ UNCHANGED locked
         /\ UNCHANGED <<server_pc, server_state, next_val, wait_list>>
+        /\ UNCHANGED push_back_list
 
 
 TerminateCond ==
@@ -257,6 +281,7 @@ Next ==
             \/ GetFromQueue(c, k)
             \/ ServerCheckWaitList(k, c)
         \/ ConsumeFromChan(c)
+    \/ ServerSetBackWaitList
     \/ Terminated
 
 
@@ -287,6 +312,7 @@ channelPushOrRecv ==
                /\ after.status = "Ready"
             \/ /\ before.status = "Ready"
                /\ after.status = "Consumed"
+            \/ before = after
 
 channelPushRecvOrAppend ==
     \/ channelPushOrRecv
