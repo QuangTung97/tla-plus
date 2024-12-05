@@ -6,14 +6,16 @@ CONSTANTS Key, Client, nil
 VARIABLES server_state, wait_list, client_keys, client_states,
     next_val, server_pc, client_pc, locked,
     channels, client_channel, client_queue,
-    outer_states
+    consume_channel, outer_states
 
 vars == <<server_state, wait_list, client_keys, client_states,
     next_val, server_pc, client_pc, locked,
     channels, client_channel, client_queue,
-    outer_states>>
+    consume_channel, outer_states>>
 
-client_vars == <<client_keys, client_states, client_pc, outer_states>>
+client_vars == <<
+    client_keys, client_states, client_pc,
+    consume_channel, outer_states>>
 
 min_val == 21
 max_val == 23
@@ -46,6 +48,7 @@ TypeOK ==
     /\ channels \in Seq(Channel)
     /\ client_channel \in [Client -> 1..Len(channels) \union {nil}]
     /\ client_queue \in [Client -> SUBSET Key]
+    /\ consume_channel \in [Client -> 1..Len(channels) \union {nil}]
     /\ outer_states \in [Client -> KevVal]
 
 
@@ -62,6 +65,7 @@ Init ==
     /\ channels = <<>>
     /\ client_channel = [c \in Client |-> nil]
     /\ client_queue = [c \in Client |-> client_keys[c]]
+    /\ consume_channel = [c \in Client |-> nil]
     /\ outer_states = [c \in Client |-> emptyKV]
 
 
@@ -107,20 +111,23 @@ waitListEmptyNew ==
 
 
 handleWaitEntryNoChange(c, k) ==
-    /\ UNCHANGED wait_list
     /\ UNCHANGED channels
     /\ UNCHANGED client_states
     /\ UNCHANGED client_queue
 
 handleWaitEntryChanged(c, k) ==
-    /\ wait_list' = [wait_list EXCEPT ![k] = @ \ {c}]
-    /\ setOutputChan(c, k)
-    /\ client_states' = [client_states EXCEPT ![c][k] = server_state[k]]
-    /\ client_queue' = [client_queue EXCEPT ![c] = @ \union {k}]
+    IF client_channel[c] # nil
+        THEN
+            /\ setOutputChan(c, k)
+            /\ client_states' = [client_states EXCEPT ![c][k] = server_state[k]]
+            /\ client_queue' = [client_queue EXCEPT ![c] = @ \union {k}]
+        ELSE
+            /\ UNCHANGED channels
 
 ServerCheckWaitList(k, c) ==
     /\ server_pc = "CheckWaitList"
     /\ c \in wait_list[k]
+    /\ wait_list' = [wait_list EXCEPT ![k] = @ \ {c}]
 
     /\ IF client_states[c][k] = server_state[k]
         THEN handleWaitEntryNoChange(c, k)
@@ -135,8 +142,8 @@ ServerCheckWaitList(k, c) ==
             /\ UNCHANGED locked
 
     /\ UNCHANGED server_state
-    /\ UNCHANGED client_channel \* TODO
-    /\ UNCHANGED <<client_keys, client_pc, outer_states>>
+    /\ UNCHANGED client_channel
+    /\ UNCHANGED <<client_keys, client_pc, consume_channel, outer_states>>
     /\ UNCHANGED next_val
 
 
@@ -157,7 +164,7 @@ GetState(c) ==
     /\ UNCHANGED <<client_keys, client_states, client_queue>>
     /\ UNCHANGED next_val
     /\ UNCHANGED <<server_pc, server_state>>
-    /\ UNCHANGED outer_states
+    /\ UNCHANGED <<consume_channel, outer_states>>
     /\ UNCHANGED wait_list
 
 
@@ -166,18 +173,19 @@ ClientCheckQueue(c) ==
     /\ IF client_queue[c] = {}
         THEN
             /\ clientGoto(c, "WaitOnChan")
+            /\ consume_channel' = [consume_channel EXCEPT ![c] = client_channel[c]]
             /\ locked' = FALSE
         ELSE
             /\ clientGoto(c, "GetFromQueue")
             /\ UNCHANGED locked
+            /\ UNCHANGED consume_channel
     /\ UNCHANGED channels
     /\ UNCHANGED <<client_queue, client_states>>
     /\ UNCHANGED <<client_keys, client_channel>>
     /\ UNCHANGED <<server_pc, server_state>>
     /\ UNCHANGED next_val
-    /\ UNCHANGED outer_states
+    /\ UNCHANGED <<outer_states>>
     /\ UNCHANGED wait_list
-
 
 
 GetFromQueue(c, k) ==
@@ -192,11 +200,13 @@ GetFromQueue(c, k) ==
             /\ UNCHANGED client_channel
             /\ UNCHANGED client_states
             /\ UNCHANGED locked
+            /\ UNCHANGED consume_channel
         ELSE
             /\ clientGoto(c, "WaitOnChan")
             /\ locked' = FALSE
-            /\ UNCHANGED client_channel \* TODO should be nil
             /\ setOutputChan(c, k)
+            /\ client_channel' = [client_channel EXCEPT ![c] = nil]
+            /\ consume_channel' = [consume_channel EXCEPT ![c] = client_channel[c]]
             /\ UNCHANGED client_queue
             /\ client_states' = [client_states EXCEPT ![c][k] = server_state[k]]
             /\ UNCHANGED wait_list
@@ -208,7 +218,7 @@ GetFromQueue(c, k) ==
 
 ConsumeFromChan(c) ==
     LET
-        index == client_channel[c]
+        index == consume_channel[c]
         old_state == channels[index]
         k == old_state.data[1]
         val == old_state.data[2]
@@ -220,6 +230,7 @@ ConsumeFromChan(c) ==
         /\ channels' = [channels EXCEPT ![index] = new_state]
         /\ outer_states' = [outer_states EXCEPT ![c][k] = val]
         /\ UNCHANGED <<client_keys, client_states, client_queue, client_channel>>
+        /\ UNCHANGED consume_channel
         /\ UNCHANGED locked
         /\ UNCHANGED <<server_pc, server_state, next_val, wait_list>>
 
@@ -228,7 +239,7 @@ TerminateCond ==
     /\ server_pc = "Init"
     /\ \A c \in Client:
         /\ client_pc[c] = "WaitOnChan"
-        /\ channels[client_channel[c]].status = "Empty"
+        /\ channels[consume_channel[c]].status = "Empty"
     /\ next_val = max_val
 
 Terminated ==
@@ -257,12 +268,31 @@ Inv ==
 
 
 ChannelInv ==
-    /\ \A index \in 1..Len(channels):
+    \A index \in 1..Len(channels):
         LET
             ch == channels[index]
         IN
             \/ ch.data = nil /\ ch.status = "Empty"
             \/ ch.data = nil /\ ch.status = "Consumed"
             \/ ch.data # nil /\ ch.status = "Ready"
+
+
+channelPushOrRecv ==
+    \A index \in 1..Len(channels):
+        LET
+            before == channels[index]
+            after == channels'[index]
+        IN
+            \/ /\ before.status = "Empty"
+               /\ after.status = "Ready"
+            \/ /\ before.status = "Ready"
+               /\ after.status = "Consumed"
+
+channelPushRecvOrAppend ==
+    \/ channelPushOrRecv
+    \/ Len(channels') = Len(channels) + 1
+
+ChannelPushInv ==
+    [][channelPushRecvOrAppend]_channels
 
 ====
