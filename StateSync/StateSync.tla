@@ -92,10 +92,52 @@ SetServerState(k) ==
     /\ UNCHANGED client_vars
 
 
-ServerCheckWaitList(k) ==
+setOutputChan(c, k) ==
+    LET
+        index == client_channel[c]
+        oldState == channels[index]
+        val == server_state[k]
+        newState == [oldState EXCEPT !.data = <<k, val>>, !.status = "Ready"]
+    IN
+        channels' = [channels EXCEPT ![index] = newState]
+
+
+waitListEmptyNew ==
+    \A k \in Key: wait_list'[k] = {}
+
+
+handleWaitEntryNoChange(c, k) ==
+    /\ UNCHANGED wait_list
+    /\ UNCHANGED channels
+    /\ UNCHANGED client_states
+    /\ UNCHANGED client_queue
+
+handleWaitEntryChanged(c, k) ==
+    /\ wait_list' = [wait_list EXCEPT ![k] = @ \ {c}]
+    /\ setOutputChan(c, k)
+    /\ client_states' = [client_states EXCEPT ![c][k] = server_state[k]]
+    /\ client_queue' = [client_queue EXCEPT ![c] = @ \union {k}]
+
+ServerCheckWaitList(k, c) ==
     /\ server_pc = "CheckWaitList"
-    /\ wait_list[k] # {}
-    /\ UNCHANGED client_vars
+    /\ c \in wait_list[k]
+
+    /\ IF client_states[c][k] = server_state[k]
+        THEN handleWaitEntryNoChange(c, k)
+        ELSE handleWaitEntryChanged(c, k)
+
+    /\ IF waitListEmptyNew
+        THEN
+            /\ server_pc' = "Init"
+            /\ locked' = FALSE
+        ELSE
+            /\ UNCHANGED server_pc
+            /\ UNCHANGED locked
+
+    /\ UNCHANGED server_state
+    /\ UNCHANGED client_channel \* TODO
+    /\ UNCHANGED <<client_keys, client_pc, outer_states>>
+    /\ UNCHANGED next_val
 
 
 clientGoto(c, state) == client_pc' = [client_pc EXCEPT ![c] = state]
@@ -116,6 +158,7 @@ GetState(c) ==
     /\ UNCHANGED next_val
     /\ UNCHANGED <<server_pc, server_state>>
     /\ UNCHANGED outer_states
+    /\ UNCHANGED wait_list
 
 
 ClientCheckQueue(c) ==
@@ -133,17 +176,8 @@ ClientCheckQueue(c) ==
     /\ UNCHANGED <<server_pc, server_state>>
     /\ UNCHANGED next_val
     /\ UNCHANGED outer_states
+    /\ UNCHANGED wait_list
 
-
-
-setOutputChan(c, k) ==
-    LET
-        index == client_channel[c]
-        oldState == channels[index]
-        val == server_state[k]
-        newState == [oldState EXCEPT !.data = <<k, val>>, !.status = "Ready"]
-    IN
-        channels' = [channels EXCEPT ![index] = newState]
 
 
 GetFromQueue(c, k) ==
@@ -153,6 +187,7 @@ GetFromQueue(c, k) ==
         THEN
             /\ client_queue' = [client_queue EXCEPT ![c] = @ \ {k}]
             /\ clientGoto(c, "ClientCheckQueue")
+            /\ wait_list' = [wait_list EXCEPT ![k] = @ \union {c}]
             /\ UNCHANGED channels
             /\ UNCHANGED client_channel
             /\ UNCHANGED client_states
@@ -164,6 +199,7 @@ GetFromQueue(c, k) ==
             /\ setOutputChan(c, k)
             /\ UNCHANGED client_queue
             /\ client_states' = [client_states EXCEPT ![c][k] = server_state[k]]
+            /\ UNCHANGED wait_list
     /\ UNCHANGED <<server_pc, server_state>>
     /\ UNCHANGED client_keys
     /\ UNCHANGED next_val
@@ -185,7 +221,7 @@ ConsumeFromChan(c) ==
         /\ outer_states' = [outer_states EXCEPT ![c][k] = val]
         /\ UNCHANGED <<client_keys, client_states, client_queue, client_channel>>
         /\ UNCHANGED locked
-        /\ UNCHANGED <<server_pc, server_state, next_val>>
+        /\ UNCHANGED <<server_pc, server_state, next_val, wait_list>>
 
 
 TerminateCond ==
@@ -203,11 +239,12 @@ Terminated ==
 Next ==
     \/ \E k \in Key:
         \/ SetServerState(k)
-        \/ ServerCheckWaitList(k)
     \/ \E c \in Client:
         \/ GetState(c)
         \/ ClientCheckQueue(c)
-        \/ \E k \in Key: GetFromQueue(c, k)
+        \/ \E k \in Key:
+            \/ GetFromQueue(c, k)
+            \/ ServerCheckWaitList(k, c)
         \/ ConsumeFromChan(c)
     \/ Terminated
 
@@ -217,5 +254,15 @@ Inv ==
         \A c \in Client: \A k \in client_keys[c]:
             /\ client_states[c][k] = server_state[k]
             /\ outer_states[c][k] = server_state[k]
+
+
+ChannelInv ==
+    /\ \A index \in 1..Len(channels):
+        LET
+            ch == channels[index]
+        IN
+            \/ ch.data = nil /\ ch.status = "Empty"
+            \/ ch.data = nil /\ ch.status = "Consumed"
+            \/ ch.data # nil /\ ch.status = "Ready"
 
 ====
