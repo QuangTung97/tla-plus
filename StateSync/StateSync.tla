@@ -343,6 +343,16 @@ ChannelPushInv ==
     [][channelPushRecvOrAppend]_channels
 
 
+getFromQueueToCheckAgain(c) ==
+    client_pc[c] = "GetFromQueue" /\ client_pc'[c] = "ClientCheckQueue"
+
+waitListMustNotDuplicatedCond ==
+    \A c \in Client:
+        getFromQueueToCheckAgain(c) => wait_list' # wait_list
+
+WaitListNotDuplicated == [][waitListMustNotDuplicatedCond]_client_pc
+
+
 Symm == Permutations(Key) \union Permutations(Client)
 
 ====
