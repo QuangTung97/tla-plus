@@ -345,6 +345,6 @@ ChannelPushInv ==
     [][channelPushRecvOrAppend]_channels
 
 
-Symm == Permutations(Key)
+Symm == Permutations(Key) \union Permutations(Client)
 
 ====
