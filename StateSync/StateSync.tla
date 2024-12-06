@@ -312,7 +312,16 @@ ChannelInv ==
             \/ ch.data # nil /\ ch.status = "Ready"
 
 LockedCorrectly ==
-    (server_pc = "Init" /\ \A c \in Client: client_pc[c] = "Init") => ~locked
+    LET
+        clientNotLocked(c) ==
+            \/ client_pc[c] = "Init"
+            \/ client_pc[c] = "WaitOnChan"
+
+        serverAndClientCond ==
+            /\ server_pc = "Init"
+            /\ \A c \in Client: clientNotLocked(c)
+    IN
+        serverAndClientCond <=> ~locked
 
 
 allChannelConsumedExceptWaiting ==
@@ -343,14 +352,27 @@ ChannelPushInv ==
     [][channelPushRecvOrAppend]_channels
 
 
-getFromQueueToCheckAgain(c) ==
-    client_pc[c] = "GetFromQueue" /\ client_pc'[c] = "ClientCheckQueue"
-
 waitListMustNotDuplicatedCond ==
-    \A c \in Client:
-        getFromQueueToCheckAgain(c) => wait_list' # wait_list
+    LET
+        checkCond(c) ==
+            /\ client_pc[c] = "GetFromQueue"
+            /\ client_pc'[c] = "ClientCheckQueue"
+    IN
+        \A c \in Client:
+            checkCond(c) => wait_list' # wait_list
 
 WaitListNotDuplicated == [][waitListMustNotDuplicatedCond]_client_pc
+
+
+clientWaitOnChanToInit ==
+    LET
+        checkCond(c) == client_pc[c] = "WaitOnChan" /\ client_pc'[c] = "Init"
+        stateMustChange(c) == outer_states[c] # outer_states'[c]
+    IN
+        \A c \in Client: checkCond(c) => stateMustChange(c)
+
+ConsumeFromChannelAlwaysCauseChange ==
+    [][clientWaitOnChanToInit]_client_pc
 
 
 Symm == Permutations(Key) \union Permutations(Client)
