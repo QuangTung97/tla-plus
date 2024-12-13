@@ -191,4 +191,9 @@ UseStateNotDestroyed ==
 
 AlwaysTerminate == <> TerminateCond
 
+
+IncreaseAlwaysLeadToUsable ==
+    \A n \in Node:
+        pc[n] = "IncreaseRefCount" ~> pc[n] = "UseObject"
+
 ====
