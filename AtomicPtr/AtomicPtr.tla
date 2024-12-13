@@ -14,8 +14,8 @@ State == {
     "Init",
     "LoadPointer", "IncreaseRefCount",
     "UseObject",
-    "StartSwapPtr",
     "Decrease", "TryToSetZero", "Destroy",
+    "StartSwapPtr", "UpdatePointer",
     "Terminated"
 }
 
@@ -29,9 +29,8 @@ TypeOK ==
 
 
 Init ==
-    /\ \E n0 \in Node:
-        /\ pc = [n \in Node |-> IF n = n0 THEN "Decrease" ELSE "Init"]
-        /\ local_ref = [n \in Node |-> IF n = n0 THEN 1 ELSE nil]
+    /\ pc = [n \in Node |-> "Init"]
+    /\ local_ref = [n \in Node |-> nil]
     /\ ref_states = <<[ref_count |-> 1, is_zero |-> FALSE, destroyed |-> 0]>>
     /\ pointer = 1
 
@@ -40,13 +39,13 @@ goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
 
 
-IncreaseOrStartSwapPtr(n) ==
+LoadPointerOrSwapPtr(n) ==
     /\ pc[n] = "Init"
     /\ \/ goto(n, "LoadPointer")
-       \* \/ goto(n, "StartSwapPtr")
-    /\ UNCHANGED local_ref
+       \/ goto(n, "StartSwapPtr")
     /\ UNCHANGED pointer
     /\ UNCHANGED ref_states
+    /\ UNCHANGED local_ref
 
 
 LoadPointer(n) ==
@@ -124,6 +123,29 @@ DestroyObject(n) ==
         /\ UNCHANGED local_ref
 
 
+StartSwapPtr(n) ==
+    LET
+        new_state == [ref_count |-> 1, is_zero |-> FALSE, destroyed |-> 0]
+        new_addr == Len(ref_states) + 1
+    IN
+        /\ pc[n] = "StartSwapPtr"
+        /\ goto(n, "UpdatePointer")
+        /\ ref_states' = Append(ref_states, new_state)
+        /\ local_ref' = [local_ref EXCEPT ![n] = new_addr]
+        /\ UNCHANGED pointer
+
+
+UpdatePointer(n) ==
+    LET
+        addr == local_ref[n]
+    IN
+        /\ pc[n] = "UpdatePointer"
+        /\ goto(n, "Decrease")
+        /\ pointer' = addr
+        /\ local_ref' = [local_ref EXCEPT ![n] = pointer]
+        /\ UNCHANGED ref_states
+
+
 TerminateCond ==
     /\ \A n \in Node: pc[n] = "Terminated"
 
@@ -134,7 +156,7 @@ Terminated ==
 
 Next ==
     \/ \E n \in Node:
-        \/ IncreaseOrStartSwapPtr(n)
+        \/ LoadPointerOrSwapPtr(n)
 
         \/ LoadPointer(n)
         \/ IncreaseRefCount(n)
@@ -143,11 +165,18 @@ Next ==
         \/ DecreaseRef(n)
         \/ TryToSetZero(n)
         \/ DestroyObject(n)
+
+        \/ StartSwapPtr(n)
+        \/ UpdatePointer(n)
     \/ Terminated
 
 
+
+nonPrimaryRefStateDestroyed(i)==
+    i # pointer => ref_states[i].destroyed = 1
+
 DestroyOnce ==
     TerminateCond =>
-        (\A i \in DOMAIN ref_states: ref_states[i].destroyed = 1)
+        (\A i \in DOMAIN ref_states: nonPrimaryRefStateDestroyed(i))
 
 ====
