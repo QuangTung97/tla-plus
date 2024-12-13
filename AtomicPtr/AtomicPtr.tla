@@ -64,7 +64,7 @@ IncreaseRefCount(n) ==
         /\ pc[n] = "IncreaseRefCount"
         /\ ref_states' = [ref_states EXCEPT ![addr].ref_count = @ + 1]
         /\ IF is_zero
-            THEN goto(n, "Terminated")
+            THEN goto(n, "LoadPointer")
             ELSE goto(n, "UseObject")
         /\ UNCHANGED local_ref
         /\ UNCHANGED pointer
@@ -171,6 +171,10 @@ Next ==
     \/ Terminated
 
 
+Spec == Init /\ [][Next]_vars
+
+FairSpec == Spec /\ WF_vars(Next)
+
 
 nonPrimaryRefStateDestroyed(i)==
     i # pointer => ref_states[i].destroyed = 1
@@ -178,5 +182,13 @@ nonPrimaryRefStateDestroyed(i)==
 DestroyOnce ==
     TerminateCond =>
         (\A i \in DOMAIN ref_states: nonPrimaryRefStateDestroyed(i))
+
+
+UseStateNotDestroyed ==
+    \A n \in Node:
+        pc[n] = "UseObject" => ref_states[local_ref[n]].destroyed = 0
+
+
+AlwaysTerminate == <> TerminateCond
 
 ====
