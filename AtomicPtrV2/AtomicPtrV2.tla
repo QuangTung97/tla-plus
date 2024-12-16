@@ -8,14 +8,16 @@ VARIABLES pointer, counter, objects, pc, local_addr
 vars == <<pointer, counter, objects, pc, local_addr>>
 
 
-Object == [ref: Nat, destroyed: Nat]
+ExtraStatus == {"None", "Added", "NoNeed"}
+
+Object == [ref: Nat, extra: ExtraStatus, destroyed: Nat]
 
 
 NullAddr == (DOMAIN objects) \union {nil}
 
 State == {"Init", "SwapPointer", "IncreaseRefAgain",
-    "LoadPointer", "IncreaseRef", "DecreaseLocalCounter",
-    "DecreaseRefAgain",
+    "LoadPointer", "IncreaseRef",
+    "DecreaseLocalCounter", "ClearExtraRef",
     "UseObject",
     "DecreaseRef", "DestroyObject", "Terminated"}
 
@@ -28,7 +30,7 @@ TypeOK ==
 
 
 Init ==
-    /\ objects = <<[ref |-> 1, destroyed |-> 0]>>
+    /\ objects = <<[ref |-> 1, extra |-> "None", destroyed |-> 0]>>
     /\ pointer = 1
     /\ counter = 0
     /\ pc = [n \in Node |-> "Init"]
@@ -43,7 +45,7 @@ goto(n, l) ==
 AllocateNewObject(n) ==
     /\ pc[n] = "Init"
     /\ goto(n, "SwapPointer")
-    /\ objects' = Append(objects, [ref |-> 1, destroyed |-> 0])
+    /\ objects' = Append(objects, [ref |-> 1, extra |-> "None", destroyed |-> 0])
     /\ local_addr' = [local_addr EXCEPT ![n] = Len(objects')]
     /\ UNCHANGED <<counter, pointer>>
 
@@ -55,9 +57,10 @@ SwapPointer(n) ==
     /\ IF counter = 0
         THEN
             /\ goto(n, "DecreaseRef")
+            /\ UNCHANGED counter
         ELSE 
             /\ goto(n, "IncreaseRefAgain")
-    /\ UNCHANGED counter
+            /\ counter' = 0
     /\ UNCHANGED objects
 
 
@@ -67,7 +70,10 @@ IncreaseRefAgain(n) ==
     IN
         /\ pc[n] = "IncreaseRefAgain"
         /\ goto(n, "DecreaseRef")
-        /\ objects' = [objects EXCEPT ![addr].ref = @ + 1]
+        /\ IF objects[addr].extra = "None"
+            THEN objects' = [
+                objects EXCEPT ![addr].ref = @ + 1, ![addr].extra = "Added"]
+            ELSE UNCHANGED objects
         /\ UNCHANGED counter
         /\ UNCHANGED pointer
         /\ UNCHANGED local_addr
@@ -106,19 +112,23 @@ DecreaseLocalCounter(n) ==
             /\ counter' = counter - 1
             /\ goto(n, "UseObject")
         ELSE
-            /\ goto(n, "DecreaseRefAgain")
             /\ UNCHANGED counter
+            /\ goto(n, "ClearExtraRef")
     /\ UNCHANGED local_addr
     /\ UNCHANGED objects
     /\ UNCHANGED pointer
 
 
-DecreaseRefAgain(n) ==
+ClearExtraRef(n) ==
     LET
         addr == local_addr[n]
     IN
-        /\ pc[n] = "DecreaseRefAgain"
-        /\ objects' = [objects EXCEPT ![addr].ref = @ - 1]
+        /\ pc[n] = "ClearExtraRef"
+        /\ IF objects[addr].extra = "Added"
+            THEN objects' = [
+                objects EXCEPT ![addr].ref = @ - 1, ![addr].extra = "None"]
+            ELSE objects' = [
+                objects EXCEPT ![addr].extra = "NoNeed"]
         /\ goto(n, "UseObject")
         /\ UNCHANGED local_addr
         /\ UNCHANGED counter
@@ -176,13 +186,15 @@ Next ==
         \/ LoadPointer(n)
         \/ IncreaseRef(n)
         \/ DecreaseLocalCounter(n)
-        \/ DecreaseRefAgain(n)
+        \/ ClearExtraRef(n)
         \/ UseObject(n)
         \/ DecreaseRef(n)
         \/ DestroyObject(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
+
+FairSpec == Spec /\ WF_vars(Next)
 
 
 FullyDestroyed ==
@@ -211,5 +223,8 @@ IncreaseRefMustNotDestroyed ==
         getObj(n) == objects[local_addr[n]]
     IN
         \A n \in Node: pc[n] = "IncreaseRef" => getObj(n).destroyed = 0
+
+
+AlwaysTerminate == <> TerminateCond
 
 ====
