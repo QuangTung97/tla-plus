@@ -15,8 +15,7 @@ NullAddr == (DOMAIN objects) \union {nil}
 
 State == {
     "Init", "SwapPointer", "IncreaseRefAgain",
-    "LoadPointer", "IncreaseRef",
-    "DecreaseLocalCounter", "ClearExtraRef",
+    "IncreaseRef", "DecreaseLocalCounter", "ClearExtraRef",
     "UseObject",
     "DecreaseRef", "DestroyObject", "Terminated"}
 
@@ -43,12 +42,25 @@ goto(n, l) ==
     /\ pc' = [pc EXCEPT ![n] = l]
 
 
+newObject == [ref |-> 1, extra |-> 0, added |-> FALSE, destroyed |-> 0]
+
+allocNew(n) ==
+    /\ objects' = Append(objects, newObject)
+    /\ local_addr' = [local_addr EXCEPT ![n] = Len(objects')]
+
+
+reuseObject(n) ==
+    \E addr \in DOMAIN objects:
+        /\ objects[addr].destroyed = 1
+        /\ objects' = [objects EXCEPT ![addr] = newObject]
+        /\ local_addr' = [local_addr EXCEPT ![n] = addr]
+
+
 AllocateNewObject(n) ==
     /\ pc[n] = "Init"
     /\ goto(n, "SwapPointer")
-    /\ objects' = Append(objects, [
-        ref |-> 1, extra |-> 0, added |-> FALSE, destroyed |-> 0])
-    /\ local_addr' = [local_addr EXCEPT ![n] = Len(objects')]
+    /\ \/ allocNew(n)
+       \/ reuseObject(n)
     /\ UNCHANGED <<counter, pointer>>
     /\ UNCHANGED last_counter
 
@@ -84,7 +96,7 @@ IncreaseRefAgain(n) ==
 
 
 LoadPointer(n) ==
-    /\ pc[n] = "Init" \/ pc[n] = "LoadPointer"
+    /\ pc[n] = "Init"
     /\ counter' = counter + 1
     /\ local_addr' = [local_addr EXCEPT ![n] = pointer]
     /\ goto(n, "IncreaseRef")
@@ -248,6 +260,11 @@ AccessStateMustNotDestroyed ==
 
 
 AlwaysTerminate == <> TerminateCond
+
+
+IncreaseRefLeadToUseObject ==
+    \A n \in Node:
+        pc[n] = "IncreaseRef" ~> pc[n] = "UseObject"
 
 
 Sym == Permutations(Node)
