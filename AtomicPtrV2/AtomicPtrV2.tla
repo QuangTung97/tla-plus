@@ -13,8 +13,10 @@ Object == [ref: Nat, destroyed: Nat]
 
 NullAddr == (DOMAIN objects) \union {nil}
 
-State == {"Init", "SwapPointer",
-    "LoadPointer", "IncreaseRef", "UseObject",
+State == {"Init", "SwapPointer", "IncreaseRefAgain",
+    "LoadPointer", "IncreaseRef", "DecreaseLocalCounter",
+    "DecreaseRefAgain",
+    "UseObject",
     "DecreaseRef", "DestroyObject", "Terminated"}
 
 TypeOK ==
@@ -28,7 +30,7 @@ TypeOK ==
 Init ==
     /\ objects = <<[ref |-> 1, destroyed |-> 0]>>
     /\ pointer = 1
-    /\ counter = 1
+    /\ counter = 0
     /\ pc = [n \in Node |-> "Init"]
     /\ local_addr = [n \in Node |-> nil]
 
@@ -48,19 +50,35 @@ AllocateNewObject(n) ==
 
 SwapPointer(n) ==
     /\ pc[n] = "SwapPointer"
-    /\ goto(n, "DecreaseRef")
     /\ pointer' = local_addr[n]
     /\ local_addr' = [local_addr EXCEPT ![n] = pointer]
+    /\ IF counter = 0
+        THEN
+            /\ goto(n, "DecreaseRef")
+        ELSE 
+            /\ goto(n, "IncreaseRefAgain")
     /\ UNCHANGED counter
     /\ UNCHANGED objects
+
+
+IncreaseRefAgain(n) ==
+    LET
+        addr == local_addr[n]
+    IN
+        /\ pc[n] = "IncreaseRefAgain"
+        /\ goto(n, "DecreaseRef")
+        /\ objects' = [objects EXCEPT ![addr].ref = @ + 1]
+        /\ UNCHANGED counter
+        /\ UNCHANGED pointer
+        /\ UNCHANGED local_addr
 
 
 LoadPointer(n) ==
     /\ pc[n] = "Init" \/ pc[n] = "LoadPointer"
+    /\ counter' = counter + 1
     /\ local_addr' = [local_addr EXCEPT ![n] = pointer]
     /\ goto(n, "IncreaseRef")
     /\ UNCHANGED objects
-    /\ UNCHANGED counter
     /\ UNCHANGED pointer
 
 
@@ -69,13 +87,39 @@ IncreaseRef(n) ==
         addr == local_addr[n]
     IN
         /\ pc[n] = "IncreaseRef"
-        /\ IF objects[addr].ref > 0
+        /\ IF objects[addr].ref > 0 \* TODO is this needed?
             THEN
                 /\ objects' = [objects EXCEPT ![addr].ref = @ + 1]
-                /\ goto(n, "UseObject")
+                /\ goto(n, "DecreaseLocalCounter")
             ELSE
                 /\ UNCHANGED objects
                 /\ goto(n, "LoadPointer")
+        /\ UNCHANGED local_addr
+        /\ UNCHANGED counter
+        /\ UNCHANGED pointer
+
+
+DecreaseLocalCounter(n) ==
+    /\ pc[n] = "DecreaseLocalCounter"
+    /\ IF pointer = local_addr[n]
+        THEN
+            /\ counter' = counter - 1
+            /\ goto(n, "UseObject")
+        ELSE
+            /\ goto(n, "DecreaseRefAgain")
+            /\ UNCHANGED counter
+    /\ UNCHANGED local_addr
+    /\ UNCHANGED objects
+    /\ UNCHANGED pointer
+
+
+DecreaseRefAgain(n) ==
+    LET
+        addr == local_addr[n]
+    IN
+        /\ pc[n] = "DecreaseRefAgain"
+        /\ objects' = [objects EXCEPT ![addr].ref = @ - 1]
+        /\ goto(n, "UseObject")
         /\ UNCHANGED local_addr
         /\ UNCHANGED counter
         /\ UNCHANGED pointer
@@ -128,8 +172,11 @@ Next ==
     \/ \E n \in Node:
         \/ AllocateNewObject(n)
         \/ SwapPointer(n)
+        \/ IncreaseRefAgain(n)
         \/ LoadPointer(n)
         \/ IncreaseRef(n)
+        \/ DecreaseLocalCounter(n)
+        \/ DecreaseRefAgain(n)
         \/ UseObject(n)
         \/ DecreaseRef(n)
         \/ DestroyObject(n)
