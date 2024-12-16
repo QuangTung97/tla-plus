@@ -98,13 +98,8 @@ IncreaseRef(n) ==
         addr == local_addr[n]
     IN
         /\ pc[n] = "IncreaseRef"
-        /\ IF objects[addr].ref > 0 \* TODO is this needed?
-            THEN
-                /\ objects' = [objects EXCEPT ![addr].ref = @ + 1]
-                /\ goto(n, "DecreaseLocalCounter")
-            ELSE
-                /\ UNCHANGED objects
-                /\ goto(n, "LoadPointer")
+        /\ objects' = [objects EXCEPT ![addr].ref = @ + 1]
+        /\ goto(n, "DecreaseLocalCounter")
         /\ UNCHANGED local_addr
         /\ UNCHANGED counter
         /\ UNCHANGED pointer
@@ -231,11 +226,30 @@ UseObjectAlwaysValid ==
 
 IncreaseRefMustNotDestroyed ==
     LET
+        accessStates(n) == pc[n] = "IncreaseRef"
         getObj(n) == objects[local_addr[n]]
     IN
-        \A n \in Node: pc[n] = "IncreaseRef" => getObj(n).destroyed = 0
+        \A n \in Node: accessStates(n) => getObj(n).destroyed = 0
+
+AccessStateMustNotDestroyed ==
+    LET
+        accessStates(n) ==
+            \/ pc[n] = "IncreaseRef"
+            \/ pc[n] = "IncreaseRefAgain"
+            \/ pc[n] = "DecreaseLocalCounter"
+            \/ pc[n] = "ClearExtraRef"
+            \/ pc[n] = "UseObject"
+            \/ pc[n] = "DecreaseRef"
+            \/ pc[n] = "DestroyObject"
+
+        getObj(n) == objects[local_addr[n]]
+    IN
+        \A n \in Node: accessStates(n) => getObj(n).destroyed = 0
 
 
 AlwaysTerminate == <> TerminateCond
+
+
+Sym == Permutations(Node)
 
 ====
