@@ -9,7 +9,7 @@ vars == <<pointer, counter, objects, pc, local_addr, last_counter>>
 
 
 \* ref is the global refcount
-\* ignored is the ignored counter, increased with pumped flag is FALSE
+\* ignored is the ignored counter, increased when pumped flag is FALSE
 \* pumped flag to signal that store() thread has already increase the global refcount
 Object == [ref: Nat, ignored: Nat, pumped: BOOLEAN, destroyed: Nat]
 
@@ -31,8 +31,10 @@ TypeOK ==
     /\ last_counter \in [Node -> Nat]
 
 
+newObject == [ref |-> 1, ignored |-> 0, pumped |-> FALSE, destroyed |-> 0]
+
 Init ==
-    /\ objects = <<[ref |-> 1, ignored |-> 0, pumped |-> FALSE, destroyed |-> 0]>>
+    /\ objects = <<newObject>>
     /\ pointer = 1
     /\ counter = 0
     /\ pc = [n \in Node |-> "Init"]
@@ -40,12 +42,9 @@ Init ==
     /\ last_counter = [n \in Node |-> 0]
 
 
-
 goto(n, l) ==
     /\ pc' = [pc EXCEPT ![n] = l]
 
-
-newObject == [ref |-> 1, ignored |-> 0, pumped |-> FALSE, destroyed |-> 0]
 
 allocNew(n) ==
     /\ objects' = Append(objects, newObject)
