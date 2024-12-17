@@ -314,11 +314,16 @@ HistUpdateSetMemJob ==
         /\ UNCHANGED aux_vars
 
 
-updateAllHanded ==
+cleanupAllSyncJobs ==
     LET
+        new_val_non_nil(job) ==
+            IF job.status = "Scheduled"
+                THEN [job EXCEPT !.status = "Failed"]
+                ELSE [job EXCEPT !.handled = FALSE]
+
         new_val(id) ==
             IF db_jobs[id] # nil
-                THEN [db_jobs[id] EXCEPT !.handled = FALSE]
+                THEN new_val_non_nil(db_jobs[id])
                 ELSE nil
     IN
         db_jobs' = [id \in JobID |-> new_val(id)]
@@ -347,7 +352,7 @@ SystemRestart ==
     /\ mem_jobs' = [id \in JobID |-> nil]
     /\ job_hist_map' = [id \in JobID |-> nil]
     /\ pc' = "Init"
-    /\ updateAllHanded
+    /\ cleanupAllSyncJobs
     /\ updateHistRunningToFailed
     /\ UNCHANGED slave_state \* TODO Restart Too
     /\ UNCHANGED num_update_job
@@ -398,7 +403,7 @@ Next ==
         \/ UpdateDBJobHistStatus(s)
 
     \/ HistUpdateSetMemJob
-    \* \/ SystemRestart
+    \/ SystemRestart
 
     \/ Terminated
 
