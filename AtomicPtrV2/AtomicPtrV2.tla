@@ -8,7 +8,10 @@ VARIABLES pointer, counter, objects, pc, local_addr, last_counter
 vars == <<pointer, counter, objects, pc, local_addr, last_counter>>
 
 
-Object == [ref: Nat, extra: Nat, added: BOOLEAN, destroyed: Nat]
+\* ref is the global refcount
+\* ignored is the ignored counter, increased with pumped flag is FALSE
+\* pumped flag to signal that store() thread has already increase the global refcount
+Object == [ref: Nat, ignored: Nat, pumped: BOOLEAN, destroyed: Nat]
 
 
 NullAddr == (DOMAIN objects) \union {nil}
@@ -29,7 +32,7 @@ TypeOK ==
 
 
 Init ==
-    /\ objects = <<[ref |-> 1, extra |-> 0, added |-> FALSE, destroyed |-> 0]>>
+    /\ objects = <<[ref |-> 1, ignored |-> 0, pumped |-> FALSE, destroyed |-> 0]>>
     /\ pointer = 1
     /\ counter = 0
     /\ pc = [n \in Node |-> "Init"]
@@ -42,7 +45,7 @@ goto(n, l) ==
     /\ pc' = [pc EXCEPT ![n] = l]
 
 
-newObject == [ref |-> 1, extra |-> 0, added |-> FALSE, destroyed |-> 0]
+newObject == [ref |-> 1, ignored |-> 0, pumped |-> FALSE, destroyed |-> 0]
 
 allocNew(n) ==
     /\ objects' = Append(objects, newObject)
@@ -83,12 +86,12 @@ SwapPointer(n) ==
 IncreaseRefAgain(n) ==
     LET
         addr == local_addr[n]
-        diff == last_counter[n] - objects[addr].extra
+        diff == last_counter[n] - objects[addr].ignored
     IN
         /\ pc[n] = "IncreaseRefAgain"
         /\ goto(n, "DecreaseRef")
         /\ objects' = [
-            objects EXCEPT ![addr].ref = @ + diff, ![addr].added = TRUE]
+            objects EXCEPT ![addr].ref = @ + diff, ![addr].pumped = TRUE]
         /\ UNCHANGED counter
         /\ UNCHANGED pointer
         /\ UNCHANGED local_addr
@@ -138,11 +141,11 @@ ClearExtraRef(n) ==
         addr == local_addr[n]
     IN
         /\ pc[n] = "ClearExtraRef"
-        /\ IF objects[addr].added
+        /\ IF objects[addr].pumped
             THEN objects' = [
                 objects EXCEPT ![addr].ref = @ - 1]
             ELSE objects' = [
-                objects EXCEPT ![addr].extra = @ + 1]
+                objects EXCEPT ![addr].ignored = @ + 1]
         /\ goto(n, "UseObject")
         /\ UNCHANGED local_addr
         /\ UNCHANGED counter
