@@ -144,7 +144,9 @@ FillSetToMem ==
 FillUpdateDB ==
     /\ fill_pc = "FillUpdateDB"
     /\ fill_pc' = "Init"
-    /\ db_jobs' = [db_jobs EXCEPT ![fill_job.id].handled = TRUE]
+    /\ IF fill_job.version = db_jobs[fill_job.id].version
+        THEN db_jobs' = [db_jobs EXCEPT ![fill_job.id].handled = TRUE]
+        ELSE UNCHANGED db_jobs
     /\ UNCHANGED fill_job
     /\ UNCHANGED mem_jobs
     /\ UNCHANGED job_hist_map
@@ -160,10 +162,10 @@ GetReadyJobInMem(id) ==
     /\ job_hist_map[id] = nil
     /\ pc = "Init"
     /\ pc' = "InsertHist"
+    /\ mem_jobs' = [mem_jobs EXCEPT ![id].status = "Scheduled"]
     /\ current_job' = mem_jobs[id]
     /\ UNCHANGED current_hist_id
     /\ UNCHANGED num_update_job
-    /\ UNCHANGED mem_jobs
     /\ UNCHANGED job_hist_map
     /\ UNCHANGED db_jobs
     /\ UNCHANGED fill_vars
@@ -198,9 +200,9 @@ UpdateJobMem ==
     IN
         /\ pc = "UpdateJobMem"
         /\ pc' = "PushJob"
-        /\ mem_jobs' = [mem_jobs EXCEPT ![id].status = "Scheduled"]
         /\ job_hist_map' = [job_hist_map EXCEPT ![id] = current_hist_id]
         /\ current_hist_id' = nil
+        /\ UNCHANGED mem_jobs
         /\ UNCHANGED num_update_job
         /\ UNCHANGED current_job
         /\ UNCHANGED db_hist
@@ -277,7 +279,10 @@ UpdateDBJobHistStatus(s) ==
 
 HistUpdateSetMemJob ==
     LET 
-        cond ==
+        clear_cond ==
+            /\ hist_update_id = job_hist_map[hist_update_job_id]
+
+        delete_mem_job_cond ==
             /\ hist_update_id = job_hist_map[hist_update_job_id]
             /\ mem_jobs[hist_update_job_id].status = "Scheduled"
 
@@ -286,13 +291,12 @@ HistUpdateSetMemJob ==
     IN
         /\ hist_update_pc = "HistUpdateSetMemJob"
         /\ hist_update_pc' = "Init"
-        /\ IF cond
+        /\ IF delete_mem_job_cond
             THEN
                 /\ mem_jobs' = [mem_jobs EXCEPT ![hist_update_job_id] = nil]
-                /\ clear_job_hist_map
             ELSE
                 /\ UNCHANGED mem_jobs
-                /\ UNCHANGED job_hist_map
+        /\ clear_job_hist_map
         /\ hist_update_job_id' = nil
         /\ hist_update_id' = nil
         /\ UNCHANGED slave_state
@@ -308,7 +312,7 @@ TerminateCond ==
             \/ h.status = "Failed"
             \/ h.status = "Succeeded"
 
-        allHistFinished(s) ==
+        allSlaveHistFinished(s) ==
             \A i \in DOMAIN slave_state[s]: histStatusFinish(slave_state[s][i])
         
         jobFinished(id) ==
@@ -317,9 +321,11 @@ TerminateCond ==
     IN
         /\ pc = "Init"
         /\ fill_pc = "Init"
-        /\ \A s \in SyncSlave: allHistFinished(s)
+        /\ hist_update_pc = "Init"
+        /\ \A s \in SyncSlave: allSlaveHistFinished(s)
         /\ \A i \in DOMAIN db_hist: histStatusFinish(db_hist[i])
         /\ \A id \in JobID: db_jobs[id] # nil /\ jobFinished(id)
+        /\ num_update_job = max_update_job
 
 Terminated ==
     /\ TerminateCond
@@ -366,7 +372,7 @@ JobHistNotRunConcurrently ==
                 
 TerminateShouldCreateEnoughHist ==
     LET
-        createdEnoughHist == Len(db_hist) >= Cardinality(JobID)
+        createdEnoughHist == Len(db_hist) = Cardinality(JobID) + max_update_job
     IN
         TerminateCond => createdEnoughHist
 
