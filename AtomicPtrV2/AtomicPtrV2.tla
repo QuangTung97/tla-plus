@@ -3,6 +3,12 @@ EXTENDS TLC, Naturals, Sequences
 
 CONSTANTS Node, nil
 
+\* pointer: is the address of the control block
+\* counter: is the local refcount
+\* objects: represents the allocated memory for control blocks,
+\*          with its index is the address of a control block
+\* local_addr: the value of *pointer* locally stored on the stack of each thread
+\* last_counter: is the old local refcount to do the pumping to the global refcount
 VARIABLES pointer, counter, objects, pc, local_addr, last_counter
 
 vars == <<pointer, counter, objects, pc, local_addr, last_counter>>
@@ -71,7 +77,7 @@ SwapPointer(n) ==
     /\ pc[n] = "SwapPointer"
     /\ pointer' = local_addr[n]
     /\ local_addr' = [local_addr EXCEPT ![n] = pointer]
-    /\ IF counter = 0
+    /\ IF counter = 0 \* if old local refcount is zero
         THEN
             /\ goto(n, "DecreaseRef")
             /\ UNCHANGED counter
