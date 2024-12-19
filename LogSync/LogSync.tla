@@ -35,15 +35,11 @@ NullInfo == Info \union {nil}
 
 NullKey == Key \union {nil}
 
-Index == 0..19
-
-NullIndex == Index \union {nil}
-
 NullLogEntry == LogEntry \union {nil}
 
 Event == [
     type: {"AddLog", "Finished"},
-    key: Key, index: NullIndex, line: NullLogEntry]
+    key: Key, line: NullLogEntry]
 
 NullEvent == Event \union {nil}
 
@@ -141,17 +137,18 @@ pushToClientChan(k, c, old_watch_ch) ==
         add_event == [
             type |-> "AddLog",
             key |-> k,
-            index |-> last_index + 1,
             line |-> new_line]
         
         finish_event == [
             type |-> "Finished",
             key |-> k,
-            index |-> nil,
             line |-> nil]
+        
+
+        push_log == last_index < state_index
     
         new_event ==
-            IF last_index < state_index
+            IF push_log
                 THEN add_event
                 ELSE finish_event
         
@@ -159,7 +156,9 @@ pushToClientChan(k, c, old_watch_ch) ==
     IN
         /\ watch_chan' = [old_watch_ch EXCEPT ![c] = new_state]
         /\ watch_log_index' = [watch_log_index EXCEPT ![c][k] = last_index + 1]
-        /\ watch_seq' = [watch_seq EXCEPT ![c][k] = state_seq[k]]
+        /\ IF push_log
+            THEN UNCHANGED watch_seq
+            ELSE watch_seq' = [watch_seq EXCEPT ![c][k] = state_seq[k]]
 
 
 pushToClientOrDoNothing(c, old_watch_ch) ==
@@ -274,17 +273,36 @@ AddToWaitList(c) ==
 updateStateFromChan(c) ==
     LET
         k == watch_chan[c].data.key
+        type == watch_chan[c].data.type
+        log_line == watch_chan[c].data.line
+    
+        old_state == watch_state[c][k]
+        new_state ==
+            IF old_state = nil
+                THEN [logs |-> <<log_line>>, status |-> "Running"]
+                ELSE [old_state EXCEPT !.logs = Append(@, log_line)]
+
+        do_add_log ==
+            /\ watch_state' = [
+                    watch_state EXCEPT ![c][k] = new_state]
+            /\ UNCHANGED watch_local_key
+            /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
+
+        do_complete ==
+            /\ watch_state' = [
+                    watch_state EXCEPT
+                        ![c][k] = [logs |-> <<>>, status |-> "Completed"]]
+            /\ watch_local_key' = [watch_local_key EXCEPT ![c] = k]
+            /\ watch_pc' = [watch_pc EXCEPT ![c] = "UpdateDB"]
     IN
-        /\ watch_state' = [
-                watch_state EXCEPT
-                    ![c][k] = [logs |-> <<>>, status |-> "Completed"]]
-        /\ watch_local_key' = [watch_local_key EXCEPT ![c] = k]
+        IF type = "AddLog"
+            THEN do_add_log
+            ELSE do_complete
 
 ConsumeWatchChan(c) ==
     /\ watch_pc[c] = "WaitOnChan"
     /\ watch_chan[c].status = "Ready"
 
-    /\ watch_pc' = [watch_pc EXCEPT ![c] = "UpdateDB"]
     /\ watch_chan' = [
             watch_chan EXCEPT
                 ![c].status = "Consumed",
