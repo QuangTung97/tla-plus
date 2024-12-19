@@ -24,10 +24,10 @@ aux_vars == <<num_client_restart, num_main_restart>>
 vars == <<main_vars, server_vars, watch_vars, aux_vars>>
 
 
-max_log_size == 2
+max_log_size == 3
 
 max_client_restart == 1
-max_main_restart == 1
+max_main_restart == 2
 
 Status == {"Running", "Completed", "Gone"}
 
