@@ -34,8 +34,6 @@ Status == {"Running", "Completed", "Gone"}
 
 LogEntry == 20..30
 
-SeqMaxLen(S, n) == UNION {[1..m -> S] : m \in 0..n}
-
 Info == [logs: Seq(LogEntry), status: Status]
 
 NullInfo == Info \union {nil}
@@ -170,9 +168,9 @@ pushToClientChan(k, c, old_watch_ch) ==
         add_log_cond == is_running \/ last_index < state_index
 
         update_seq_cond ==
-            IF last_index = state_index
+            IF last_index >= state_index
                 THEN TRUE
-                ELSE IF last_index + 1 = state_index /\ is_running
+                ELSE IF last_index + 1 >= state_index /\ is_running
                     THEN TRUE
                     ELSE FALSE
         
