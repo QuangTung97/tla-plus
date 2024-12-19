@@ -9,7 +9,8 @@ CONSTANTS Key, WatchClient, nil
 VARIABLES pc, current_key, db, 
     state, state_seq, next_log, next_seq, watch_list,
     watch_pc, watch_keys, watch_chan, watch_seq,
-    watch_log_index, watch_state, watch_local_key
+    watch_log_index, watch_state, watch_local_key,
+    num_client_restart
 
 main_vars == <<pc, current_key, db>>
 
@@ -18,10 +19,14 @@ watch_vars == <<watch_pc, watch_keys, watch_chan,
 
 server_vars == <<state, state_seq, next_log, next_seq, watch_list>>
 
-vars == <<main_vars, server_vars, watch_vars>>
+aux_vars == <<num_client_restart>>
+
+vars == <<main_vars, server_vars, watch_vars, aux_vars>>
 
 
 max_log_size == 2
+
+max_client_restart == 2
 
 Status == {"Running", "Completed", "Gone"}
 
@@ -68,6 +73,8 @@ TypeOK ==
     /\ watch_state \in [WatchClient -> [Key -> NullInfo]]
     /\ watch_local_key \in [WatchClient -> NullKey]
 
+    /\ num_client_restart \in 0..max_client_restart
+
 
 consumed_chan == [status |-> "Consumed", data |-> nil]
 
@@ -90,6 +97,8 @@ Init ==
     /\ watch_state = [c \in WatchClient |-> [k \in Key |-> nil]]
     /\ watch_local_key = [c \in WatchClient |-> nil]
 
+    /\ num_client_restart = 0
+
 
 newJob == [logs |-> <<>>, status |-> "Running"]
 
@@ -102,6 +111,7 @@ AddDBJob(k) ==
     /\ db' = [db EXCEPT ![k] = newJob]
     /\ UNCHANGED server_vars
     /\ UNCHANGED watch_vars
+    /\ UNCHANGED aux_vars
 
 
 updateStateSeq(k) ==
@@ -119,7 +129,7 @@ PushJob ==
     /\ UNCHANGED db
     /\ UNCHANGED next_log
     /\ UNCHANGED watch_vars
-
+    /\ UNCHANGED aux_vars
 
 
 canPushKeyToClient(k, c, old_watch_ch) ==
@@ -210,6 +220,7 @@ ProduceLog(k) ==
 
     /\ UNCHANGED main_vars
     /\ UNCHANGED <<watch_pc, watch_keys, watch_state, watch_local_key>>
+    /\ UNCHANGED aux_vars
 
 
 FinishJob(k) ==
@@ -224,6 +235,7 @@ FinishJob(k) ==
     /\ UNCHANGED next_log
     /\ UNCHANGED main_vars
     /\ UNCHANGED <<watch_pc, watch_keys, watch_state, watch_local_key>>
+    /\ UNCHANGED aux_vars
 
 
 new_chan == [status |-> "Empty", data |-> nil]
@@ -240,6 +252,7 @@ NewWatchChan(c) ==
 
         /\ UNCHANGED <<watch_keys, watch_state, watch_local_key>>
         /\ UNCHANGED main_vars
+        /\ UNCHANGED aux_vars
 
 
 active_keys == {k \in Key: db[k] # nil /\ db[k].status = "Running"}
@@ -251,6 +264,7 @@ UpdateWatchKeys(c) ==
     /\ UNCHANGED watch_local_key
     /\ UNCHANGED main_vars
     /\ UNCHANGED server_vars
+    /\ UNCHANGED aux_vars
 
 
 updateServerWatchList(c) ==
@@ -276,6 +290,7 @@ AddToWaitList(c) ==
     /\ UNCHANGED <<watch_pc, watch_keys, watch_state, watch_local_key>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED next_log
+    /\ UNCHANGED aux_vars
 
 
 updateStateFromChan(c) ==
@@ -325,6 +340,7 @@ ConsumeWatchChan(c) ==
     /\ UNCHANGED <<watch_keys, watch_seq, watch_log_index>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED server_vars
+    /\ UNCHANGED aux_vars
 
 
 UpdateDB(c) ==
@@ -341,6 +357,21 @@ UpdateDB(c) ==
         /\ UNCHANGED <<watch_log_index, watch_state>>
         /\ UNCHANGED server_vars
         /\ UNCHANGED <<pc, current_key>>
+        /\ UNCHANGED aux_vars
+
+
+ClientRestart(c) ==
+    /\ num_client_restart < max_client_restart
+    /\ num_client_restart' = num_client_restart + 1
+    /\ UNCHANGED server_vars
+    /\ UNCHANGED main_vars
+    /\ watch_chan' = [watch_chan EXCEPT ![c] = consumed_chan]
+    /\ watch_keys' = [watch_keys EXCEPT ![c] = {}]
+    /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
+    /\ watch_log_index' = [watch_log_index EXCEPT ![c] = [k \in Key |-> 0]]
+    /\ watch_seq' = [watch_seq EXCEPT ![c] = [k \in Key |-> 100]]
+    /\ watch_state' = [watch_state EXCEPT ![c] = [k \in Key |-> nil]]
+    /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
 
 
 TerminateCond ==
@@ -370,6 +401,7 @@ Next ==
         \/ AddToWaitList(c)
         \/ ConsumeWatchChan(c)
         \/ UpdateDB(c)
+        \/ ClientRestart(c)
 
     \/ Terminated
 
@@ -410,7 +442,8 @@ channelNextByClient(c) ==
        /\ watch_chan'[c].status = "Ready"
        /\ watch_chan'[c].data # nil
 
-    \/ /\ watch_chan[c].status = "Ready"
+    \/ /\ \/ watch_chan[c].status = "Ready"
+          \/ watch_chan[c].status = "Empty"
        /\ watch_chan'[c].status = "Consumed"
        /\ watch_chan'[c].data = nil
 
