@@ -9,13 +9,13 @@ CONSTANTS Key, WatchClient, nil
 VARIABLES pc, current_key, db, 
     state, state_seq, next_log, next_seq, wait_list,
     watch_pc, watch_keys, watch_chan, watch_seq,
-    watch_log_index, watch_state, watch_local_key,
+    watch_log_index, watch_state, watch_local_key, watch_local_info,
     num_client_restart, num_main_restart, num_delete_state
 
 main_vars == <<pc, current_key, db>>
 
 watch_vars == <<watch_pc, watch_keys, watch_chan,
-    watch_seq, watch_log_index, watch_state, watch_local_key>>
+    watch_seq, watch_log_index, watch_state, watch_local_key, watch_local_info>>
 
 server_vars == <<state, state_seq, next_log, next_seq, wait_list>>
 
@@ -72,6 +72,7 @@ TypeOK ==
     /\ watch_log_index \in [WatchClient -> [Key -> Nat]]
     /\ watch_state \in [WatchClient -> [Key -> NullInfo]]
     /\ watch_local_key \in [WatchClient -> NullKey]
+    /\ watch_local_info \in [WatchClient -> NullInfo]
 
     /\ num_client_restart \in 0..max_client_restart
     /\ num_main_restart \in 0..max_main_restart
@@ -98,6 +99,7 @@ Init ==
     /\ watch_log_index = [c \in WatchClient |-> [k \in Key |-> 0]]
     /\ watch_state = [c \in WatchClient |-> [k \in Key |-> nil]]
     /\ watch_local_key = [c \in WatchClient |-> nil]
+    /\ watch_local_info = [c \in WatchClient |-> nil]
 
     /\ num_client_restart = 0
     /\ num_main_restart = 0
@@ -228,7 +230,8 @@ ProduceLog(k) ==
     /\ pushKeyOrDoNothing(k)
 
     /\ UNCHANGED main_vars
-    /\ UNCHANGED <<watch_pc, watch_keys, watch_state, watch_local_key>>
+    /\ UNCHANGED <<watch_pc, watch_keys, watch_state>>
+    /\ UNCHANGED <<watch_local_key, watch_local_info>>
     /\ UNCHANGED aux_vars
 
 
@@ -243,7 +246,8 @@ FinishJob(k) ==
 
     /\ UNCHANGED next_log
     /\ UNCHANGED main_vars
-    /\ UNCHANGED <<watch_pc, watch_keys, watch_state, watch_local_key>>
+    /\ UNCHANGED <<watch_pc, watch_keys, watch_state>>
+    /\ UNCHANGED <<watch_local_key, watch_local_info>>
     /\ UNCHANGED aux_vars
 
 
@@ -259,7 +263,7 @@ NewWatchChan(c) ==
         /\ UNCHANGED server_vars
         /\ pushToClientOrDoNothing(c, new_watch_ch)
 
-        /\ UNCHANGED <<watch_keys, watch_state, watch_local_key>>
+        /\ UNCHANGED <<watch_keys, watch_state, watch_local_key, watch_local_info>>
         /\ UNCHANGED main_vars
         /\ UNCHANGED aux_vars
 
@@ -280,7 +284,7 @@ UpdateWatchKeys(c) ==
     /\ watch_state' = [watch_state EXCEPT
             ![c] = clearWatchStateKeyNotInSet(c, active_keys)]
     /\ UNCHANGED <<watch_pc, watch_chan, watch_seq, watch_log_index>>
-    /\ UNCHANGED watch_local_key
+    /\ UNCHANGED <<watch_local_key, watch_local_info>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
@@ -336,7 +340,8 @@ AddToWaitList(c) ==
     /\ createPlaceHolderStateForWaitList
     /\ pushToClientOrDoNothing(c, watch_chan)
 
-    /\ UNCHANGED <<watch_pc, watch_keys, watch_state, watch_local_key>>
+    /\ UNCHANGED <<watch_pc, watch_keys, watch_state>>
+    /\ UNCHANGED <<watch_local_key, watch_local_info>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED next_log
     /\ UNCHANGED aux_vars
@@ -361,7 +366,7 @@ updateStateFromChan(c) ==
         do_add_log ==
             /\ watch_state' = [
                     watch_state EXCEPT ![c][k] = new_state]
-            /\ UNCHANGED watch_local_key
+            /\ UNCHANGED <<watch_local_key, watch_local_info>>
             /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
 
         new_status ==
@@ -373,13 +378,18 @@ updateStateFromChan(c) ==
             /\ watch_state' = [
                 watch_state EXCEPT
                     ![c][k] = [logs |-> old_logs, status |-> new_status]]
+
             /\ watch_local_key' = [watch_local_key EXCEPT ![c] = k]
+
+            /\ watch_local_info' = [
+                watch_local_info EXCEPT ![c] = watch_state'[c][k]]
+
             /\ watch_pc' = [watch_pc EXCEPT ![c] = "UpdateDB"]
 
         do_nothing ==
             /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
             /\ UNCHANGED watch_state
-            /\ UNCHANGED watch_local_key
+            /\ UNCHANGED <<watch_local_key, watch_local_info>>
     IN
         IF k \in watch_keys[c]
             THEN IF type = "AddLog"
@@ -407,11 +417,13 @@ ConsumeWatchChan(c) ==
 UpdateDB(c) ==
     LET
         k == watch_local_key[c]
+        info == watch_local_info[c]
     IN
         /\ watch_pc[c] = "UpdateDB"
         /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
-        /\ db' = [db EXCEPT ![k] = watch_state[c][k]]
+        /\ db' = [db EXCEPT ![k] = info]
         /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
+        /\ watch_local_info' = [watch_local_info EXCEPT ![c] = nil]
         /\ UNCHANGED <<watch_keys, watch_chan, watch_seq>>
         /\ UNCHANGED <<watch_log_index, watch_state>>
         /\ UNCHANGED server_vars
@@ -428,7 +440,10 @@ ClientRestart(c) ==
     /\ num_client_restart' = num_client_restart + 1
     /\ watch_chan' = [watch_chan EXCEPT ![c] = consumed_chan]
     /\ watch_keys' = [watch_keys EXCEPT ![c] = {}]
+
     /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
+    /\ watch_local_info' = [watch_local_info EXCEPT ![c] = nil]
+
     /\ watch_log_index' = [watch_log_index EXCEPT ![c] = [k \in Key |-> 0]]
     /\ watch_seq' = [watch_seq EXCEPT ![c] = [k \in Key |-> 100]]
     /\ watch_state' = [watch_state EXCEPT ![c] = [k \in Key |-> nil]]
