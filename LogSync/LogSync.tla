@@ -10,7 +10,7 @@ VARIABLES pc, current_key, db,
     state, state_seq, next_log, next_seq, watch_list,
     watch_pc, watch_keys, watch_chan, watch_seq,
     watch_log_index, watch_state, watch_local_key,
-    num_client_restart
+    num_client_restart, num_main_restart
 
 main_vars == <<pc, current_key, db>>
 
@@ -19,14 +19,15 @@ watch_vars == <<watch_pc, watch_keys, watch_chan,
 
 server_vars == <<state, state_seq, next_log, next_seq, watch_list>>
 
-aux_vars == <<num_client_restart>>
+aux_vars == <<num_client_restart, num_main_restart>>
 
 vars == <<main_vars, server_vars, watch_vars, aux_vars>>
 
 
 max_log_size == 2
 
-max_client_restart == 2
+max_client_restart == 1
+max_main_restart == 1
 
 Status == {"Running", "Completed", "Gone"}
 
@@ -74,6 +75,7 @@ TypeOK ==
     /\ watch_local_key \in [WatchClient -> NullKey]
 
     /\ num_client_restart \in 0..max_client_restart
+    /\ num_main_restart \in 0..max_main_restart
 
 
 consumed_chan == [status |-> "Consumed", data |-> nil]
@@ -98,6 +100,7 @@ Init ==
     /\ watch_local_key = [c \in WatchClient |-> nil]
 
     /\ num_client_restart = 0
+    /\ num_main_restart = 0
 
 
 newJob == [logs |-> <<>>, status |-> "Running"]
@@ -105,7 +108,7 @@ newJob == [logs |-> <<>>, status |-> "Running"]
 
 AddDBJob(k) ==
     /\ pc = "Init"
-    /\ state[k] = nil
+    /\ db[k] = nil
     /\ pc' = "PushJob"
     /\ current_key' = k
     /\ db' = [db EXCEPT ![k] = newJob]
@@ -363,8 +366,6 @@ UpdateDB(c) ==
 ClientRestart(c) ==
     /\ num_client_restart < max_client_restart
     /\ num_client_restart' = num_client_restart + 1
-    /\ UNCHANGED server_vars
-    /\ UNCHANGED main_vars
     /\ watch_chan' = [watch_chan EXCEPT ![c] = consumed_chan]
     /\ watch_keys' = [watch_keys EXCEPT ![c] = {}]
     /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
@@ -372,10 +373,24 @@ ClientRestart(c) ==
     /\ watch_seq' = [watch_seq EXCEPT ![c] = [k \in Key |-> 100]]
     /\ watch_state' = [watch_state EXCEPT ![c] = [k \in Key |-> nil]]
     /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
+    /\ UNCHANGED server_vars
+    /\ UNCHANGED main_vars
+    /\ UNCHANGED <<num_main_restart>>
+
+
+MainRestart ==
+    /\ num_main_restart < max_main_restart
+    /\ num_main_restart' = num_main_restart + 1
+    /\ current_key' = nil
+    /\ pc' = "Init"
+    /\ UNCHANGED db
+    /\ UNCHANGED <<num_client_restart>>
+    /\ UNCHANGED server_vars
+    /\ UNCHANGED watch_vars
 
 
 TerminateCond ==
-    /\ \A k \in Key: db[k] # nil
+    /\ \A k \in Key: db[k] # nil /\ db[k].status = "Completed"
     /\ \A k \in Key: state[k] # nil /\ state[k].status = "Completed"
     /\ \A c \in WatchClient:
         /\ watch_pc[c] = "WaitOnChan"
@@ -402,6 +417,8 @@ Next ==
         \/ ConsumeWatchChan(c)
         \/ UpdateDB(c)
         \/ ClientRestart(c)
+
+    \/ MainRestart
 
     \/ Terminated
 
