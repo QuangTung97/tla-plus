@@ -144,11 +144,8 @@ pushToClientChan(k, c, old_watch_ch) ==
             key |-> k,
             line |-> nil]
         
-
-        push_log == last_index < state_index
-    
         new_event ==
-            IF push_log
+            IF last_index < state_index
                 THEN add_event
                 ELSE finish_event
         
@@ -156,7 +153,7 @@ pushToClientChan(k, c, old_watch_ch) ==
     IN
         /\ watch_chan' = [old_watch_ch EXCEPT ![c] = new_state]
         /\ watch_log_index' = [watch_log_index EXCEPT ![c][k] = last_index + 1]
-        /\ IF push_log
+        /\ IF last_index + 1 < state_index
             THEN UNCHANGED watch_seq
             ELSE watch_seq' = [watch_seq EXCEPT ![c][k] = state_seq[k]]
 
@@ -277,10 +274,14 @@ updateStateFromChan(c) ==
         log_line == watch_chan[c].data.line
     
         old_state == watch_state[c][k]
-        new_state ==
+
+        old_logs ==
             IF old_state = nil
-                THEN [logs |-> <<log_line>>, status |-> "Running"]
-                ELSE [old_state EXCEPT !.logs = Append(@, log_line)]
+                THEN <<>>
+                ELSE old_state.logs
+
+        new_state ==
+            [logs |-> Append(old_logs, log_line), status |-> "Running"]
 
         do_add_log ==
             /\ watch_state' = [
@@ -291,7 +292,7 @@ updateStateFromChan(c) ==
         do_complete ==
             /\ watch_state' = [
                     watch_state EXCEPT
-                        ![c][k] = [logs |-> <<>>, status |-> "Completed"]]
+                        ![c][k] = [logs |-> old_logs, status |-> "Completed"]]
             /\ watch_local_key' = [watch_local_key EXCEPT ![c] = k]
             /\ watch_pc' = [watch_pc EXCEPT ![c] = "UpdateDB"]
     IN
