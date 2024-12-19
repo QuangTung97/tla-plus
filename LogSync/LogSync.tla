@@ -138,8 +138,7 @@ PushJob ==
 canPushKeyToClient(k, c, old_watch_ch) ==
     /\ old_watch_ch[c].status = "Empty"
     /\ c \in wait_list'[k]
-    /\ \/ watch_seq[c][k] < state_seq'[k]
-       \/ state[k] = nil
+    /\ watch_seq[c][k] < state_seq'[k]
 
 pushToClientChan(k, c, old_watch_ch) ==
     LET
@@ -160,28 +159,19 @@ pushToClientChan(k, c, old_watch_ch) ==
 
         is_running == state'[k].status = "Running"
 
-        is_nil == state'[k] = nil
-
         add_log_cond == is_running \/ last_index < state_index
 
-        seq_cond_non_nil ==
+        update_seq_cond ==
             IF last_index = state_index
                 THEN TRUE
                 ELSE IF last_index + 1 = state_index /\ is_running
                     THEN TRUE
                     ELSE FALSE
-
-        update_seq_cond ==
-            IF is_nil
-                THEN TRUE
-                ELSE seq_cond_non_nil
         
         new_event ==
-            IF is_nil
-                THEN finish_event
-                ELSE IF add_log_cond
-                    THEN add_event
-                    ELSE finish_event
+            IF add_log_cond
+                THEN add_event
+                ELSE finish_event
         
         new_state == [status |-> "Ready", data |-> new_event]
     IN
@@ -297,11 +287,30 @@ updateServerWaitList(c) ==
 
 serverWatchClientKeys(c) == {k \in Key: c \in wait_list[k]}
 
+createPlaceHolderStateForWaitList ==
+    LET
+        in_wait_list(k) == wait_list'[k] # {}
+
+        update_state(k) == \* TODO
+            /\ in_wait_list(k)
+            /\ state[k] = nil
+            /\ updateStateSeq(k)
+            /\ state' = [state EXCEPT ![k] = [logs |-> <<>>, status |-> "Completed"]]
+
+        do_nothing ==
+            /\ \A k \in Key:
+                in_wait_list(k) => state[k] # nil
+            /\ UNCHANGED <<state, next_seq, state_seq>>
+    IN
+        \/ \E k \in Key: update_state(k)
+        \/ do_nothing
+
+
 AddToWaitList(c) ==
     /\ watch_keys[c] # serverWatchClientKeys(c)
     /\ updateServerWaitList(c)
 
-    /\ UNCHANGED <<state, next_seq, state_seq>>
+    /\ createPlaceHolderStateForWaitList
     /\ pushToClientOrDoNothing(c, watch_chan)
 
     /\ UNCHANGED <<watch_pc, watch_keys, watch_state, watch_local_key>>
