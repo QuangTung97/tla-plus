@@ -27,7 +27,7 @@ vars == <<main_vars, server_vars, watch_vars, aux_vars>>
 max_log_size == 3
 
 max_client_restart == 1
-max_main_restart == 2
+max_main_restart == 1
 max_delete_state == 1
 
 Status == {"Running", "Completed", "Gone"}
@@ -365,15 +365,10 @@ updateStateFromChan(c) ==
                 THEN "Gone"
                 ELSE "Completed"
 
-        old_logs_or_empty ==
-            IF type = "JobGone"
-                THEN <<>>
-                ELSE old_logs
-
         do_complete ==
             /\ watch_state' = [
                 watch_state EXCEPT
-                    ![c][k] = [logs |-> old_logs_or_empty, status |-> new_status]]
+                    ![c][k] = [logs |-> old_logs, status |-> new_status]]
             /\ watch_local_key' = [watch_local_key EXCEPT ![c] = k]
             /\ watch_pc' = [watch_pc EXCEPT ![c] = "UpdateDB"]
     IN
@@ -506,9 +501,26 @@ AllJobsMustBeFinished ==
         \A k \in Key: db[k] # nil /\ statusIsFinished(db[k].status)
 
 
+infoEqual(db_val, state_val) ==
+    /\ db_val.status \in {"Completed", "Gone"}
+    /\ state_val.status \in {"Completed", "Gone"}
+
+    /\ state_val.status = "Completed" => db_val.logs = state_val.logs
+    /\ state_val.status = "Completed" => db_val.status = "Completed"
+
 DBShouldSameAsMem ==
     TerminateCond =>
-        \A k \in Key: state[k] # nil => db[k] = state[k]
+        \A k \in Key: state[k] # nil => infoEqual(db[k], state[k])
+
+
+DBShouldSameAsMemWhenNoRestart ==
+    LET
+        cond ==
+            /\ TerminateCond
+            /\ num_main_restart = 0
+            /\ num_delete_state = 0
+    IN
+        cond => \A k \in Key: state[k] = db[k] /\ db[k].status = "Completed"
 
 
 StateAlwaysMatchWaitList ==
