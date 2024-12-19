@@ -10,7 +10,7 @@ VARIABLES pc, current_key, db,
     state, state_seq, next_log, next_seq, wait_list,
     watch_pc, watch_keys, watch_chan, watch_seq,
     watch_log_index, watch_state, watch_local_key,
-    num_client_restart, num_main_restart
+    num_client_restart, num_main_restart, num_delete_state
 
 main_vars == <<pc, current_key, db>>
 
@@ -19,7 +19,7 @@ watch_vars == <<watch_pc, watch_keys, watch_chan,
 
 server_vars == <<state, state_seq, next_log, next_seq, wait_list>>
 
-aux_vars == <<num_client_restart, num_main_restart>>
+aux_vars == <<num_client_restart, num_main_restart, num_delete_state>>
 
 vars == <<main_vars, server_vars, watch_vars, aux_vars>>
 
@@ -28,6 +28,7 @@ max_log_size == 3
 
 max_client_restart == 1
 max_main_restart == 2
+max_delete_state == 1
 
 Status == {"Running", "Completed", "Gone"}
 
@@ -44,7 +45,7 @@ NullKey == Key \union {nil}
 NullLogEntry == LogEntry \union {nil}
 
 Event == [
-    type: {"AddLog", "Finished"},
+    type: {"AddLog", "Finished", "JobGone"},
     key: Key, line: NullLogEntry]
 
 NullEvent == Event \union {nil}
@@ -53,7 +54,7 @@ Channel == [status: {"Empty", "Ready", "Consumed"}, data: NullEvent]
 
 StateSeq == 100..120
 
-WatchState == {"Init", "AddToWaitList", "WaitOnChan", "UpdateDB", "ClearWatchKey"}
+WatchState == {"Init", "AddToWaitList", "WaitOnChan", "UpdateDB"}
 
 TypeOK ==
     /\ pc \in {"Init", "PushJob"}
@@ -76,6 +77,7 @@ TypeOK ==
 
     /\ num_client_restart \in 0..max_client_restart
     /\ num_main_restart \in 0..max_main_restart
+    /\ num_delete_state \in 0..max_delete_state
 
 
 consumed_chan == [status |-> "Consumed", data |-> nil]
@@ -101,6 +103,7 @@ Init ==
 
     /\ num_client_restart = 0
     /\ num_main_restart = 0
+    /\ num_delete_state = 0
 
 
 newJob == [logs |-> <<>>, status |-> "Running"]
@@ -151,9 +154,14 @@ pushToClientChan(k, c, old_watch_ch) ==
             type |-> "AddLog",
             key |-> k,
             line |-> new_line]
+
+        finished_or_gone ==
+            IF state'[k].status = "Gone"
+                THEN "JobGone"
+                ELSE "Finished"
         
         finish_event == [
-            type |-> "Finished",
+            type |-> finished_or_gone,
             key |-> k,
             line |-> nil]
 
@@ -296,7 +304,7 @@ createPlaceHolderStateForWaitList ==
 
         new_state_fn(k) ==
             IF k \in keysWithNilState
-                THEN [logs |-> <<>>, status |-> "Completed"]
+                THEN [logs |-> <<>>, status |-> "Gone"]
                 ELSE state[k]
 
         new_seq_fn(k) ==
@@ -352,10 +360,20 @@ updateStateFromChan(c) ==
             /\ UNCHANGED watch_local_key
             /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
 
+        new_status ==
+            IF type = "JobGone"
+                THEN "Gone"
+                ELSE "Completed"
+
+        old_logs_or_empty ==
+            IF type = "JobGone"
+                THEN <<>>
+                ELSE old_logs
+
         do_complete ==
             /\ watch_state' = [
-                    watch_state EXCEPT
-                        ![c][k] = [logs |-> old_logs, status |-> "Completed"]]
+                watch_state EXCEPT
+                    ![c][k] = [logs |-> old_logs_or_empty, status |-> new_status]]
             /\ watch_local_key' = [watch_local_key EXCEPT ![c] = k]
             /\ watch_pc' = [watch_pc EXCEPT ![c] = "UpdateDB"]
     IN
@@ -385,28 +403,13 @@ UpdateDB(c) ==
         k == watch_local_key[c]
     IN
         /\ watch_pc[c] = "UpdateDB"
-        /\ watch_pc' = [watch_pc EXCEPT ![c] = "ClearWatchKey"]
+        /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
         /\ db' = [db EXCEPT ![k] = watch_state[c][k]]
-        /\ UNCHANGED watch_local_key
+        /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
         /\ UNCHANGED <<watch_keys, watch_chan, watch_seq>>
         /\ UNCHANGED <<watch_log_index, watch_state>>
         /\ UNCHANGED server_vars
         /\ UNCHANGED <<pc, current_key>>
-        /\ UNCHANGED aux_vars
-
-
-ClearWatchKey(c) ==
-    LET
-        k == watch_local_key[c]
-    IN
-        /\ watch_pc[c] = "ClearWatchKey"
-        /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
-        /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
-        /\ watch_keys' = [watch_keys EXCEPT ![c] = @ \ {k}]
-        /\ UNCHANGED <<watch_chan, watch_seq>>
-        /\ UNCHANGED <<watch_log_index, watch_state>>
-        /\ UNCHANGED server_vars
-        /\ UNCHANGED main_vars
         /\ UNCHANGED aux_vars
 
 
@@ -422,7 +425,7 @@ ClientRestart(c) ==
     /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
     /\ UNCHANGED server_vars
     /\ UNCHANGED main_vars
-    /\ UNCHANGED <<num_main_restart>>
+    /\ UNCHANGED <<num_main_restart, num_delete_state>>
 
 
 MainRestart ==
@@ -431,14 +434,34 @@ MainRestart ==
     /\ current_key' = nil
     /\ pc' = "Init"
     /\ UNCHANGED db
-    /\ UNCHANGED <<num_client_restart>>
+    /\ UNCHANGED <<num_client_restart, num_delete_state>>
     /\ UNCHANGED server_vars
     /\ UNCHANGED watch_vars
 
 
+DeleteRandomKeyInState(k) ==
+    /\ num_delete_state < max_delete_state
+    /\ num_delete_state' = num_delete_state + 1
+    /\ state[k] # nil
+
+    /\ state' = [state EXCEPT ![k] = nil]
+    /\ state_seq' = [state_seq EXCEPT ![k] = 100]
+    /\ wait_list' = [wait_list EXCEPT ![k] = {}]
+
+    /\ UNCHANGED <<next_log, next_seq>>
+    /\ UNCHANGED <<num_client_restart, num_main_restart>>
+    /\ UNCHANGED main_vars
+    /\ UNCHANGED watch_vars
+
+
+
+statusIsFinished(st) ==
+    \/ st = "Completed"
+    \/ st = "Gone"
+
 TerminateCond ==
-    /\ \A k \in Key: db[k] # nil /\ db[k].status = "Completed"
-    /\ \A k \in Key: state[k] # nil => state[k].status = "Completed"
+    /\ \A k \in Key: db[k] # nil /\ statusIsFinished(db[k].status)
+    /\ \A k \in Key: state[k] # nil => statusIsFinished(state[k].status)
     /\ \A c \in WatchClient:
         /\ watch_pc[c] = "WaitOnChan"
         /\ watch_keys[c] = active_keys
@@ -455,6 +478,7 @@ Next ==
         \/ AddDBJob(k)
         \/ ProduceLog(k)
         \/ FinishJob(k)
+        \/ DeleteRandomKeyInState(k)
     \/ PushJob
 
     \/ \E c \in WatchClient:
@@ -463,7 +487,6 @@ Next ==
         \/ AddToWaitList(c)
         \/ ConsumeWatchChan(c)
         \/ UpdateDB(c)
-        \/ ClearWatchKey(c)
         \/ ClientRestart(c)
 
     \/ MainRestart
@@ -480,12 +503,12 @@ AlwaysTerminate == <> TerminateCond
 
 AllJobsMustBeFinished ==
     TerminateCond =>
-        \A k \in Key: db[k] # nil /\ db[k].status = "Completed"
+        \A k \in Key: db[k] # nil /\ statusIsFinished(db[k].status)
 
 
 DBShouldSameAsMem ==
     TerminateCond =>
-        \A k \in Key: db[k] = state[k]
+        \A k \in Key: state[k] # nil => db[k] = state[k]
 
 
 StateAlwaysMatchWaitList ==
