@@ -7,7 +7,7 @@ CONSTANTS Key, WatchClient, nil
 \* db is the same data but on the db
 \* watch_chan is the receive channel for client
 VARIABLES pc, current_key, db, 
-    state, state_seq, next_log, next_seq, watch_list,
+    state, state_seq, next_log, next_seq, wait_list,
     watch_pc, watch_keys, watch_chan, watch_seq,
     watch_log_index, watch_state, watch_local_key,
     num_client_restart, num_main_restart
@@ -17,7 +17,7 @@ main_vars == <<pc, current_key, db>>
 watch_vars == <<watch_pc, watch_keys, watch_chan,
     watch_seq, watch_log_index, watch_state, watch_local_key>>
 
-server_vars == <<state, state_seq, next_log, next_seq, watch_list>>
+server_vars == <<state, state_seq, next_log, next_seq, wait_list>>
 
 aux_vars == <<num_client_restart, num_main_restart>>
 
@@ -64,7 +64,7 @@ TypeOK ==
     /\ state_seq \in [Key -> StateSeq]
     /\ next_log \in LogEntry
     /\ next_seq \in StateSeq
-    /\ watch_list \in [Key -> SUBSET WatchClient]
+    /\ wait_list \in [Key -> SUBSET WatchClient]
 
     /\ watch_pc \in [WatchClient -> WatchState]
     /\ watch_keys \in [WatchClient -> SUBSET Key]
@@ -88,7 +88,7 @@ Init ==
     /\ state = [k \in Key |-> nil]
     /\ state_seq = [k \in Key |-> 100]
     /\ next_log = 20
-    /\ watch_list = [k \in Key |-> {}]
+    /\ wait_list = [k \in Key |-> {}]
     /\ next_seq = 100
 
     /\ watch_pc = [c \in WatchClient |-> "Init"]
@@ -128,7 +128,7 @@ PushJob ==
     /\ current_key' = nil
     /\ state' = [state EXCEPT ![current_key] = db[current_key]]
     /\ UNCHANGED <<next_seq, state_seq>>
-    /\ UNCHANGED watch_list
+    /\ UNCHANGED wait_list
     /\ UNCHANGED db
     /\ UNCHANGED next_log
     /\ UNCHANGED watch_vars
@@ -137,8 +137,9 @@ PushJob ==
 
 canPushKeyToClient(k, c, old_watch_ch) ==
     /\ old_watch_ch[c].status = "Empty"
-    /\ c \in watch_list'[k]
-    /\ watch_seq[c][k] < state_seq'[k]
+    /\ c \in wait_list'[k]
+    /\ \/ watch_seq[c][k] < state_seq'[k]
+       \/ state[k] = nil
 
 pushToClientChan(k, c, old_watch_ch) ==
     LET
@@ -159,19 +160,28 @@ pushToClientChan(k, c, old_watch_ch) ==
 
         is_running == state'[k].status = "Running"
 
+        is_nil == state'[k] = nil
+
         add_log_cond == is_running \/ last_index < state_index
 
-        update_seq_cond ==
+        seq_cond_non_nil ==
             IF last_index = state_index
                 THEN TRUE
                 ELSE IF last_index + 1 = state_index /\ is_running
                     THEN TRUE
                     ELSE FALSE
+
+        update_seq_cond ==
+            IF is_nil
+                THEN TRUE
+                ELSE seq_cond_non_nil
         
         new_event ==
-            IF add_log_cond
-                THEN add_event
-                ELSE finish_event
+            IF is_nil
+                THEN finish_event
+                ELSE IF add_log_cond
+                    THEN add_event
+                    ELSE finish_event
         
         new_state == [status |-> "Ready", data |-> new_event]
     IN
@@ -218,7 +228,7 @@ ProduceLog(k) ==
 
     /\ updateStateSeq(k)
 
-    /\ UNCHANGED watch_list
+    /\ UNCHANGED wait_list
     /\ pushKeyOrDoNothing(k)
 
     /\ UNCHANGED main_vars
@@ -232,7 +242,7 @@ FinishJob(k) ==
     /\ state' = [state EXCEPT ![k].status = "Completed"]
     /\ updateStateSeq(k)
 
-    /\ UNCHANGED watch_list
+    /\ UNCHANGED wait_list
     /\ pushKeyOrDoNothing(k)
 
     /\ UNCHANGED next_log
@@ -258,7 +268,11 @@ NewWatchChan(c) ==
         /\ UNCHANGED aux_vars
 
 
-active_keys == {k \in Key: db[k] # nil /\ db[k].status = "Running"}
+active_keys ==
+    LET
+        db_set == {k \in Key: db[k] # nil /\ db[k].status = "Running"}
+    IN
+        db_set \ {current_key}
 
 UpdateWatchKeys(c) ==
     /\ watch_keys[c] # active_keys
@@ -270,22 +284,22 @@ UpdateWatchKeys(c) ==
     /\ UNCHANGED aux_vars
 
 
-updateServerWatchList(c) ==
+updateServerWaitList(c) ==
     LET
-        old_set(k) == watch_list[k]
+        old_set(k) == wait_list[k]
         new_set(k) ==
             IF k \in watch_keys[c]
                 THEN old_set(k) \union {c}
                 ELSE old_set(k) \ {c}
     IN
-        watch_list' = [k \in Key |-> new_set(k)]
+        wait_list' = [k \in Key |-> new_set(k)]
 
 
-serverWatchClientKeys(c) == {k \in Key: c \in watch_list[k]}
+serverWatchClientKeys(c) == {k \in Key: c \in wait_list[k]}
 
 AddToWaitList(c) ==
     /\ watch_keys[c] # serverWatchClientKeys(c)
-    /\ updateServerWatchList(c)
+    /\ updateServerWaitList(c)
 
     /\ UNCHANGED <<state, next_seq, state_seq>>
     /\ pushToClientOrDoNothing(c, watch_chan)
@@ -391,7 +405,7 @@ MainRestart ==
 
 TerminateCond ==
     /\ \A k \in Key: db[k] # nil /\ db[k].status = "Completed"
-    /\ \A k \in Key: state[k] # nil /\ state[k].status = "Completed"
+    /\ \A k \in Key: state[k] # nil => state[k].status = "Completed"
     /\ \A c \in WatchClient:
         /\ watch_pc[c] = "WaitOnChan"
         /\ watch_keys[c] = active_keys
@@ -437,7 +451,7 @@ AllJobsMustBeFinished ==
 
 DBShouldSameAsMem ==
     TerminateCond =>
-        \A k \in Key: db[k] = state[k]
+        \A k \in Key: state[k] # nil => db[k] = state[k]
 
 
 channelInitByClient(c) ==
