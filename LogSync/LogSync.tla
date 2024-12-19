@@ -53,7 +53,7 @@ Channel == [status: {"Empty", "Ready", "Consumed"}, data: NullEvent]
 
 StateSeq == 100..120
 
-WatchState == {"Init", "AddToWaitList", "WaitOnChan", "UpdateDB"}
+WatchState == {"Init", "AddToWaitList", "WaitOnChan", "UpdateDB", "ClearWatchKey"}
 
 TypeOK ==
     /\ pc \in {"Init", "PushJob"}
@@ -365,15 +365,28 @@ UpdateDB(c) ==
         k == watch_local_key[c]
     IN
         /\ watch_pc[c] = "UpdateDB"
-        /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
-
+        /\ watch_pc' = [watch_pc EXCEPT ![c] = "ClearWatchKey"]
         /\ db' = [db EXCEPT ![k] = watch_state[c][k]]
-        /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
-
+        /\ UNCHANGED watch_local_key
         /\ UNCHANGED <<watch_keys, watch_chan, watch_seq>>
         /\ UNCHANGED <<watch_log_index, watch_state>>
         /\ UNCHANGED server_vars
         /\ UNCHANGED <<pc, current_key>>
+        /\ UNCHANGED aux_vars
+
+
+ClearWatchKey(c) ==
+    LET
+        k == watch_local_key[c]
+    IN
+        /\ watch_pc[c] = "ClearWatchKey"
+        /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
+        /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
+        /\ watch_keys' = [watch_keys EXCEPT ![c] = @ \ {k}]
+        /\ UNCHANGED <<watch_chan, watch_seq>>
+        /\ UNCHANGED <<watch_log_index, watch_state>>
+        /\ UNCHANGED server_vars
+        /\ UNCHANGED main_vars
         /\ UNCHANGED aux_vars
 
 
@@ -430,6 +443,7 @@ Next ==
         \/ AddToWaitList(c)
         \/ ConsumeWatchChan(c)
         \/ UpdateDB(c)
+        \/ ClearWatchKey(c)
         \/ ClientRestart(c)
 
     \/ MainRestart
