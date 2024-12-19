@@ -21,7 +21,7 @@ server_vars == <<state, state_seq, next_log, next_seq, watch_list>>
 vars == <<main_vars, server_vars, watch_vars>>
 
 
-max_log_size == 3
+max_log_size == 2
 
 Status == {"Running", "Completed", "Gone"}
 
@@ -389,5 +389,8 @@ AllJobsMustBeFinished ==
 DBShouldSameAsMem ==
     TerminateCond =>
         \A k \in Key: db[k] = state[k]
+
+
+Sym == Permutations(Key)
 
 ====
