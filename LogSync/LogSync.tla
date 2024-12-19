@@ -115,13 +115,21 @@ new_chan == [status |-> "Empty", data |-> nil]
 
 NewWatchChan(c) ==
     /\ watch_pc[c] = "Init"
-    /\ watch_pc' = [watch_pc EXCEPT ![c] = "AddToWaitList"]
+    /\ watch_pc' = [watch_pc EXCEPT ![c] = "WaitOnChan"]
     /\ watch_chan' = [watch_pc EXCEPT ![c] = new_chan]
     /\ UNCHANGED watch_keys
     /\ UNCHANGED main_vars
     /\ UNCHANGED server_vars
 
 
+active_keys == {k \in Key: db[k] # nil /\ db[k].status = "Running"}
+
+UpdateWatchKeys(c) ==
+    /\ watch_keys[c] # active_keys
+    /\ watch_keys' = [watch_keys EXCEPT ![c] = active_keys]
+    /\ UNCHANGED <<watch_pc, watch_chan>>
+    /\ UNCHANGED main_vars
+    /\ UNCHANGED server_vars
 
 addClientToWatchList(c) ==
     LET
@@ -133,20 +141,25 @@ addClientToWatchList(c) ==
     IN
         watch_list' = [k \in Key |-> new_set(k)]
 
+
+serverWatchClientKeys(c) == {k \in Key: c \in watch_list[k]}
+
 AddToWaitList(c) ==
-    /\ watch_pc[c] = "AddToWaitList"
-    /\ watch_pc' = [watch_pc EXCEPT ![c] = "WaitOnChan"]
+    /\ watch_keys[c] # serverWatchClientKeys(c)
     /\ addClientToWatchList(c)
     /\ UNCHANGED state
-    /\ UNCHANGED <<watch_chan, watch_keys>>
+    /\ UNCHANGED <<watch_pc, watch_chan, watch_keys>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED next_log
 
 
 TerminateCond ==
     /\ \A k \in Key: db[k] # nil
-    /\ \A k \in Key: state[k] # nil => state[k].status = "Completed"
-    /\ \A c \in WatchClient: watch_pc[c] = "WaitOnChan"
+    /\ \A k \in Key: state[k] # nil /\ state[k].status = "Completed"
+    /\ \A c \in WatchClient:
+        /\ watch_pc[c] = "WaitOnChan"
+        /\ watch_keys[c] = active_keys
+        /\ watch_keys[c] = serverWatchClientKeys(c)
 
 Terminated ==
     /\ TerminateCond
@@ -162,6 +175,7 @@ Next ==
 
     \/ \E c \in WatchClient:
         \/ NewWatchChan(c)
+        \/ UpdateWatchKeys(c)
         \/ AddToWaitList(c)
 
     \/ Terminated
