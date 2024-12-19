@@ -493,6 +493,11 @@ StateAlwaysMatchWaitList ==
         wait_list[k] # {} => state[k] # nil
 
 
+StateAlwaysMatchSeq ==
+    \A k \in Key:
+        state[k] = nil => state_seq[k] = 100
+
+
 channelInitByClient(c) ==
     /\ watch_chan[c].status = "Consumed"
     /\ watch_chan[c].data = nil
