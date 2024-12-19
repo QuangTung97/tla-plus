@@ -291,19 +291,30 @@ createPlaceHolderStateForWaitList ==
     LET
         in_wait_list(k) == wait_list'[k] # {}
 
-        update_state(k) == \* TODO
-            /\ in_wait_list(k)
-            /\ state[k] = nil
-            /\ updateStateSeq(k)
-            /\ state' = [state EXCEPT ![k] = [logs |-> <<>>, status |-> "Completed"]]
+        keysWithNilState ==
+            {k \in Key: in_wait_list(k) /\ state[k] = nil}
+
+        new_state_fn(k) ==
+            IF k \in keysWithNilState
+                THEN [logs |-> <<>>, status |-> "Completed"]
+                ELSE state[k]
+
+        new_seq_fn(k) ==
+            IF k \in keysWithNilState
+                THEN next_seq'
+                ELSE state_seq[k]
+
+        update_state ==
+            /\ next_seq' = next_seq + 1
+            /\ state' = [k \in Key |-> new_state_fn(k)]
+            /\ state_seq' = [k \in Key |-> new_seq_fn(k)]
 
         do_nothing ==
-            /\ \A k \in Key:
-                in_wait_list(k) => state[k] # nil
-            /\ UNCHANGED <<state, next_seq, state_seq>>
+            UNCHANGED <<state, next_seq, state_seq>>
     IN
-        \/ \E k \in Key: update_state(k)
-        \/ do_nothing
+        IF keysWithNilState # {}
+            THEN update_state
+            ELSE do_nothing
 
 
 AddToWaitList(c) ==
@@ -474,7 +485,12 @@ AllJobsMustBeFinished ==
 
 DBShouldSameAsMem ==
     TerminateCond =>
-        \A k \in Key: state[k] # nil => db[k] = state[k]
+        \A k \in Key: db[k] = state[k]
+
+
+StateAlwaysMatchWaitList ==
+    \A k \in Key:
+        wait_list[k] # {} => state[k] # nil
 
 
 channelInitByClient(c) ==
