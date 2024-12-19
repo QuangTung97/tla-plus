@@ -28,7 +28,7 @@ max_log_size == 3
 
 max_client_restart == 1
 max_main_restart == 1
-max_delete_state == 1
+max_delete_state == 2
 
 Status == {"Running", "Completed", "Gone"}
 
@@ -165,7 +165,7 @@ pushToClientChan(k, c, old_watch_ch) ==
 
         is_running == state'[k].status = "Running"
 
-        add_log_cond == is_running \/ last_index < state_index
+        add_log_cond == last_index < state_index
 
         update_seq_cond ==
             IF last_index >= state_index
@@ -270,10 +270,16 @@ active_keys ==
     IN
         db_set \ {current_key}
 
+
+clearWatchStateKeyNotInSet(c, set) ==
+    [k \in Key |-> IF k \in set THEN watch_state[c][k] ELSE nil]
+
 UpdateWatchKeys(c) ==
     /\ watch_keys[c] # active_keys
     /\ watch_keys' = [watch_keys EXCEPT ![c] = active_keys]
-    /\ UNCHANGED <<watch_pc, watch_chan, watch_seq, watch_log_index, watch_state>>
+    /\ watch_state' = [watch_state EXCEPT
+            ![c] = clearWatchStateKeyNotInSet(c, active_keys)]
+    /\ UNCHANGED <<watch_pc, watch_chan, watch_seq, watch_log_index>>
     /\ UNCHANGED watch_local_key
     /\ UNCHANGED main_vars
     /\ UNCHANGED server_vars
@@ -369,10 +375,17 @@ updateStateFromChan(c) ==
                     ![c][k] = [logs |-> old_logs, status |-> new_status]]
             /\ watch_local_key' = [watch_local_key EXCEPT ![c] = k]
             /\ watch_pc' = [watch_pc EXCEPT ![c] = "UpdateDB"]
+
+        do_nothing ==
+            /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
+            /\ UNCHANGED watch_state
+            /\ UNCHANGED watch_local_key
     IN
-        IF type = "AddLog"
-            THEN do_add_log
-            ELSE do_complete
+        IF k \in watch_keys[c]
+            THEN IF type = "AddLog"
+                THEN do_add_log
+                ELSE do_complete
+            ELSE do_nothing
 
 ConsumeWatchChan(c) ==
     /\ watch_pc[c] = "WaitOnChan"
@@ -406,6 +419,10 @@ UpdateDB(c) ==
         /\ UNCHANGED aux_vars
 
 
+removeClientFromWaitList(k, c) ==
+    wait_list[k] \ {c}
+
+
 ClientRestart(c) ==
     /\ num_client_restart < max_client_restart
     /\ num_client_restart' = num_client_restart + 1
@@ -416,7 +433,8 @@ ClientRestart(c) ==
     /\ watch_seq' = [watch_seq EXCEPT ![c] = [k \in Key |-> 100]]
     /\ watch_state' = [watch_state EXCEPT ![c] = [k \in Key |-> nil]]
     /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
-    /\ UNCHANGED server_vars
+    /\ wait_list' = [k \in Key |-> removeClientFromWaitList(k, c)]
+    /\ UNCHANGED <<state, state_seq, next_log, next_seq>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED <<num_main_restart, num_delete_state>>
 
@@ -529,6 +547,11 @@ StateAlwaysMatchWaitList ==
 StateAlwaysMatchSeq ==
     \A k \in Key:
         state[k] = nil => state_seq[k] = 100
+
+
+WatchKeysMatchWatchState ==
+    \A c \in WatchClient, k \in Key:
+            ~(k \in watch_keys[c]) => watch_state[c][k] = nil
 
 
 channelInitByClient(c) ==
