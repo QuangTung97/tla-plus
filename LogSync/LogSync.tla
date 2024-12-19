@@ -143,9 +143,20 @@ pushToClientChan(k, c, old_watch_ch) ==
             type |-> "Finished",
             key |-> k,
             line |-> nil]
+
+        is_running == state'[k].status = "Running"
+
+        add_log_cond == is_running \/ last_index < state_index
+
+        update_seq_cond ==
+            IF last_index = state_index
+                THEN TRUE
+                ELSE IF last_index + 1 = state_index /\ is_running
+                    THEN TRUE
+                    ELSE FALSE
         
         new_event ==
-            IF last_index < state_index
+            IF add_log_cond
                 THEN add_event
                 ELSE finish_event
         
@@ -153,9 +164,9 @@ pushToClientChan(k, c, old_watch_ch) ==
     IN
         /\ watch_chan' = [old_watch_ch EXCEPT ![c] = new_state]
         /\ watch_log_index' = [watch_log_index EXCEPT ![c][k] = last_index + 1]
-        /\ IF last_index + 1 < state_index
-            THEN UNCHANGED watch_seq
-            ELSE watch_seq' = [watch_seq EXCEPT ![c][k] = state_seq[k]]
+        /\ IF update_seq_cond
+            THEN watch_seq' = [watch_seq EXCEPT ![c][k] = state_seq'[k]]
+            ELSE UNCHANGED watch_seq
 
 
 pushToClientOrDoNothing(c, old_watch_ch) ==
