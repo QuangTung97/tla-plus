@@ -391,11 +391,13 @@ DBShouldSameAsMem ==
         \A k \in Key: db[k] = state[k]
 
 
-channelInit(c) ==
+channelInitByClient(c) ==
     /\ watch_chan[c].status = "Consumed"
     /\ watch_chan[c].data = nil
 
-channelNextActions(c) ==
+channelInit == \A c \in WatchClient: channelInitByClient(c)
+
+channelNextByClient(c) ==
     \/ /\ watch_chan[c].status = "Empty"
        /\ watch_chan'[c].status = "Ready"
        /\ watch_chan'[c].data # nil
@@ -412,9 +414,10 @@ channelNextActions(c) ==
        /\ watch_chan'[c].status = "Consumed"
        /\ watch_chan'[c].data = nil
 
+channelNextActions == \E c \in WatchClient: channelNextByClient(c)
+
 ChannelSpec ==
-    \A c \in WatchClient:
-        channelInit(c) /\ [][channelNextActions(c)]_watch_chan
+    channelInit /\ [][channelNextActions]_watch_chan
 
 
 Sym == Permutations(Key)
