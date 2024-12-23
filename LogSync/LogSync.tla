@@ -371,6 +371,20 @@ createPlaceHolderStateForWaitList ==
             ELSE do_nothing
 
 
+removeSeqLogIndexNotInWaitList(c) ==
+    LET
+        old_info == watch_info[c]
+
+        in_list(k) == wait_list'[k] # {}
+
+        new_seq ==
+            [k \in Key |-> IF in_list(k) THEN old_info.seq[k] ELSE 100]
+
+        new_log_index ==
+            [k \in Key |-> IF in_list(k) THEN old_info.log_index[k] ELSE 0]
+    IN
+        [old_info EXCEPT !.seq = new_seq, !.log_index = new_log_index]
+
 AddToWaitList(c) ==
     /\ watch_key_pc[c] = "SetWaitList"
     /\ watch_keys[c] # serverWatchClientKeys(c)
@@ -379,7 +393,10 @@ AddToWaitList(c) ==
     /\ updateServerWaitList(c)
 
     /\ createPlaceHolderStateForWaitList
-    /\ pushToClientOrDoNothing(c, watch_info[c])
+    /\ LET
+            new_info == removeSeqLogIndexNotInWaitList(c)
+        IN
+            pushToClientOrDoNothing(c, new_info)
 
     /\ UNCHANGED <<watch_keys>>
     /\ UNCHANGED watch_local_vars
