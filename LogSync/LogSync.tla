@@ -10,9 +10,8 @@ VARIABLES pc, current_key, db,
     state, state_seq, next_log, next_seq, wait_list,
     watch_pc,
     watch_keys, watch_key_pc,
-    watch_chan, watch_seq,
-    watch_log_index, watch_state,
-    watch_local_key, watch_local_info,
+    watch_info,
+    watch_state, watch_local_key, watch_local_info,
     num_client_restart, num_main_restart, num_delete_state
 
 main_vars == <<pc, current_key, db>>
@@ -23,7 +22,7 @@ watch_local_vars == <<
 
 watch_key_vars == <<watch_keys, watch_key_pc>>
 
-watch_remove_vars == <<watch_chan, watch_seq, watch_log_index>>
+watch_remove_vars == <<watch_info>>
 
 watch_vars == <<watch_local_vars, watch_key_vars, watch_remove_vars>>
 
@@ -67,6 +66,12 @@ StateSeq == 100..120
 
 WatchState == {"Init", "AddToWaitList", "WaitOnChan", "UpdateDB"}
 
+WatchInfo == [
+    chan: Channel,
+    seq: [Key -> StateSeq],
+    log_index: [Key -> Nat]
+]
+
 TypeOK ==
     /\ pc \in {"Init", "PushJob"}
     /\ current_key \in NullKey
@@ -81,9 +86,7 @@ TypeOK ==
     /\ watch_pc \in [WatchClient -> WatchState]
     /\ watch_keys \in [WatchClient -> SUBSET Key]
     /\ watch_key_pc \in [WatchClient -> {"Init", "SetWaitList"}]
-    /\ watch_chan \in [WatchClient -> Channel]
-    /\ watch_seq \in [WatchClient -> [Key -> StateSeq]]
-    /\ watch_log_index \in [WatchClient -> [Key -> Nat]]
+    /\ watch_info \in [WatchClient -> WatchInfo]
     /\ watch_state \in [WatchClient -> [Key -> NullInfo]]
     /\ watch_local_key \in [WatchClient -> NullKey]
     /\ watch_local_info \in [WatchClient -> NullInfo]
@@ -94,6 +97,12 @@ TypeOK ==
 
 
 consumed_chan == [status |-> "Consumed", data |-> nil]
+
+init_info == [
+    chan |-> consumed_chan,
+    seq |-> [k \in Key |-> 100],
+    log_index |-> [k \in Key |-> 0]
+]
 
 Init ==
     /\ pc = "Init"
@@ -109,9 +118,7 @@ Init ==
     /\ watch_pc = [c \in WatchClient |-> "Init"]
     /\ watch_keys = [c \in WatchClient |-> {}]
     /\ watch_key_pc = [c \in WatchClient |-> "Init"]
-    /\ watch_chan = [c \in WatchClient |-> consumed_chan]
-    /\ watch_seq = [c \in WatchClient |-> [k \in Key|-> 100]]
-    /\ watch_log_index = [c \in WatchClient |-> [k \in Key |-> 0]]
+    /\ watch_info = [c \in WatchClient |-> init_info]
     /\ watch_state = [c \in WatchClient |-> [k \in Key |-> nil]]
     /\ watch_local_key = [c \in WatchClient |-> nil]
     /\ watch_local_info = [c \in WatchClient |-> nil]
@@ -153,14 +160,14 @@ PushJob ==
     /\ UNCHANGED aux_vars
 
 
-canPushKeyToClient(k, c, old_watch_ch) ==
-    /\ old_watch_ch[c].status = "Empty"
+canPushKeyToClient(k, c, old_info) ==
+    /\ old_info.chan.status = "Empty"
     /\ c \in wait_list'[k]
-    /\ watch_seq[c][k] < state_seq'[k]
+    /\ old_info.seq[k] < state_seq'[k]
 
-pushToClientChan(k, c, old_watch_ch) ==
+pushToClientChan(k, c, old_info) ==
     LET
-        last_index == watch_log_index[c][k]
+        last_index == old_info.log_index[k]
         state_index == Len(state'[k].logs)
 
         new_line == state'[k].logs[last_index + 1]
@@ -196,25 +203,34 @@ pushToClientChan(k, c, old_watch_ch) ==
                 THEN add_event
                 ELSE finish_event
         
-        new_state == [status |-> "Ready", data |-> new_event]
+        new_chan == [status |-> "Ready", data |-> new_event]
+
+        new_log_index == [old_info.log_index EXCEPT ![k] = last_index + 1]
+
+        new_seq == [
+            old_info.seq EXCEPT ![k] =
+                IF update_seq_cond
+                    THEN state_seq'[k]
+                    ELSE old_info.seq[k]
+            ]
+
+        new_info == [
+            chan |-> new_chan,
+            seq |-> new_seq,
+            log_index |-> new_log_index]
     IN
-        /\ watch_chan' = [old_watch_ch EXCEPT ![c] = new_state]
-        /\ watch_log_index' = [watch_log_index EXCEPT ![c][k] = last_index + 1]
-        /\ IF update_seq_cond
-            THEN watch_seq' = [watch_seq EXCEPT ![c][k] = state_seq'[k]]
-            ELSE UNCHANGED watch_seq
+        watch_info' = [watch_info EXCEPT ![c] = new_info]
 
 
-pushToClientOrDoNothing(c, old_watch_ch) ==
+pushToClientOrDoNothing(c, old_info) ==
     LET
         doNothing ==
-            /\ \A k \in Key: ~canPushKeyToClient(k, c, old_watch_ch)
-            /\ watch_chan' = old_watch_ch
-            /\ UNCHANGED <<watch_seq, watch_log_index>>
+            /\ \A k \in Key: ~canPushKeyToClient(k, c, old_info)
+            /\ watch_info' = [watch_info EXCEPT ![c] = old_info]
     IN
     \/ \E k \in Key:
-        /\ canPushKeyToClient(k, c, old_watch_ch)
-        /\ pushToClientChan(k, c, old_watch_ch)
+        /\ canPushKeyToClient(k, c, old_info)
+        /\ pushToClientChan(k, c, old_info)
     \/ doNothing
 
 
@@ -222,12 +238,12 @@ pushKeyOrDoNothing(k) ==
     LET
         doPush ==
             \E c \in WatchClient:
-                /\ canPushKeyToClient(k, c, watch_chan)
-                /\ pushToClientChan(k, c, watch_chan)
+                /\ canPushKeyToClient(k, c, watch_info[c])
+                /\ pushToClientChan(k, c, watch_info[c])
 
         doNothing ==
-            /\ \A c \in WatchClient: ~canPushKeyToClient(k, c, watch_chan)
-            /\ UNCHANGED <<watch_chan, watch_seq, watch_log_index>>
+            /\ \A c \in WatchClient: ~canPushKeyToClient(k, c, watch_info[c])
+            /\ UNCHANGED watch_info
     IN
         doPush \/ doNothing
 
@@ -266,17 +282,18 @@ FinishJob(k) ==
     /\ UNCHANGED aux_vars
 
 
-new_chan == [status |-> "Empty", data |-> nil]
 
 NewWatchChan(c) ==
     LET
-        new_watch_ch == [watch_chan EXCEPT ![c] = new_chan]
+        new_chan == [status |-> "Empty", data |-> nil]
+
+        new_info == [watch_info[c] EXCEPT !.chan = new_chan]
     IN
         /\ watch_pc[c] = "Init"
         /\ watch_pc' = [watch_pc EXCEPT ![c] = "WaitOnChan"]
 
         /\ UNCHANGED server_vars
-        /\ pushToClientOrDoNothing(c, new_watch_ch)
+        /\ pushToClientOrDoNothing(c, new_info)
 
         /\ UNCHANGED <<watch_keys, watch_key_pc>>
         /\ UNCHANGED <<watch_state, watch_local_key, watch_local_info>>
@@ -362,7 +379,7 @@ AddToWaitList(c) ==
     /\ updateServerWaitList(c)
 
     /\ createPlaceHolderStateForWaitList
-    /\ pushToClientOrDoNothing(c, watch_chan)
+    /\ pushToClientOrDoNothing(c, watch_info[c])
 
     /\ UNCHANGED <<watch_keys>>
     /\ UNCHANGED watch_local_vars
@@ -373,9 +390,10 @@ AddToWaitList(c) ==
 
 updateStateFromChan(c) ==
     LET
-        k == watch_chan[c].data.key
-        type == watch_chan[c].data.type
-        log_line == watch_chan[c].data.line
+        chan == watch_info[c].chan
+        k == chan.data.key
+        type == chan.data.type
+        log_line == chan.data.line
     
         old_state == watch_state[c][k]
 
@@ -423,16 +441,16 @@ updateStateFromChan(c) ==
 
 ConsumeWatchChan(c) ==
     /\ watch_pc[c] = "WaitOnChan"
-    /\ watch_chan[c].status = "Ready"
+    /\ watch_info[c].chan.status = "Ready"
 
-    /\ watch_chan' = [
-            watch_chan EXCEPT
-                ![c].status = "Consumed",
-                ![c].data = nil]
+    /\ watch_info' = [
+            watch_info EXCEPT
+                ![c].chan.status = "Consumed",
+                ![c].chan.data = nil]
     
     /\ updateStateFromChan(c)
     
-    /\ UNCHANGED <<watch_keys, watch_key_pc, watch_seq, watch_log_index>>
+    /\ UNCHANGED <<watch_keys, watch_key_pc>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
@@ -462,14 +480,12 @@ removeClientFromWaitList(k, c) ==
 ClientRestart(c) ==
     /\ num_client_restart < max_client_restart
     /\ num_client_restart' = num_client_restart + 1
-    /\ watch_chan' = [watch_chan EXCEPT ![c] = consumed_chan]
+    /\ watch_info' = [watch_info EXCEPT ![c] = init_info]
     /\ watch_keys' = [watch_keys EXCEPT ![c] = {}]
 
     /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
     /\ watch_local_info' = [watch_local_info EXCEPT ![c] = nil]
 
-    /\ watch_log_index' = [watch_log_index EXCEPT ![c] = [k \in Key |-> 0]]
-    /\ watch_seq' = [watch_seq EXCEPT ![c] = [k \in Key |-> 100]]
     /\ watch_state' = [watch_state EXCEPT ![c] = [k \in Key |-> nil]]
     /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
     /\ wait_list' = [k \in Key |-> removeClientFromWaitList(k, c)]
@@ -518,7 +534,7 @@ TerminateCond ==
         /\ watch_pc[c] = "WaitOnChan"
         /\ watch_keys[c] = active_keys
         /\ watch_keys[c] = serverWatchClientKeys(c)
-        /\ watch_chan[c].status = "Empty"
+        /\ watch_info[c].chan.status = "Empty"
 
 Terminated ==
     /\ TerminateCond
@@ -598,38 +614,52 @@ WatchKeysMatchWatchState ==
 WatchListMatchSeqAndLogIndex ==
     \A c \in WatchClient, k \in Key:
         ~(c \in wait_list[k]) =>
-            /\ watch_seq[c][k] = 100
-            /\ watch_log_index[c][k] = 0
+            /\ watch_info[c].seq[k] = 100
+            /\ watch_info[c].log_index[k] = 0
 
 
 channelInitByClient(c) ==
-    /\ watch_chan[c].status = "Consumed"
-    /\ watch_chan[c].data = nil
+    /\ watch_info[c].chan.status = "Consumed"
+    /\ watch_info[c].chan.data = nil
 
 channelInit == \A c \in WatchClient: channelInitByClient(c)
 
 channelNextByClient(c) ==
-    \/ /\ watch_chan[c].status = "Empty"
-       /\ watch_chan'[c].status = "Ready"
-       /\ watch_chan'[c].data # nil
+    LET
+        old_chan == watch_info[c].chan
+        new_chan == watch_info'[c].chan
 
-    \/ /\ watch_chan[c].status = "Consumed"
-       /\ watch_chan'[c].status = "Empty"
-       /\ watch_chan'[c].data = nil
+        empty_to_ready ==
+            /\ old_chan.status = "Empty"
+            /\ new_chan.status = "Ready"
+            /\ new_chan.data # nil
 
-    \/ /\ watch_chan[c].status = "Consumed"
-       /\ watch_chan'[c].status = "Ready"
-       /\ watch_chan'[c].data # nil
+        consumed_to_empty ==
+            /\ old_chan.status = "Consumed"
+            /\ new_chan.status = "Empty"
+            /\ new_chan.data = nil
 
-    \/ /\ \/ watch_chan[c].status = "Ready"
-          \/ watch_chan[c].status = "Empty"
-       /\ watch_chan'[c].status = "Consumed"
-       /\ watch_chan'[c].data = nil
+        consumed_to_ready ==
+            /\ old_chan.status = "Consumed"
+            /\ new_chan.status = "Ready"
+            /\ new_chan.data # nil
+
+        to_consumed ==
+            /\ \/ old_chan.status = "Ready"
+               \/ old_chan.status = "Empty"
+            /\ new_chan.status = "Consumed"
+            /\ new_chan.data = nil
+    IN
+        \/ empty_to_ready
+        \/ consumed_to_empty
+        \/ consumed_to_ready
+        \/ to_consumed
+        \/ new_chan = old_chan \* UNCHANGED
 
 channelNextActions == \E c \in WatchClient: channelNextByClient(c)
 
 ChannelSpec ==
-    channelInit /\ [][channelNextActions]_watch_chan
+    channelInit /\ [][channelNextActions]_watch_info
 
 
 Sym == Permutations(Key)
