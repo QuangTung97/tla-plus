@@ -7,7 +7,7 @@ CONSTANTS Key, WatchClient, nil
 \* db is the same data but on the db
 \* watch_chan is the receive channel for client
 VARIABLES pc, current_key, db, 
-    state, state_seq, next_log, next_seq, wait_list,
+    state, state_seq, next_log, next_seq, wait_list, lru_keys,
     watch_pc,
     watch_keys, watch_key_pc,
     watch_info,
@@ -26,7 +26,7 @@ watch_remove_vars == <<watch_info>>
 
 watch_vars == <<watch_local_vars, watch_key_vars, watch_remove_vars>>
 
-server_vars == <<state, state_seq, next_log, next_seq, wait_list>>
+server_vars == <<state, state_seq, next_log, next_seq, wait_list, lru_keys>>
 
 aux_vars == <<num_client_restart, num_main_restart, num_delete_state>>
 
@@ -40,7 +40,7 @@ max_log_size == 3
 
 max_client_restart == 1
 max_main_restart == 1
-max_delete_state == 1
+max_delete_state == 2
 
 Status == {"Running", "Completed", "Gone"}
 
@@ -69,7 +69,8 @@ WatchState == {"Init", "AddToWaitList", "WaitOnChan", "UpdateDB"}
 WatchInfo == [
     chan: Channel,
     seq: [Key -> StateSeq],
-    log_index: [Key -> Nat]
+    log_index: [Key -> Nat],
+    keys: SUBSET Key
 ]
 
 TypeOK ==
@@ -82,6 +83,7 @@ TypeOK ==
     /\ next_log \in LogEntry
     /\ next_seq \in StateSeq
     /\ wait_list \in [Key -> SUBSET WatchClient]
+    /\ lru_keys \subseteq Key
 
     /\ watch_pc \in [WatchClient -> WatchState]
     /\ watch_keys \in [WatchClient -> SUBSET Key]
@@ -101,7 +103,8 @@ consumed_chan == [status |-> "Consumed", data |-> nil]
 init_info == [
     chan |-> consumed_chan,
     seq |-> [k \in Key |-> 100],
-    log_index |-> [k \in Key |-> 0]
+    log_index |-> [k \in Key |-> 0],
+    keys |-> {}
 ]
 
 Init ==
@@ -114,6 +117,7 @@ Init ==
     /\ next_log = 20
     /\ wait_list = [k \in Key |-> {}]
     /\ next_seq = 100
+    /\ lru_keys = {}
 
     /\ watch_pc = [c \in WatchClient |-> "Init"]
     /\ watch_keys = [c \in WatchClient |-> {}]
@@ -152,6 +156,7 @@ PushJob ==
     /\ pc' = "Init"
     /\ current_key' = nil
     /\ state' = [state EXCEPT ![current_key] = db[current_key]]
+    /\ lru_keys' = lru_keys \union {current_key}
     /\ UNCHANGED <<next_seq, state_seq>>
     /\ UNCHANGED wait_list
     /\ UNCHANGED db
@@ -217,7 +222,8 @@ pushToClientChan(k, c, old_info) ==
         new_info == [
             chan |-> new_chan,
             seq |-> new_seq,
-            log_index |-> new_log_index]
+            log_index |-> new_log_index,
+            keys |-> old_info.keys]
     IN
         watch_info' = [watch_info EXCEPT ![c] = new_info]
 
@@ -260,6 +266,7 @@ ProduceLog(k) ==
     /\ UNCHANGED wait_list
     /\ pushKeyOrDoNothing(k)
 
+    /\ UNCHANGED lru_keys
     /\ UNCHANGED main_vars
     /\ UNCHANGED watch_local_vars
     /\ UNCHANGED watch_key_vars
@@ -275,6 +282,7 @@ FinishJob(k) ==
     /\ UNCHANGED wait_list
     /\ pushKeyOrDoNothing(k)
 
+    /\ UNCHANGED lru_keys
     /\ UNCHANGED next_log
     /\ UNCHANGED main_vars
     /\ UNCHANGED watch_local_vars
@@ -328,6 +336,13 @@ UpdateWatchKeys(c) ==
     /\ UNCHANGED aux_vars
 
 
+updateLRUKeys(c) ==
+    LET
+        old == lru_keys \ watch_info'[c].keys
+        new == old \union {k \in watch_info[c].keys: wait_list'[k] = {}}
+    IN
+        lru_keys' = new
+
 updateServerWaitList(c) ==
     LET
         old_set(k) == wait_list[k]
@@ -337,9 +352,6 @@ updateServerWaitList(c) ==
                 ELSE old_set(k) \ {c}
     IN
         wait_list' = [k \in Key |-> new_set(k)]
-
-
-serverWatchClientKeys(c) == {k \in Key: c \in wait_list[k]}
 
 createPlaceHolderStateForWaitList ==
     LET
@@ -383,12 +395,13 @@ removeSeqLogIndexNotInWaitList(c) ==
         new_log_index ==
             [k \in Key |-> IF in_list(k) THEN old_info.log_index[k] ELSE 0]
     IN
-        [old_info EXCEPT !.seq = new_seq, !.log_index = new_log_index]
+        [old_info EXCEPT
+            !.seq = new_seq,
+            !.log_index = new_log_index,
+            !.keys = watch_keys[c]]
 
 AddToWaitList(c) ==
     /\ watch_key_pc[c] = "SetWaitList"
-    /\ watch_keys[c] # serverWatchClientKeys(c)
-
     /\ watch_key_pc' = [watch_key_pc EXCEPT ![c] = "Init"]
     /\ updateServerWaitList(c)
 
@@ -397,6 +410,7 @@ AddToWaitList(c) ==
             new_info == removeSeqLogIndexNotInWaitList(c)
         IN
             pushToClientOrDoNothing(c, new_info)
+    /\ updateLRUKeys(c)
 
     /\ UNCHANGED <<watch_keys>>
     /\ UNCHANGED watch_local_vars
@@ -507,6 +521,7 @@ ClientRestart(c) ==
     /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
     /\ wait_list' = [k \in Key |-> removeClientFromWaitList(k, c)]
     /\ watch_key_pc' = [watch_key_pc EXCEPT ![c] = "Init"]
+    /\ updateLRUKeys(c)
 
     /\ UNCHANGED <<state, state_seq, next_log, next_seq>>
     /\ UNCHANGED main_vars
@@ -528,21 +543,26 @@ DeleteRandomKeyInState(k) ==
     /\ num_delete_state < max_delete_state
     /\ num_delete_state' = num_delete_state + 1
     /\ state[k] # nil
+    /\ k \in lru_keys
 
     /\ state' = [state EXCEPT ![k] = nil]
     /\ state_seq' = [state_seq EXCEPT ![k] = 100]
     /\ wait_list' = [wait_list EXCEPT ![k] = {}]
+    /\ lru_keys' = lru_keys \ {k}
 
     /\ UNCHANGED <<next_log, next_seq>>
     /\ UNCHANGED <<num_client_restart, num_main_restart>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED watch_local_vars
+    /\ UNCHANGED watch_key_vars
     /\ UNCHANGED watch_remove_vars
 
 
 statusIsFinished(st) ==
     \/ st = "Completed"
     \/ st = "Gone"
+
+serverWatchClientKeys(c) == {k \in Key: c \in wait_list[k]}
 
 TerminateCond ==
     /\ \A k \in Key: db[k] # nil /\ statusIsFinished(db[k].status)
@@ -563,7 +583,7 @@ Next ==
         \/ AddDBJob(k)
         \/ ProduceLog(k)
         \/ FinishJob(k)
-        \* \/ DeleteRandomKeyInState(k)
+        \/ DeleteRandomKeyInState(k)
     \/ PushJob
 
     \/ \E c \in WatchClient:
@@ -633,6 +653,16 @@ WatchListMatchSeqAndLogIndex ==
         ~(c \in wait_list[k]) =>
             /\ watch_info[c].seq[k] = 100
             /\ watch_info[c].log_index[k] = 0
+
+
+LRUKeysMatchWaitList ==
+    lru_keys = {k \in Key: state[k] # nil /\ wait_list[k] = {}}
+
+
+InfoKeysMatchSeq ==
+    \A c \in WatchClient, k \in Key:
+        /\ watch_info[c].seq[k] > 100 => k \in watch_info[c].keys
+        /\ watch_info[c].log_index[k] > 0 => k \in watch_info[c].keys
 
 
 channelInitByClient(c) ==
