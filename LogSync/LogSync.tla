@@ -5,7 +5,7 @@ CONSTANTS Key, WatchClient, nil
 
 \* state is in-memory data
 \* db is the same data but on the db
-\* watch_chan is the receive channel for client
+\* watch_info[c].chan is the receive channel for client
 VARIABLES pc, current_key, db, 
     state, state_seq, next_log, next_seq, wait_list, lru_keys,
     watch_pc,
