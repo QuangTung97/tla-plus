@@ -8,27 +8,33 @@ CONSTANTS Key, WatchClient, nil
 \* watch_chan is the receive channel for client
 VARIABLES pc, current_key, db, 
     state, state_seq, next_log, next_seq, wait_list,
-    watch_pc, watch_keys, watch_chan, watch_seq,
-    watch_log_index, watch_state, watch_local_key, watch_local_info,
+    watch_pc,
+    watch_keys, watch_key_pc,
+    watch_chan, watch_seq,
+    watch_log_index, watch_state,
+    watch_local_key, watch_local_info,
     num_client_restart, num_main_restart, num_delete_state
 
 main_vars == <<pc, current_key, db>>
 
-watch_vars == <<watch_pc, watch_keys, watch_chan,
-    watch_seq, watch_log_index, watch_state, watch_local_key, watch_local_info>>
+watch_local_vars == <<
+    watch_pc, watch_keys, watch_key_pc,
+    watch_state, watch_local_key, watch_local_info>>
+
+watch_remove_vars == <<watch_chan, watch_seq, watch_log_index>>
 
 server_vars == <<state, state_seq, next_log, next_seq, wait_list>>
 
 aux_vars == <<num_client_restart, num_main_restart, num_delete_state>>
 
-vars == <<main_vars, server_vars, watch_vars, aux_vars>>
+vars == <<main_vars, server_vars, watch_local_vars, watch_remove_vars, aux_vars>>
 
 
 max_log_size == 3
 
 max_client_restart == 1
 max_main_restart == 1
-max_delete_state == 2
+max_delete_state == 1
 
 Status == {"Running", "Completed", "Gone"}
 
@@ -67,6 +73,7 @@ TypeOK ==
 
     /\ watch_pc \in [WatchClient -> WatchState]
     /\ watch_keys \in [WatchClient -> SUBSET Key]
+    /\ watch_key_pc \in [WatchClient -> {"Init", "SetWaitList"}]
     /\ watch_chan \in [WatchClient -> Channel]
     /\ watch_seq \in [WatchClient -> [Key -> StateSeq]]
     /\ watch_log_index \in [WatchClient -> [Key -> Nat]]
@@ -94,6 +101,7 @@ Init ==
 
     /\ watch_pc = [c \in WatchClient |-> "Init"]
     /\ watch_keys = [c \in WatchClient |-> {}]
+    /\ watch_key_pc = [c \in WatchClient |-> "Init"]
     /\ watch_chan = [c \in WatchClient |-> consumed_chan]
     /\ watch_seq = [c \in WatchClient |-> [k \in Key|-> 100]]
     /\ watch_log_index = [c \in WatchClient |-> [k \in Key |-> 0]]
@@ -116,7 +124,8 @@ AddDBJob(k) ==
     /\ current_key' = k
     /\ db' = [db EXCEPT ![k] = newJob]
     /\ UNCHANGED server_vars
-    /\ UNCHANGED watch_vars
+    /\ UNCHANGED watch_local_vars
+    /\ UNCHANGED watch_remove_vars
     /\ UNCHANGED aux_vars
 
 
@@ -134,7 +143,8 @@ PushJob ==
     /\ UNCHANGED wait_list
     /\ UNCHANGED db
     /\ UNCHANGED next_log
-    /\ UNCHANGED watch_vars
+    /\ UNCHANGED watch_local_vars
+    /\ UNCHANGED watch_remove_vars
     /\ UNCHANGED aux_vars
 
 
@@ -230,8 +240,7 @@ ProduceLog(k) ==
     /\ pushKeyOrDoNothing(k)
 
     /\ UNCHANGED main_vars
-    /\ UNCHANGED <<watch_pc, watch_keys, watch_state>>
-    /\ UNCHANGED <<watch_local_key, watch_local_info>>
+    /\ UNCHANGED watch_local_vars
     /\ UNCHANGED aux_vars
 
 
@@ -246,8 +255,7 @@ FinishJob(k) ==
 
     /\ UNCHANGED next_log
     /\ UNCHANGED main_vars
-    /\ UNCHANGED <<watch_pc, watch_keys, watch_state>>
-    /\ UNCHANGED <<watch_local_key, watch_local_info>>
+    /\ UNCHANGED watch_local_vars
     /\ UNCHANGED aux_vars
 
 
@@ -263,7 +271,8 @@ NewWatchChan(c) ==
         /\ UNCHANGED server_vars
         /\ pushToClientOrDoNothing(c, new_watch_ch)
 
-        /\ UNCHANGED <<watch_keys, watch_state, watch_local_key, watch_local_info>>
+        /\ UNCHANGED <<watch_keys, watch_key_pc>>
+        /\ UNCHANGED <<watch_state, watch_local_key, watch_local_info>>
         /\ UNCHANGED main_vars
         /\ UNCHANGED aux_vars
 
@@ -279,11 +288,16 @@ clearWatchStateKeyNotInSet(c, set) ==
     [k \in Key |-> IF k \in set THEN watch_state[c][k] ELSE nil]
 
 UpdateWatchKeys(c) ==
+    /\ watch_key_pc[c] = "Init"
     /\ watch_keys[c] # active_keys
+    /\ watch_key_pc' = [watch_key_pc EXCEPT ![c] = "SetWaitList"]
+
     /\ watch_keys' = [watch_keys EXCEPT ![c] = active_keys]
     /\ watch_state' = [watch_state EXCEPT
             ![c] = clearWatchStateKeyNotInSet(c, active_keys)]
-    /\ UNCHANGED <<watch_pc, watch_chan, watch_seq, watch_log_index>>
+
+    /\ UNCHANGED watch_remove_vars
+    /\ UNCHANGED <<watch_pc>>
     /\ UNCHANGED <<watch_local_key, watch_local_info>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED server_vars
@@ -340,8 +354,7 @@ AddToWaitList(c) ==
     /\ createPlaceHolderStateForWaitList
     /\ pushToClientOrDoNothing(c, watch_chan)
 
-    /\ UNCHANGED <<watch_pc, watch_keys, watch_state>>
-    /\ UNCHANGED <<watch_local_key, watch_local_info>>
+    /\ UNCHANGED watch_local_vars
     /\ UNCHANGED main_vars
     /\ UNCHANGED next_log
     /\ UNCHANGED aux_vars
@@ -424,8 +437,8 @@ UpdateDB(c) ==
         /\ db' = [db EXCEPT ![k] = info]
         /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
         /\ watch_local_info' = [watch_local_info EXCEPT ![c] = nil]
-        /\ UNCHANGED <<watch_keys, watch_chan, watch_seq>>
-        /\ UNCHANGED <<watch_log_index, watch_state>>
+        /\ UNCHANGED watch_remove_vars
+        /\ UNCHANGED <<watch_keys, watch_state>>
         /\ UNCHANGED server_vars
         /\ UNCHANGED <<pc, current_key>>
         /\ UNCHANGED aux_vars
@@ -449,6 +462,8 @@ ClientRestart(c) ==
     /\ watch_state' = [watch_state EXCEPT ![c] = [k \in Key |-> nil]]
     /\ watch_pc' = [watch_pc EXCEPT ![c] = "Init"]
     /\ wait_list' = [k \in Key |-> removeClientFromWaitList(k, c)]
+    /\ watch_key_pc' = [watch_key_pc EXCEPT ![c] = "Init"]
+
     /\ UNCHANGED <<state, state_seq, next_log, next_seq>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED <<num_main_restart, num_delete_state>>
@@ -462,7 +477,8 @@ MainRestart ==
     /\ UNCHANGED db
     /\ UNCHANGED <<num_client_restart, num_delete_state>>
     /\ UNCHANGED server_vars
-    /\ UNCHANGED watch_vars
+    /\ UNCHANGED watch_local_vars
+    /\ UNCHANGED watch_remove_vars
 
 
 DeleteRandomKeyInState(k) ==
@@ -477,8 +493,8 @@ DeleteRandomKeyInState(k) ==
     /\ UNCHANGED <<next_log, next_seq>>
     /\ UNCHANGED <<num_client_restart, num_main_restart>>
     /\ UNCHANGED main_vars
-    /\ UNCHANGED watch_vars
-
+    /\ UNCHANGED watch_local_vars
+    /\ UNCHANGED watch_remove_vars
 
 
 statusIsFinished(st) ==
@@ -566,7 +582,14 @@ StateAlwaysMatchSeq ==
 
 WatchKeysMatchWatchState ==
     \A c \in WatchClient, k \in Key:
-            ~(k \in watch_keys[c]) => watch_state[c][k] = nil
+        ~(k \in watch_keys[c]) => watch_state[c][k] = nil
+
+
+WatchListMatchSeqAndLogIndex ==
+    \A c \in WatchClient, k \in Key:
+        ~(c \in wait_list[k]) =>
+            /\ watch_seq[c][k] = 100
+            /\ watch_log_index[c][k] = 0
 
 
 channelInitByClient(c) ==
