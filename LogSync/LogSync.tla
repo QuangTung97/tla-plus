@@ -18,16 +18,23 @@ VARIABLES pc, current_key, db,
 main_vars == <<pc, current_key, db>>
 
 watch_local_vars == <<
-    watch_pc, watch_keys, watch_key_pc,
-    watch_state, watch_local_key, watch_local_info>>
+    watch_pc, watch_state,
+    watch_local_key, watch_local_info>>
+
+watch_key_vars == <<watch_keys, watch_key_pc>>
 
 watch_remove_vars == <<watch_chan, watch_seq, watch_log_index>>
+
+watch_vars == <<watch_local_vars, watch_key_vars, watch_remove_vars>>
 
 server_vars == <<state, state_seq, next_log, next_seq, wait_list>>
 
 aux_vars == <<num_client_restart, num_main_restart, num_delete_state>>
 
-vars == <<main_vars, server_vars, watch_local_vars, watch_remove_vars, aux_vars>>
+vars == <<
+    main_vars, server_vars,
+    watch_local_vars, watch_key_vars, watch_remove_vars,
+    aux_vars>>
 
 
 max_log_size == 3
@@ -124,8 +131,7 @@ AddDBJob(k) ==
     /\ current_key' = k
     /\ db' = [db EXCEPT ![k] = newJob]
     /\ UNCHANGED server_vars
-    /\ UNCHANGED watch_local_vars
-    /\ UNCHANGED watch_remove_vars
+    /\ UNCHANGED watch_vars
     /\ UNCHANGED aux_vars
 
 
@@ -143,8 +149,7 @@ PushJob ==
     /\ UNCHANGED wait_list
     /\ UNCHANGED db
     /\ UNCHANGED next_log
-    /\ UNCHANGED watch_local_vars
-    /\ UNCHANGED watch_remove_vars
+    /\ UNCHANGED watch_vars
     /\ UNCHANGED aux_vars
 
 
@@ -241,6 +246,7 @@ ProduceLog(k) ==
 
     /\ UNCHANGED main_vars
     /\ UNCHANGED watch_local_vars
+    /\ UNCHANGED watch_key_vars
     /\ UNCHANGED aux_vars
 
 
@@ -256,6 +262,7 @@ FinishJob(k) ==
     /\ UNCHANGED next_log
     /\ UNCHANGED main_vars
     /\ UNCHANGED watch_local_vars
+    /\ UNCHANGED watch_key_vars
     /\ UNCHANGED aux_vars
 
 
@@ -348,12 +355,16 @@ createPlaceHolderStateForWaitList ==
 
 
 AddToWaitList(c) ==
+    /\ watch_key_pc[c] = "SetWaitList"
     /\ watch_keys[c] # serverWatchClientKeys(c)
+
+    /\ watch_key_pc' = [watch_key_pc EXCEPT ![c] = "Init"]
     /\ updateServerWaitList(c)
 
     /\ createPlaceHolderStateForWaitList
     /\ pushToClientOrDoNothing(c, watch_chan)
 
+    /\ UNCHANGED <<watch_keys>>
     /\ UNCHANGED watch_local_vars
     /\ UNCHANGED main_vars
     /\ UNCHANGED next_log
@@ -421,7 +432,7 @@ ConsumeWatchChan(c) ==
     
     /\ updateStateFromChan(c)
     
-    /\ UNCHANGED <<watch_keys, watch_seq, watch_log_index>>
+    /\ UNCHANGED <<watch_keys, watch_key_pc, watch_seq, watch_log_index>>
     /\ UNCHANGED main_vars
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
@@ -438,7 +449,7 @@ UpdateDB(c) ==
         /\ watch_local_key' = [watch_local_key EXCEPT ![c] = nil]
         /\ watch_local_info' = [watch_local_info EXCEPT ![c] = nil]
         /\ UNCHANGED watch_remove_vars
-        /\ UNCHANGED <<watch_keys, watch_state>>
+        /\ UNCHANGED <<watch_keys, watch_key_pc, watch_state>>
         /\ UNCHANGED server_vars
         /\ UNCHANGED <<pc, current_key>>
         /\ UNCHANGED aux_vars
@@ -477,8 +488,7 @@ MainRestart ==
     /\ UNCHANGED db
     /\ UNCHANGED <<num_client_restart, num_delete_state>>
     /\ UNCHANGED server_vars
-    /\ UNCHANGED watch_local_vars
-    /\ UNCHANGED watch_remove_vars
+    /\ UNCHANGED watch_vars
 
 
 DeleteRandomKeyInState(k) ==
@@ -520,7 +530,7 @@ Next ==
         \/ AddDBJob(k)
         \/ ProduceLog(k)
         \/ FinishJob(k)
-        \/ DeleteRandomKeyInState(k)
+        \* \/ DeleteRandomKeyInState(k)
     \/ PushJob
 
     \/ \E c \in WatchClient:
