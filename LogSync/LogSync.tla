@@ -338,10 +338,10 @@ UpdateWatchKeys(c) ==
 
 updateLRUKeys(c) ==
     LET
-        old == lru_keys \ watch_info'[c].keys
-        new == old \union {k \in watch_info[c].keys: wait_list'[k] = {}}
+        removed == watch_info'[c].keys
+        added == {k \in watch_info[c].keys: wait_list'[k] = {}}
     IN
-        lru_keys' = new
+        lru_keys' = (lru_keys \union added) \ removed
 
 updateServerWaitList(c) ==
     LET
