@@ -174,8 +174,9 @@ pushToClientChan(k, c, old_info) ==
     LET
         last_index == old_info.log_index[k]
         state_index == Len(state'[k].logs)
+        new_index == last_index + 1
 
-        new_line == state'[k].logs[last_index + 1]
+        new_line == state'[k].logs[new_index]
 
         add_event == [
             type |-> "AddLog",
@@ -196,12 +197,10 @@ pushToClientChan(k, c, old_info) ==
 
         add_log_cond == last_index < state_index
 
+
         update_seq_cond ==
-            IF last_index >= state_index
-                THEN TRUE
-                ELSE IF last_index + 1 >= state_index /\ is_running
-                    THEN TRUE
-                    ELSE FALSE
+            \/ last_index >= state_index
+            \/ new_index >= state_index /\ is_running
         
         new_event ==
             IF add_log_cond
@@ -210,7 +209,7 @@ pushToClientChan(k, c, old_info) ==
         
         new_chan == [status |-> "Ready", data |-> new_event]
 
-        new_log_index == [old_info.log_index EXCEPT ![k] = last_index + 1]
+        new_log_index == [old_info.log_index EXCEPT ![k] = new_index]
 
         new_seq == [
             old_info.seq EXCEPT ![k] =
@@ -707,6 +706,32 @@ channelNextActions == \E c \in WatchClient: channelNextByClient(c)
 
 ChannelSpec ==
     channelInit /\ [][channelNextActions]_watch_info
+
+
+ChannelAddLogNonEmpty ==
+    \A c \in WatchClient:
+        LET
+            chan == watch_info[c].chan
+            cond ==
+                /\ chan.status = "Ready"
+                /\ chan.data.type = "AddLog"
+        IN
+            cond => chan.data.line > 0
+
+
+LogShouldMatchWhenRunning ==
+    \A k \in Key, c \in WatchClient:
+        LET
+            cond ==
+                /\ state[k] # nil
+                /\ state[k].status = "Running"
+                /\ Len(state[k].logs) > 0
+                /\ watch_pc[c] = "WaitOnChan"
+                /\ watch_info[c].chan.status = "Empty"
+                /\ watch_keys[c] = active_keys
+                /\ watch_keys[c] = serverWatchClientKeys(c)
+        IN
+            cond => watch_state[c][k] = state[k]
 
 
 Sym == Permutations(Key)
