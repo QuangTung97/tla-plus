@@ -195,8 +195,7 @@ pushToClientChan(k, c, old_info) ==
 
         is_running == state'[k].status = "Running"
 
-        add_log_cond == last_index < state_index
-
+        add_log_cond == last_index < state_index \/ is_running
 
         update_seq_cond ==
             \/ last_index >= state_index
