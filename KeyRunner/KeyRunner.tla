@@ -193,6 +193,10 @@ RunningStateMatchThreadState ==
         running[k] # nil <=> existed_thread(k)
 
 
+KeysAlwaysImplyRunning ==
+    \A k \in keys: running[k] # nil
+
+
 ValueMatchKeys ==
     \A k \in Key:
         value[k] > 30 <=> k \in keys
