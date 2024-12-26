@@ -181,6 +181,18 @@ NotAllowConcurrentRunning ==
         \A k \in Key: Cardinality(threads_by_key(k)) <= 1
 
 
+RunningStateMatchThreadState ==
+    LET
+        existed_thread(k) ==
+            \E th \in DOMAIN thread:
+                /\ thread[th].key = k
+                /\ \/ thread[th].pc = "WaitOnCancel"
+                   \/ thread[th].pc = "Start"
+    IN
+    \A k \in Key:
+        running[k] # nil <=> existed_thread(k)
+
+
 ValueMatchKeys ==
     \A k \in Key:
         value[k] > 30 <=> k \in keys
