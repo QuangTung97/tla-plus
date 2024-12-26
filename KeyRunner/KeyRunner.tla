@@ -3,17 +3,20 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 CONSTANTS Key, nil
 
-VARIABLES keys, running, thread, num_update
+VARIABLES keys, running, thread, num_update, value, next_val
 
-vars == <<keys, running, thread, num_update>>
+vars == <<keys, running, thread, num_update, value, next_val>>
 
 State == {"Start", "WaitOnCancel", "Finished"}
 
-max_update == 5
+max_update == 6
 
-ThreadInfo == [pc: State, key: Key, cancelled: BOOLEAN]
+Value == 30..40
+
+ThreadInfo == [pc: State, key: Key, val: Value, cancelled: BOOLEAN]
 
 Thread == 1..max_update
+
 
 TypeOK ==
     /\ keys \subseteq Key
@@ -21,6 +24,8 @@ TypeOK ==
     /\ thread \in Seq(ThreadInfo)
     /\ num_update \in 0..max_update
     /\ DOMAIN thread \subseteq Thread
+    /\ value \in [Key -> Value]
+    /\ next_val \in Value
 
 
 Init ==
@@ -28,6 +33,8 @@ Init ==
     /\ running = [k \in Key |-> nil]
     /\ thread = <<>>
     /\ num_update = 0
+    /\ value = [k \in Key |-> 30]
+    /\ next_val = 30
 
 
 AddKey(k) ==
@@ -35,6 +42,7 @@ AddKey(k) ==
         new_thread == [
             pc |-> "Start",
             key |-> k,
+            val |-> value'[k],
             cancelled |-> FALSE
         ]
 
@@ -55,6 +63,8 @@ AddKey(k) ==
         /\ num_update < max_update
         /\ num_update' = num_update + 1
         /\ keys' = keys \union {k}
+        /\ next_val' = next_val + 1
+        /\ value' = [value EXCEPT ![k] = next_val']
         /\ start_new_thread_or_hold_back
 
 
@@ -64,13 +74,26 @@ RemoveKey(k) ==
     /\ num_update' = num_update + 1
     /\ keys' = keys \ {k}
     /\ thread' = [thread EXCEPT ![running[k]].cancelled = TRUE]
+    /\ value' = [value EXCEPT ![k] = 30]
+    /\ UNCHANGED next_val
     /\ UNCHANGED running
+
+
+UpdateKey(k) ==
+    /\ k \in keys
+    /\ num_update < max_update
+    /\ num_update' = num_update + 1
+    /\ next_val' = next_val + 1
+    /\ value' = [value EXCEPT ![k] = next_val']
+    /\ thread' = [thread EXCEPT ![running[k]].cancelled = TRUE]
+    /\ UNCHANGED <<keys, running>>
 
 
 StartRunning(th) ==
     /\ th \in DOMAIN thread
     /\ thread[th].pc = "Start"
     /\ thread' = [thread EXCEPT ![th].pc = "WaitOnCancel"]
+    /\ UNCHANGED <<value, next_val>>
     /\ UNCHANGED running
     /\ UNCHANGED <<num_update, keys>>
 
@@ -83,6 +106,7 @@ ThreadFinish(th) ==
             /\ UNCHANGED running
             /\ thread' = [thread EXCEPT
                     ![th].pc = "Start",
+                    ![th].val = value[k],
                     ![th].cancelled = FALSE
                 ]
 
@@ -99,6 +123,7 @@ ThreadFinish(th) ==
     /\ thread[th].pc = "WaitOnCancel"
     /\ thread[th].cancelled
     /\ restart_or_finish
+    /\ UNCHANGED <<value, next_val>>
     /\ UNCHANGED <<keys, num_update>>
 
 
@@ -123,6 +148,7 @@ Next ==
     \/ \E k \in Key:
         \/ AddKey(k)
         \/ RemoveKey(k)
+        \/ UpdateKey(k)
     \/ \E th \in 1..max_update:
         \/ StartRunning(th)
         \/ ThreadFinish(th)
@@ -138,8 +164,14 @@ running_thread == {th \in DOMAIN thread: thread[th].pc = "WaitOnCancel"}
 NumRunningThreadShouldMatchKeys ==
     LET
         running_keys == {thread[th].key: th \in running_thread}
+
+        value_matched ==
+            \A th \in running_thread:
+                thread[th].val = value[thread[th].key]
     IN
-        threadBlockedCond => running_keys = keys
+        threadBlockedCond =>
+            /\ running_keys = keys
+            /\ value_matched
 
 
 NotAllowConcurrentRunning ==
@@ -147,6 +179,11 @@ NotAllowConcurrentRunning ==
         threads_by_key(k) == {th \in running_thread: thread[th].key = k}
     IN
         \A k \in Key: Cardinality(threads_by_key(k)) <= 1
+
+
+ValueMatchKeys ==
+    \A k \in Key:
+        value[k] > 30 <=> k \in keys
 
 
 AlwaysTerminate == <> TerminateCond
