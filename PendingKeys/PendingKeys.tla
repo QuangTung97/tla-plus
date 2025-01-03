@@ -30,12 +30,10 @@ SlaveState == [
     wait_list: SUBSET Client
 ]
 
-Channel == [data: SUBSET Key, status: {"Empty", "Ready"}]
-
-NullChannel == Channel \union {nil}
+Channel == [data: SUBSET Key, status: {"Empty", "Ready", "Consumed"}]
 
 ClientState == [
-    chan: NullChannel,
+    chan: Channel,
     consumed_seq: Seq
 ]
 
@@ -47,7 +45,7 @@ init_slave_state == [
 ]
 
 init_client_state == [
-    chan |-> nil,
+    chan |-> [data |-> {}, status |-> "Consumed"],
     consumed_seq |-> 0
 ]
 
@@ -88,7 +86,7 @@ pushToClient(client_set, old_state) ==
 
         can_push(c) ==
             /\ c \in client_set
-            /\ old_state[c].chan # nil
+            /\ old_state[c].chan.status = "Empty"
             /\ old_state[c].consumed_seq < curr_seq(c)
         
         new_chan(c) ==
@@ -239,7 +237,7 @@ ConsumeChan(c) ==
     /\ pc[c] = "WaitOnChan"
     /\ client_state[c].chan.status = "Ready"
     /\ pc' = [pc EXCEPT ![c] = "GetRunningKeys"]
-    /\ client_state' = [client_state EXCEPT ![c].chan = nil]
+    /\ client_state' = [client_state EXCEPT ![c].chan.status = "Consumed"]
     /\ client_keys' = [client_keys EXCEPT ![c] = client_state[c].chan.data]
     /\ UNCHANGED slave_map
     /\ UNCHANGED info
@@ -249,7 +247,6 @@ ConsumeChan(c) ==
 
 clientWaitOnChan(c) ==
     /\ pc[c] = "WaitOnChan"
-    /\ client_state[c].chan # nil
     /\ client_state[c].chan.status = "Empty"
 
 TerminateCond ==
@@ -292,5 +289,30 @@ ClientKeysMatchSharedState ==
 SlaveMapRunningMatchSharedState ==
     \A s \in Slave:
         slave_map[s].running = running_keys(s)
+
+
+channelAction(c) ==
+    \/ /\ client_state[c].chan.status = "Consumed"
+       /\ client_state'[c].chan.status = "Empty"
+    \/ /\ client_state[c].chan.status = "Consumed"
+       /\ client_state'[c].chan.status = "Ready"
+    \/ /\ client_state[c].chan.status = "Empty"
+       /\ client_state'[c].chan.status = "Ready"
+    \/ /\ client_state[c].chan.status = "Ready"
+       /\ client_state'[c].chan.status = "Consumed"
+    \/ client_state'[c].chan = client_state[c].chan
+
+allChannelAction ==
+    \A c \in Client: channelAction(c)
+
+ChannelSpec ==
+    [][allChannelAction]_client_state
+
+
+ReadyAlwaysConsumed ==
+    \A c \in Client:
+        client_state[c].chan.status = "Ready"
+            ~> client_state[c].chan.status = "Consumed"
+
 
 ====
