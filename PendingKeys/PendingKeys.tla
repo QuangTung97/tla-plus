@@ -109,13 +109,18 @@ AddKey(k) ==
             IF k \in pending
                 THEN {}
                 ELSE {k}
+
+        add_one(old) ==
+            IF k \in pending
+                THEN old
+                ELSE old + 1
                 
         do_add_key(s) ==
             /\ info[k] = nil
             /\ allowAction
             /\ info' = [info EXCEPT ![k] = s]
             /\ slave_map' = [slave_map EXCEPT
-                    ![s].latest_seq = @ + 1,
+                    ![s].latest_seq = add_one(@),
                     ![s].running = @ \union added]
             /\ client_state' = pushToClient(slave_map[s].wait_list, client_state)
             /\ UNCHANGED pending
