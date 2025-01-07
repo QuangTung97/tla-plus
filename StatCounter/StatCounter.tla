@@ -130,6 +130,10 @@ InitInv ==
         /\ diff = 0
 
 
+DiffAlwaysNonZero ==
+    pc = "UpdateDB" => diff > 0
+
+
 PendingNoDuplicate ==
     LET
         keys == Range(pending)
