@@ -3,16 +3,16 @@ EXTENDS TLC, Naturals, Sequences
 
 CONSTANTS Key, Node, nil
 
-VARIABLES version, changeset, state, alerting,
+VARIABLES version, changeset, state, status_list, alerting,
     notify_list, next_val, pc, local_key, local_status
 
-vars == <<version, changeset, state, alerting,
+vars == <<version, changeset, state, status_list, alerting,
     notify_list, next_val, pc, local_key, local_status>>
 
 node_vars == <<pc, local_key, local_status>>
 
 
-max_val == 34
+max_val == 35
 
 Version == 20..30
 
@@ -26,7 +26,7 @@ NullStatus == StateStatus \union {nil}
 
 State == [val: Value, status: StateStatus]
 
-Notify == [key: Key, status: {"Alert", "None"}]
+Notify == [key: Key, status: StateStatus]
 
 new_state == [val |-> 30, status |-> "OK"]
 
@@ -36,6 +36,7 @@ TypeOK ==
     /\ changeset \subseteq Key
     /\ alerting \subseteq Key
     /\ state \in [Key -> State]
+    /\ status_list \in [Key -> Seq(StateStatus)]
     /\ notify_list \in Seq(Notify)
     /\ next_val \in Value
     /\ pc \in [Node -> {"Init", "PushNotify"}]
@@ -48,6 +49,7 @@ Init ==
     /\ changeset = {}
     /\ alerting = {}
     /\ state = [k \in Key |-> new_state]
+    /\ status_list = [k \in Key |-> <<>>]
     /\ notify_list = <<>>
     /\ next_val = 30
     /\ pc = [n \in Node |-> "Init"]
@@ -59,16 +61,45 @@ UpdateKey(k) ==
     LET
         update_cond(status) ==
             /\ k \notin changeset
-            /\ status = "Failed" \/ k \in alerting
+            /\ IF status = "OK"
+                THEN k \in alerting
+                ELSE k \notin alerting
+
+        update_tail(status) ==
+            LET last == Len(status_list[k]) IN
+            status_list' = [
+                status_list EXCEPT ![k][last] = status]
+
+        remove_tail ==
+            LET last == Len(status_list[k]) IN
+                status_list' = [
+                    status_list EXCEPT ![k] = SubSeq(@, 1, last - 1)
+                ]
+
+        need_clear(status) ==
+            IF status = "OK"
+                THEN k \notin alerting
+                ELSE k \in alerting
 
         update_changeset(status) ==
-            IF update_cond(status)
-                THEN
-                    /\ changeset' = changeset \union {k}
-                    /\ version' = version + 1
-                ELSE
-                    /\ UNCHANGED changeset
-                    /\ UNCHANGED version
+            IF update_cond(status) THEN
+                /\ changeset' = changeset \union {k}
+                /\ version' = version + 1
+                /\ status_list' = [
+                    status_list EXCEPT ![k] = Append(@, status)]
+            ELSE IF k \in changeset THEN
+                /\ IF need_clear(status)
+                    THEN
+                        /\ changeset' = changeset \ {k}
+                        /\ remove_tail
+                    ELSE
+                        /\ UNCHANGED changeset
+                        /\ update_tail(status)
+                /\ UNCHANGED version
+            ELSE
+                /\ UNCHANGED changeset
+                /\ UNCHANGED status_list
+                /\ UNCHANGED version
     IN
     /\ next_val < max_val
     /\ next_val' = next_val + 1
@@ -96,15 +127,12 @@ GetChangedKey(n, k) ==
 
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
-    /\ UNCHANGED <<state, version>>
+    /\ UNCHANGED <<state, status_list, version>>
 
 
 PushNotify(n) ==
     LET
-        noti_status ==
-            IF local_status[n] = "OK"
-                THEN "None"
-                ELSE "Alert"
+        noti_status == local_status[n]
 
         new_noti == [key |-> local_key[n], status |-> noti_status]
     IN
@@ -116,7 +144,7 @@ PushNotify(n) ==
     /\ local_status' = [local_status EXCEPT ![n] = nil] \* clear local
 
     /\ UNCHANGED alerting
-    /\ UNCHANGED <<changeset, version, state, next_val>>
+    /\ UNCHANGED <<changeset, version, state, status_list, next_val>>
 
 
 TerminateCond ==
@@ -159,8 +187,8 @@ NotifyListReflectState ==
     LET
         match_cond(k) ==
             notify_by_key(k) # {} =>
-                \/ last_noti(k).status = "Alert" /\ state[k].status = "Failed"
-                \/ last_noti(k).status = "None" /\ state[k].status = "OK"
+                \/ last_noti(k).status = "Failed" /\ state[k].status = "Failed"
+                \/ last_noti(k).status = "OK" /\ state[k].status = "OK"
         
         must_pushed(k) ==
             state[k].status = "Failed" => notify_by_key(k) # {}
@@ -177,12 +205,23 @@ AlertingMatchState ==
     LET
         alert_cond(k) ==
             /\ notify_by_key(k) # {}
-            /\ last_noti(k).status = "Alert"
+            /\ last_noti(k).status = "Failed"
 
         match_cond ==
             \A k \in Key:
                 k \in alerting <=> alert_cond(k)
     IN
         TerminateCond => match_cond
+
+
+NotSendingDuplicatedAlert ==
+    LET
+        n1(k) == Len(status_list[k]) - 1
+
+        cond(k) ==
+            \A i \in 1..n1(k): status_list[k][i] # status_list[k][i + 1]
+    IN
+        \A k \in Key: cond(k)
+
 
 ====
