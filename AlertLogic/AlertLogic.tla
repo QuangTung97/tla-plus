@@ -1,24 +1,24 @@
 ------ MODULE AlertLogic ----
 EXTENDS TLC, Naturals, Sequences
 
-CONSTANTS Key, nil
+CONSTANTS Type, Key, nil
 
-VARIABLES version, changeset,
+VARIABLES version, need_alert,
     state, alerting,
     send_info,
-    notify_list, next_val, pc, local_key, local_status
+    notify_list, next_val, pc, local_type, local_status
 
-vars == <<version, changeset,
+vars == <<version, need_alert,
     state, alerting,
     send_info,
-    notify_list, next_val, pc, local_key, local_status>>
+    notify_list, next_val, pc, local_type, local_status>>
 
-node_vars == <<pc, local_key, local_status>>
+node_vars == <<pc, local_type, local_status>>
 
 
 max_val == 35
 
-max_send_count == 2
+max_send_count == 1
 
 Version == 20..30
 
@@ -26,78 +26,68 @@ Value == 30..40
 
 StateStatus == {"OK", "Failed"}
 
-NullKey == Key \union {nil}
+NullType == Type \union {nil}
 
 NullStatus == StateStatus \union {nil}
 
 State == [val: Value, status: StateStatus]
 
-Notify == [key: Key, status: StateStatus]
+Notify == [type: Type, status: StateStatus]
 
 new_state == [val |-> 30, status |-> "OK"]
 
-SendInfo == [count: Nat, status: {"Active", "Disabled"}]
+SendInfo == [count: Nat, status: {"Active", "Disabled"}, last_status: NullStatus]
 
 
 TypeOK ==
     /\ version \in Version
-    /\ changeset \subseteq Key
-    /\ alerting \subseteq Key
-    /\ send_info \in [Key -> SendInfo]
-    /\ state \in [Key -> State]
+    /\ need_alert \subseteq Type
+    /\ alerting \subseteq Type
+    /\ send_info \in [Type -> SendInfo]
+    /\ state \in [Type -> [Key -> State]]
     /\ notify_list \in Seq(Notify)
     /\ next_val \in Value
     /\ pc \in {"Init", "PushNotify"}
-    /\ local_key \in NullKey
+    /\ local_type \in NullType
     /\ local_status \in NullStatus
 
-init_send_info == [count |-> 0, status |-> "Disabled"]
+init_send_info == [count |-> 0, status |-> "Disabled", last_status |-> nil]
 
 Init ==
     /\ version = 20
-    /\ changeset = {}
+    /\ need_alert = {}
     /\ alerting = {}
-    /\ send_info = [k \in Key |-> init_send_info]
-    /\ state = [k \in Key |-> new_state]
+    /\ send_info = [t \in Type |-> init_send_info]
+    /\ state = [t \in Type |-> [k \in Key |-> new_state]]
     /\ notify_list = <<>>
     /\ next_val = 30
     /\ pc = "Init"
-    /\ local_key = nil
+    /\ local_type = nil
     /\ local_status = nil
 
 
-UpdateKey(k) ==
+UpdateKey(t, k) ==
     LET
         update_cond(status) ==
-            /\ k \notin changeset
+            /\ t \notin need_alert
             /\ IF status = "OK"
-                THEN k \in alerting
-                ELSE k \notin alerting
-
-        need_clear(status) ==
-            IF status = "OK"
-                THEN k \notin alerting
-                ELSE k \in alerting
+                THEN t \in alerting
+                ELSE t \notin alerting
 
         update_changeset(status) ==
             IF update_cond(status) THEN
-                /\ changeset' = changeset \union {k}
+                /\ need_alert' = need_alert \union {t}
                 /\ version' = version + 1
-            ELSE IF k \in changeset THEN
-                /\ IF need_clear(status)
-                    THEN changeset' = changeset \ {k}
-                    ELSE UNCHANGED changeset
-                /\ UNCHANGED version
             ELSE
-                /\ UNCHANGED changeset
+                /\ UNCHANGED need_alert
                 /\ UNCHANGED version
     IN
     /\ next_val < max_val
     /\ next_val' = next_val + 1
     /\ \E status \in {"OK", "Failed"}:
         /\ state' = [state EXCEPT
-            ![k].val = next_val',
-            ![k].status = status]
+            ![t][k].val = next_val',
+            ![t][k].status = status]
         /\ update_changeset(status)
     /\ UNCHANGED alerting
     /\ UNCHANGED send_info
@@ -105,26 +95,34 @@ UpdateKey(k) ==
     /\ UNCHANGED node_vars
 
 
-GetChangedKey(k) ==
+state_is_ok(t) ==
+    \A k \in Key: state[t][k].status = "OK"
+
+GetChangedKey(t) ==
     /\ pc = "Init"
-    /\ k \in changeset
-    /\ changeset' = changeset \ {k}
+    /\ t \in need_alert
+    /\ need_alert' = need_alert \ {t}
 
-    /\ local_key' = k
-    /\ local_status' = state[k].status
+    /\ local_type' = t
+    /\ local_status' = IF state_is_ok(t) THEN "OK" ELSE "Failed"
     /\ pc' = "PushNotify"
-    /\ IF local_status' = "Failed"
-        THEN
-            /\ alerting' = alerting \union {k}
-            /\ send_info' = [send_info EXCEPT
-                    ![k].count = @ + 1,
-                    ![k].status = "Active"]
+    /\ IF local_status' = "Failed" THEN
+        IF local_status' # send_info[t].last_status
+            THEN
+                /\ alerting' = alerting \union {t}
+                /\ send_info' = [send_info EXCEPT
+                        ![t].count = @ + 1,
+                        ![t].status = "Active",
+                        ![t].last_status = local_status']
+            ELSE
+                /\ UNCHANGED alerting
+                /\ UNCHANGED send_info
         ELSE
-            /\ alerting' = alerting \ {k}
+            /\ alerting' = alerting \ {t}
             /\ send_info' = [send_info EXCEPT
-                    ![k].count = 0,
-                    ![k].status = "Disabled"]
-
+                    ![t].count = 0,
+                    ![t].status = "Disabled",
+                    ![t].last_status = local_status']
 
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
@@ -135,29 +133,29 @@ PushNotify ==
     LET
         noti_status == local_status
 
-        new_noti == [key |-> local_key, status |-> noti_status]
+        new_noti == [type |-> local_type, status |-> noti_status]
     IN
     /\ pc = "PushNotify"
     /\ pc' = "Init"
     /\ notify_list' = Append(notify_list, new_noti)
 
-    /\ local_key' = nil \* clear local
+    /\ local_type' = nil \* clear local
     /\ local_status' = nil \* clear local
 
     /\ UNCHANGED alerting
     /\ UNCHANGED send_info
-    /\ UNCHANGED <<changeset, version, state, next_val>>
+    /\ UNCHANGED <<need_alert, version, state, next_val>>
 
 
-retry_update_cond(k) ==
-    /\ k \notin changeset
-    /\ send_info[k].count < max_send_count
+retry_update_cond(t) ==
+    /\ t \notin need_alert
+    /\ send_info[t].count < max_send_count
 
-RetrySendAlert(k) ==
-    /\ send_info[k].status = "Active"
-    /\ IF retry_update_cond(k)
-        THEN changeset' = changeset \union {k}
-        ELSE UNCHANGED changeset
+RetrySendAlert(t) ==
+    /\ send_info[t].status = "Active"
+    /\ IF retry_update_cond(t)
+        THEN need_alert' = need_alert \union {t}
+        ELSE UNCHANGED need_alert
 
     /\ UNCHANGED alerting
     /\ UNCHANGED send_info
@@ -169,7 +167,7 @@ RetrySendAlert(k) ==
 TerminateCond ==
     /\ next_val = max_val
     /\ pc = "Init"
-    /\ changeset = {}
+    /\ need_alert = {}
 
 Terminated ==
     /\ TerminateCond
@@ -177,10 +175,12 @@ Terminated ==
 
 
 Next ==
-    \/ \E k \in Key:
-        \/ UpdateKey(k)
-        \/ RetrySendAlert(k)
-        \/ GetChangedKey(k)
+    \/ \E t \in Type, k \in Key:
+        \/ UpdateKey(t, k)
+
+    \/ \E t \in Type:
+        \/ RetrySendAlert(t)
+        \/ GetChangedKey(t)
     \/ PushNotify
     \/ Terminated
 
@@ -195,63 +195,64 @@ AlwaysTerminate == <> TerminateCond
 maxOfSet(set) ==
     CHOOSE x \in set: \A y \in set: y <= x
 
-notify_by_key(k) ==
-    {i \in DOMAIN notify_list: notify_list[i].key = k}
 
-last_noti(k) ==
-    notify_list[maxOfSet(notify_by_key(k))]
+notify_by_type(t) ==
+    {i \in DOMAIN notify_list: notify_list[i].type = t}
+
+last_noti(t) ==
+    notify_list[maxOfSet(notify_by_type(t))]
 
 
 NotifyListReflectState ==
     LET
-        match_cond(k) ==
-            notify_by_key(k) # {} =>
-                \/ last_noti(k).status = "Failed" /\ state[k].status = "Failed"
-                \/ last_noti(k).status = "OK" /\ state[k].status = "OK"
+        match_cond(t) ==
+            notify_by_type(t) # {} =>
+                \/ last_noti(t).status = "Failed" /\ ~state_is_ok(t)
+                \/ last_noti(t).status = "OK" /\ state_is_ok(t)
         
-        must_pushed(k) ==
-            state[k].status = "Failed" => notify_by_key(k) # {}
+        must_pushed(t) ==
+            ~state_is_ok(t) => notify_by_type(t) # {}
                 
         match_notify_list ==
-            \A k \in Key:
-                /\ match_cond(k)
-                /\ must_pushed(k)
+            \A t \in Type:
+                /\ match_cond(t)
+                /\ must_pushed(t)
     IN
         TerminateCond => match_notify_list
 
 
 AlertingMatchState ==
     LET
-        alert_cond(k) ==
-            /\ notify_by_key(k) # {}
-            /\ last_noti(k).status = "Failed"
+        alert_cond(t) ==
+            /\ notify_by_type(t) # {}
+            /\ last_noti(t).status = "Failed"
 
         match_cond ==
-            \A k \in Key:
-                k \in alerting <=> alert_cond(k)
+            \A t \in Type:
+                t \in alerting <=> alert_cond(t)
     IN
         TerminateCond => match_cond
 
 
 SendCountZeroForOK ==
-    \A k \in Key:
-        k \notin alerting <=> send_info[k].count = 0
+    \A t \in Type:
+        t \notin alerting <=> send_info[t].count = 0
 
 
 SendCountLimit ==
-    \A k \in Key: send_info[k].count <= max_send_count
+    \A t \in Type: send_info[t].count <= max_send_count + max_send_count
 
 
 SendStatusActiveWhenAlert ==
-    \A k \in Key:
-        k \in alerting <=> send_info[k].status = "Active"
+    \A t \in Type:
+        t \in alerting <=> send_info[t].status = "Active"
 
 
 AlwaysEnabledGetOrRetry ==
-    \A k \in Key:
-        state[k].status = "Failed" =>
-            \/ pc = "Init" => ENABLED GetChangedKey(k)
-            \/ send_info[k].count < max_send_count =>
-                    ENABLED RetrySendAlert(k) /\ retry_update_cond(k)
+    \A t \in Type:
+        ~state_is_ok(t) =>
+            \/ pc = "Init" => ENABLED GetChangedKey(t)
+            \/ send_info[t].count < max_send_count =>
+                    ENABLED RetrySendAlert(t) /\ retry_update_cond(t)
 
 ====
