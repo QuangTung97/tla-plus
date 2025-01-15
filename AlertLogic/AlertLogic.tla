@@ -150,7 +150,6 @@ PushNotify(n) ==
 
 
 retry_update_cond(k) ==
-    /\ k \in alerting
     /\ k \notin changeset
     /\ send_info[k].count < max_send_count
 
@@ -169,7 +168,7 @@ RetrySendAlert(k) ==
 
 TerminateCond ==
     /\ next_val = max_val
-    /\ \E n \in Node: pc[n] = "Init"
+    /\ \A n \in Node: pc[n] = "Init"
     /\ changeset = {}
 
 Terminated ==
