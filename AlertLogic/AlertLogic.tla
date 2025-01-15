@@ -3,16 +3,22 @@ EXTENDS TLC, Naturals, Sequences
 
 CONSTANTS Key, Node, nil
 
-VARIABLES version, changeset, state, status_list, alerting,
+VARIABLES version, changeset,
+    state, alerting,
+    send_info,
     notify_list, next_val, pc, local_key, local_status
 
-vars == <<version, changeset, state, status_list, alerting,
+vars == <<version, changeset,
+    state, alerting,
+    send_info,
     notify_list, next_val, pc, local_key, local_status>>
 
 node_vars == <<pc, local_key, local_status>>
 
 
 max_val == 35
+
+max_send_count == 2
 
 Version == 20..30
 
@@ -30,26 +36,29 @@ Notify == [key: Key, status: StateStatus]
 
 new_state == [val |-> 30, status |-> "OK"]
 
+SendInfo == [count: Nat, status: {"Active", "Disabled"}]
+
 
 TypeOK ==
     /\ version \in Version
     /\ changeset \subseteq Key
     /\ alerting \subseteq Key
+    /\ send_info \in [Key -> SendInfo]
     /\ state \in [Key -> State]
-    /\ status_list \in [Key -> Seq(StateStatus)]
     /\ notify_list \in Seq(Notify)
     /\ next_val \in Value
     /\ pc \in [Node -> {"Init", "PushNotify"}]
     /\ local_key \in [Node -> NullKey]
     /\ local_status \in [Node -> NullStatus]
 
+init_send_info == [count |-> 0, status |-> "Disabled"]
 
 Init ==
     /\ version = 20
     /\ changeset = {}
     /\ alerting = {}
+    /\ send_info = [k \in Key |-> init_send_info]
     /\ state = [k \in Key |-> new_state]
-    /\ status_list = [k \in Key |-> <<>>]
     /\ notify_list = <<>>
     /\ next_val = 30
     /\ pc = [n \in Node |-> "Init"]
@@ -65,17 +74,6 @@ UpdateKey(k) ==
                 THEN k \in alerting
                 ELSE k \notin alerting
 
-        update_tail(status) ==
-            LET last == Len(status_list[k]) IN
-            status_list' = [
-                status_list EXCEPT ![k][last] = status]
-
-        remove_tail ==
-            LET last == Len(status_list[k]) IN
-                status_list' = [
-                    status_list EXCEPT ![k] = SubSeq(@, 1, last - 1)
-                ]
-
         need_clear(status) ==
             IF status = "OK"
                 THEN k \notin alerting
@@ -85,20 +83,13 @@ UpdateKey(k) ==
             IF update_cond(status) THEN
                 /\ changeset' = changeset \union {k}
                 /\ version' = version + 1
-                /\ status_list' = [
-                    status_list EXCEPT ![k] = Append(@, status)]
             ELSE IF k \in changeset THEN
                 /\ IF need_clear(status)
-                    THEN
-                        /\ changeset' = changeset \ {k}
-                        /\ remove_tail
-                    ELSE
-                        /\ UNCHANGED changeset
-                        /\ update_tail(status)
+                    THEN changeset' = changeset \ {k}
+                    ELSE UNCHANGED changeset
                 /\ UNCHANGED version
             ELSE
                 /\ UNCHANGED changeset
-                /\ UNCHANGED status_list
                 /\ UNCHANGED version
     IN
     /\ next_val < max_val
@@ -109,6 +100,7 @@ UpdateKey(k) ==
             ![k].status = status]
         /\ update_changeset(status)
     /\ UNCHANGED alerting
+    /\ UNCHANGED send_info
     /\ UNCHANGED notify_list
     /\ UNCHANGED node_vars
 
@@ -122,12 +114,21 @@ GetChangedKey(n, k) ==
     /\ local_status' = [local_status EXCEPT ![n] = state[k].status]
     /\ pc' = [pc EXCEPT ![n] = "PushNotify"]
     /\ IF local_status'[n] = "Failed"
-        THEN alerting' = alerting \union {k}
-        ELSE alerting' = alerting \ {k}
+        THEN
+            /\ alerting' = alerting \union {k}
+            /\ send_info' = [send_info EXCEPT
+                    ![k].count = @ + 1,
+                    ![k].status = "Active"]
+        ELSE
+            /\ alerting' = alerting \ {k}
+            /\ send_info' = [send_info EXCEPT
+                    ![k].count = 0,
+                    ![k].status = "Disabled"]
+
 
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
-    /\ UNCHANGED <<state, status_list, version>>
+    /\ UNCHANGED <<state, version>>
 
 
 PushNotify(n) ==
@@ -144,7 +145,26 @@ PushNotify(n) ==
     /\ local_status' = [local_status EXCEPT ![n] = nil] \* clear local
 
     /\ UNCHANGED alerting
-    /\ UNCHANGED <<changeset, version, state, status_list, next_val>>
+    /\ UNCHANGED send_info
+    /\ UNCHANGED <<changeset, version, state, next_val>>
+
+
+retry_update_cond(k) ==
+    /\ k \in alerting
+    /\ k \notin changeset
+    /\ send_info[k].count < max_send_count
+
+RetrySendAlert(k) ==
+    /\ send_info[k].status = "Active"
+    /\ IF retry_update_cond(k)
+        THEN changeset' = changeset \union {k}
+        ELSE UNCHANGED changeset
+
+    /\ UNCHANGED alerting
+    /\ UNCHANGED send_info
+    /\ UNCHANGED notify_list
+    /\ UNCHANGED <<next_val, state, version>>
+    /\ UNCHANGED node_vars
 
 
 TerminateCond ==
@@ -159,7 +179,8 @@ Terminated ==
 
 Next ==
     \/ \E k \in Key:
-        UpdateKey(k)
+        \/ UpdateKey(k)
+        \/ RetrySendAlert(k)
     \/ \E n \in Node:
         \/ \E k \in Key: GetChangedKey(n, k)
         \/ PushNotify(n)
@@ -214,14 +235,25 @@ AlertingMatchState ==
         TerminateCond => match_cond
 
 
-NotSendingDuplicatedAlert ==
-    LET
-        n1(k) == Len(status_list[k]) - 1
+SendCountZeroForOK ==
+    \A k \in Key:
+        k \notin alerting <=> send_info[k].count = 0
 
-        cond(k) ==
-            \A i \in 1..n1(k): status_list[k][i] # status_list[k][i + 1]
-    IN
-        \A k \in Key: cond(k)
 
+SendCountLimit ==
+    \A k \in Key: send_info[k].count <= max_send_count
+
+
+SendStatusActiveWhenAlert ==
+    \A k \in Key:
+        k \in alerting <=> send_info[k].status = "Active"
+
+
+AlwaysEnabledGetOrRetry ==
+    \A k \in Key:
+        state[k].status = "Failed" =>
+            \/ \A n \in Node: pc[n] = "Init" => ENABLED GetChangedKey(n, k)
+            \/ send_info[k].count < max_send_count =>
+                    ENABLED RetrySendAlert(k) /\ retry_update_cond(k)
 
 ====
