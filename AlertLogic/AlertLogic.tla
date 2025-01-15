@@ -1,7 +1,7 @@
 ------ MODULE AlertLogic ----
 EXTENDS TLC, Naturals, Sequences
 
-CONSTANTS Key, Node, nil
+CONSTANTS Key, nil
 
 VARIABLES version, changeset,
     state, alerting,
@@ -47,9 +47,9 @@ TypeOK ==
     /\ state \in [Key -> State]
     /\ notify_list \in Seq(Notify)
     /\ next_val \in Value
-    /\ pc \in [Node -> {"Init", "PushNotify"}]
-    /\ local_key \in [Node -> NullKey]
-    /\ local_status \in [Node -> NullStatus]
+    /\ pc \in {"Init", "PushNotify"}
+    /\ local_key \in NullKey
+    /\ local_status \in NullStatus
 
 init_send_info == [count |-> 0, status |-> "Disabled"]
 
@@ -61,9 +61,9 @@ Init ==
     /\ state = [k \in Key |-> new_state]
     /\ notify_list = <<>>
     /\ next_val = 30
-    /\ pc = [n \in Node |-> "Init"]
-    /\ local_key = [n \in Node |-> nil]
-    /\ local_status = [n \in Node |-> nil]
+    /\ pc = "Init"
+    /\ local_key = nil
+    /\ local_status = nil
 
 
 UpdateKey(k) ==
@@ -105,15 +105,15 @@ UpdateKey(k) ==
     /\ UNCHANGED node_vars
 
 
-GetChangedKey(n, k) ==
-    /\ pc[n] = "Init"
+GetChangedKey(k) ==
+    /\ pc = "Init"
     /\ k \in changeset
     /\ changeset' = changeset \ {k}
 
-    /\ local_key' = [local_key EXCEPT ![n] = k]
-    /\ local_status' = [local_status EXCEPT ![n] = state[k].status]
-    /\ pc' = [pc EXCEPT ![n] = "PushNotify"]
-    /\ IF local_status'[n] = "Failed"
+    /\ local_key' = k
+    /\ local_status' = state[k].status
+    /\ pc' = "PushNotify"
+    /\ IF local_status' = "Failed"
         THEN
             /\ alerting' = alerting \union {k}
             /\ send_info' = [send_info EXCEPT
@@ -131,18 +131,18 @@ GetChangedKey(n, k) ==
     /\ UNCHANGED <<state, version>>
 
 
-PushNotify(n) ==
+PushNotify ==
     LET
-        noti_status == local_status[n]
+        noti_status == local_status
 
-        new_noti == [key |-> local_key[n], status |-> noti_status]
+        new_noti == [key |-> local_key, status |-> noti_status]
     IN
-    /\ pc[n] = "PushNotify"
-    /\ pc' = [pc EXCEPT ![n] = "Init"]
+    /\ pc = "PushNotify"
+    /\ pc' = "Init"
     /\ notify_list' = Append(notify_list, new_noti)
 
-    /\ local_key' = [local_key EXCEPT ![n] = nil] \* clear local
-    /\ local_status' = [local_status EXCEPT ![n] = nil] \* clear local
+    /\ local_key' = nil \* clear local
+    /\ local_status' = nil \* clear local
 
     /\ UNCHANGED alerting
     /\ UNCHANGED send_info
@@ -168,7 +168,7 @@ RetrySendAlert(k) ==
 
 TerminateCond ==
     /\ next_val = max_val
-    /\ \A n \in Node: pc[n] = "Init"
+    /\ pc = "Init"
     /\ changeset = {}
 
 Terminated ==
@@ -180,9 +180,8 @@ Next ==
     \/ \E k \in Key:
         \/ UpdateKey(k)
         \/ RetrySendAlert(k)
-    \/ \E n \in Node:
-        \/ \E k \in Key: GetChangedKey(n, k)
-        \/ PushNotify(n)
+        \/ GetChangedKey(k)
+    \/ PushNotify
     \/ Terminated
 
 
@@ -251,7 +250,7 @@ SendStatusActiveWhenAlert ==
 AlwaysEnabledGetOrRetry ==
     \A k \in Key:
         state[k].status = "Failed" =>
-            \/ \A n \in Node: pc[n] = "Init" => ENABLED GetChangedKey(n, k)
+            \/ pc = "Init" => ENABLED GetChangedKey(k)
             \/ send_info[k].count < max_send_count =>
                     ENABLED RetrySendAlert(k) /\ retry_update_cond(k)
 
