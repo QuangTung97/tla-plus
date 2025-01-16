@@ -3,12 +3,12 @@ EXTENDS TLC, Naturals, Sequences
 
 CONSTANTS Type, Key, nil
 
-VARIABLES version, need_alert,
+VARIABLES version, alert_enabled, need_alert,
     state, alerting,
     send_info,
     notify_list, next_val, pc, local_type, local_status
 
-vars == <<version, need_alert,
+vars == <<version, alert_enabled, need_alert,
     state, alerting,
     send_info,
     notify_list, next_val, pc, local_type, local_status>>
@@ -41,6 +41,7 @@ SendInfo == [count: Nat, status: {"Active", "Disabled"}, last_status: NullStatus
 
 TypeOK ==
     /\ version \in Version
+    /\ alert_enabled \in [Type -> BOOLEAN]
     /\ need_alert \subseteq Type
     /\ alerting \subseteq Type
     /\ send_info \in [Type -> SendInfo]
@@ -55,6 +56,7 @@ init_send_info == [count |-> 0, status |-> "Disabled", last_status |-> nil]
 
 Init ==
     /\ version = 20
+    /\ alert_enabled = [t \in Type |-> TRUE]
     /\ need_alert = {}
     /\ alerting = {}
     /\ send_info = [t \in Type |-> init_send_info]
@@ -93,6 +95,7 @@ UpdateKey(t, k) ==
     /\ UNCHANGED send_info
     /\ UNCHANGED notify_list
     /\ UNCHANGED node_vars
+    /\ UNCHANGED alert_enabled
 
 
 state_is_ok(t) ==
@@ -127,6 +130,7 @@ GetChangedKey(t) ==
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
     /\ UNCHANGED <<state, version>>
+    /\ UNCHANGED alert_enabled
 
 
 PushNotify ==
@@ -143,6 +147,7 @@ PushNotify ==
     /\ local_status' = nil \* clear local
 
     /\ UNCHANGED alerting
+    /\ UNCHANGED alert_enabled
     /\ UNCHANGED send_info
     /\ UNCHANGED <<need_alert, version, state, next_val>>
 
@@ -162,6 +167,7 @@ RetrySendAlert(t) ==
     /\ UNCHANGED notify_list
     /\ UNCHANGED <<next_val, state, version>>
     /\ UNCHANGED node_vars
+    /\ UNCHANGED alert_enabled
 
 
 TerminateCond ==
