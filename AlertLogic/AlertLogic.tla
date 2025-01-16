@@ -226,10 +226,14 @@ EnableAlert(t) ==
     /\ UNCHANGED node_vars
 
 
-TerminateCond ==
-    /\ next_val = max_val
+notifyStopCond ==
     /\ pc = "Init"
     /\ need_alert = {}
+
+TerminateCond ==
+    /\ notifyStopCond
+    /\ next_val = max_val
+    /\ \A t \in Type: ~state_is_ok(t) => send_info[t].count = max_send_count
 
 Terminated ==
     /\ TerminateCond
@@ -283,7 +287,7 @@ NotifyListReflectState ==
                     /\ match_cond(t)
                     /\ must_pushed(t)
     IN
-        TerminateCond => match_notify_list
+        notifyStopCond => match_notify_list
 
 
 AlertingMatchState ==
@@ -296,7 +300,7 @@ AlertingMatchState ==
             \A t \in Type:
                 t \in alerting <=> alert_cond(t)
     IN
-        TerminateCond => match_cond
+        notifyStopCond => match_cond
 
 
 SendCountZeroForOK ==
