@@ -3,12 +3,12 @@ EXTENDS TLC, Naturals, Sequences
 
 CONSTANTS Type, Key, nil
 
-VARIABLES version, alert_enabled, need_alert,
+VARIABLES alert_enabled, need_alert,
     state, alerting,
     send_info,
     notify_list, next_val, pc, local_type, local_status
 
-vars == <<version, alert_enabled, need_alert,
+vars == <<alert_enabled, need_alert,
     state, alerting,
     send_info,
     notify_list, next_val, pc, local_type, local_status>>
@@ -19,8 +19,6 @@ node_vars == <<pc, local_type, local_status>>
 max_val == 34
 
 max_send_count == 3
-
-Version == 20..30
 
 Value == 30..max_val
 
@@ -44,7 +42,6 @@ SendInfo == [
 
 
 TypeOK ==
-    /\ version \in Version
     /\ alert_enabled \in [Type -> BOOLEAN]
     /\ need_alert \subseteq Type
     /\ alerting \subseteq Type
@@ -59,7 +56,6 @@ TypeOK ==
 init_send_info == [count |-> 0, status |-> "Disabled", last_status |-> nil]
 
 Init ==
-    /\ version = 20
     /\ alert_enabled = [t \in Type |-> TRUE]
     /\ need_alert = {}
     /\ alerting = {}
@@ -84,10 +80,8 @@ UpdateKey(t, k) ==
         update_changeset(status) ==
             IF update_cond(status) THEN
                 /\ need_alert' = need_alert \union {t}
-                /\ version' = version + 1
             ELSE
                 /\ UNCHANGED need_alert
-                /\ UNCHANGED version
     IN
     /\ next_val < max_val
     /\ next_val' = next_val + 1
@@ -134,7 +128,7 @@ GetChangedKey(t) ==
 
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
-    /\ UNCHANGED <<state, version>>
+    /\ UNCHANGED state
     /\ UNCHANGED alert_enabled
 
 
@@ -154,7 +148,7 @@ PushNotify ==
     /\ UNCHANGED alerting
     /\ UNCHANGED alert_enabled
     /\ UNCHANGED send_info
-    /\ UNCHANGED <<need_alert, version, state, next_val>>
+    /\ UNCHANGED <<need_alert, state, next_val>>
 
 
 RetrySendAlert(t) ==
@@ -165,7 +159,7 @@ RetrySendAlert(t) ==
     /\ send_info' = [send_info EXCEPT ![t].last_status = nil]
     /\ UNCHANGED alerting
     /\ UNCHANGED notify_list
-    /\ UNCHANGED <<next_val, state, version>>
+    /\ UNCHANGED <<next_val, state>>
     /\ UNCHANGED node_vars
     /\ UNCHANGED alert_enabled
 
@@ -173,7 +167,12 @@ RetrySendAlert(t) ==
 DisableAlert(t) ==
     /\ alert_enabled[t]
     /\ alert_enabled' = [alert_enabled EXCEPT ![t] = FALSE]
+    /\ UNCHANGED state
+    /\ UNCHANGED <<need_alert, alerting>>
+    /\ UNCHANGED next_val
+    /\ UNCHANGED notify_list
     /\ UNCHANGED node_vars
+    /\ UNCHANGED send_info
 
 
 TerminateCond ==
