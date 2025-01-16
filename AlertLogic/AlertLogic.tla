@@ -43,13 +43,15 @@ SendInfo == [
     last_status: NullStatus
 ]
 
+NullSendInfo == SendInfo \union {nil}
+
 
 TypeOK ==
     /\ alert_enabled \in [Type -> BOOLEAN]
     /\ need_alert \subseteq Type
     /\ alerting \subseteq Type
     /\ num_disable \in 0..max_disable
-    /\ send_info \in [Type -> SendInfo]
+    /\ send_info \in [Type -> NullSendInfo]
     /\ state \in [Type -> [Key -> State]]
     /\ notify_list \in Seq(Notify)
     /\ next_val \in Value
@@ -57,19 +59,13 @@ TypeOK ==
     /\ local_type \in NullType
     /\ local_status \in NullStatus
 
-init_send_info == [
-    enabled |-> TRUE,
-    count |-> 0,
-    status |-> "Disabled",
-    last_status |-> nil
-]
 
 Init ==
     /\ alert_enabled = [t \in Type |-> TRUE]
     /\ need_alert = {}
     /\ alerting = {}
     /\ num_disable = 0
-    /\ send_info = [t \in Type |-> init_send_info] \* TODO nullable
+    /\ send_info = [t \in Type |-> nil]
     /\ state = [t \in Type |-> [k \in Key |-> new_state]]
     /\ notify_list = <<>>
     /\ next_val = 30
@@ -109,7 +105,38 @@ UpdateKey(t, k) ==
 state_is_ok(t) ==
     \A k \in Key: state[t][k].status = "OK"
 
+
+
 GetChangedKey(t) ==
+    LET
+        not_allow_set_active ==
+            /\ send_info[t] # nil
+            /\ local_status' = send_info[t].last_status
+        
+        allow_set_active == ~not_allow_set_active
+
+        new_failed == [
+            enabled |-> TRUE,
+            count |-> 1,
+            status |-> "Active",
+            last_status |-> nil
+        ]
+
+        set_active ==
+            IF send_info[t] = nil
+                THEN send_info' = [send_info EXCEPT ![t] = new_failed]
+                ELSE send_info' = [send_info EXCEPT
+                        ![t].count = @ + 1,
+                        ![t].status = "Active",
+                        ![t].last_status = local_status']
+        
+        new_info_disabled == [
+            enabled |-> TRUE,
+            count |-> 0,
+            status |-> "Disabled",
+            last_status |-> nil
+        ]
+    IN
     /\ pc = "Init"
     /\ t \in need_alert
     /\ alert_enabled[t]
@@ -119,23 +146,15 @@ GetChangedKey(t) ==
     /\ local_status' = IF state_is_ok(t) THEN "OK" ELSE "Failed"
     /\ pc' = "PushNotify"
     /\ IF local_status' = "Failed" THEN
-        IF local_status' # send_info[t].last_status
-            THEN
+            IF allow_set_active THEN
                 /\ alerting' = alerting \union {t}
-                /\ send_info' = [send_info EXCEPT
-                        ![t].count = @ + 1,
-                        ![t].status = "Active",
-                        ![t].last_status = local_status']
+                /\ set_active
             ELSE
                 /\ UNCHANGED alerting
                 /\ UNCHANGED send_info
         ELSE
             /\ alerting' = alerting \ {t}
-            /\ send_info' = [send_info EXCEPT
-                    ![t].count = 0,
-                    ![t].status = "Disabled",
-                    ![t].last_status = local_status']
-
+            /\ send_info' = [send_info EXCEPT ![t] = new_info_disabled]
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
     /\ UNCHANGED state
@@ -162,6 +181,7 @@ PushNotify ==
 
 
 RetrySendAlert(t) ==
+    /\ send_info[t] # nil
     /\ send_info[t].status = "Active"
     /\ send_info[t].enabled
     /\ t \notin need_alert
@@ -182,7 +202,9 @@ DisableAlert(t) ==
     /\ num_disable < max_disable
     /\ num_disable' = num_disable + 1
     /\ alert_enabled' = [alert_enabled EXCEPT ![t] = FALSE]
-    /\ send_info' = [send_info EXCEPT ![t].enabled = FALSE]
+    /\ IF send_info[t] # nil
+        THEN send_info' = [send_info EXCEPT ![t].enabled = FALSE]
+        ELSE UNCHANGED send_info
     /\ UNCHANGED state
     /\ UNCHANGED <<need_alert, alerting>>
     /\ UNCHANGED next_val
@@ -193,7 +215,9 @@ DisableAlert(t) ==
 EnableAlert(t) ==
     /\ ~alert_enabled[t]
     /\ alert_enabled' = [alert_enabled EXCEPT ![t] = TRUE]
-    /\ send_info' = [send_info EXCEPT ![t].enabled = TRUE]
+    /\ IF send_info[t] # nil
+        THEN send_info' = [send_info EXCEPT ![t].enabled = TRUE]
+        ELSE UNCHANGED send_info
     /\ UNCHANGED num_disable
     /\ UNCHANGED state
     /\ UNCHANGED <<need_alert, alerting>>
@@ -276,16 +300,17 @@ AlertingMatchState ==
 
 
 SendCountZeroForOK ==
-    \A t \in Type:
-        t \notin alerting <=> send_info[t].count = 0
+    \A t \in Type: send_info[t] # nil =>
+        (t \notin alerting <=> send_info[t].count = 0)
 
 
 SendCountLimit ==
-    \A t \in Type: send_info[t].count <= max_send_count
+    \A t \in Type: send_info[t] # nil =>
+        send_info[t].count <= max_send_count
 
 
 SendStatusActiveWhenAlert ==
-    \A t \in Type:
+    \A t \in Type: send_info[t] # nil =>
         t \in alerting <=> send_info[t].status = "Active"
 
 
@@ -295,17 +320,6 @@ AlwaysEnabledGetOrRetry ==
             \/ pc = "Init" => ENABLED GetChangedKey(t)
             \/ send_info[t].count < max_send_count =>
                     ENABLED RetrySendAlert(t)
-
-
-CheckEnabledGetKey ==
-    LET
-        cond(t) ==
-            /\ t \in need_alert
-            /\ alert_enabled[t]
-            /\ pc = "Init"
-    IN
-    \A t \in Type:
-        cond(t) => ENABLED GetChangedKey(t)
 
 
 CheckEnabledPushNotify ==
@@ -318,7 +332,7 @@ NotRetryWhenDisabled ==
 
 
 AlertEnabledMatchSendInfo ==
-    \A t \in Type:
+    \A t \in Type: send_info[t] # nil =>
         alert_enabled[t] <=> send_info[t].enabled
 
 
