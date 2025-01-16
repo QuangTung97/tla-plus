@@ -16,9 +16,9 @@ vars == <<alert_enabled, need_alert,
 node_vars == <<pc, local_type, local_status>>
 
 
-max_val == 33 \* TODO prev = 34
+max_val == 34
 
-max_send_count == 2 \* TODO prev = 3
+max_send_count == 2
 
 max_disable == 2
 
@@ -304,8 +304,13 @@ AlertingMatchState ==
 
 
 SendCountZeroForOK ==
-    \A t \in Type: send_info[t] # nil =>
-        (t \notin alerting <=> send_info[t].count = 0)
+    LET
+        is_non_zero(t) ==
+            /\ send_info[t] # nil
+            /\ send_info[t].count > 0
+    IN
+        \A t \in Type:
+            (t \in alerting <=> is_non_zero(t))
 
 
 SendCountLimit ==
@@ -314,8 +319,12 @@ SendCountLimit ==
 
 
 SendStatusActiveWhenAlert ==
-    \A t \in Type: send_info[t] # nil =>
-        t \in alerting <=> send_info[t].status = "Active"
+    LET
+        is_active(t) ==
+            /\ send_info[t] # nil
+            /\ send_info[t].status = "Active"
+    IN
+        \A t \in Type: t \in alerting <=> is_active(t)
 
 
 AlwaysEnabledGetOrRetry ==
