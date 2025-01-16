@@ -16,13 +16,13 @@ vars == <<version, alert_enabled, need_alert,
 node_vars == <<pc, local_type, local_status>>
 
 
-max_val == 35
+max_val == 34
 
-max_send_count == 1
+max_send_count == 3
 
 Version == 20..30
 
-Value == 30..40
+Value == 30..max_val
 
 StateStatus == {"OK", "Failed"}
 
@@ -36,7 +36,11 @@ Notify == [type: Type, status: StateStatus]
 
 new_state == [val |-> 30, status |-> "OK"]
 
-SendInfo == [count: Nat, status: {"Active", "Disabled"}, last_status: NullStatus]
+SendInfo == [
+    count: 0..max_send_count,
+    status: {"Active", "Disabled"},
+    last_status: NullStatus
+]
 
 
 TypeOK ==
@@ -71,6 +75,7 @@ Init ==
 UpdateKey(t, k) ==
     LET
         update_cond(status) ==
+            /\ alert_enabled[t]
             /\ t \notin need_alert
             /\ IF status = "OK"
                 THEN t \in alerting
@@ -152,22 +157,23 @@ PushNotify ==
     /\ UNCHANGED <<need_alert, version, state, next_val>>
 
 
-retry_update_cond(t) ==
-    /\ t \notin need_alert
-    /\ send_info[t].count < max_send_count
-
 RetrySendAlert(t) ==
     /\ send_info[t].status = "Active"
-    /\ IF retry_update_cond(t)
-        THEN need_alert' = need_alert \union {t}
-        ELSE UNCHANGED need_alert
-
+    /\ t \notin need_alert
+    /\ send_info[t].count < max_send_count
+    /\ need_alert' = need_alert \union {t}
+    /\ send_info' = [send_info EXCEPT ![t].last_status = nil]
     /\ UNCHANGED alerting
-    /\ UNCHANGED send_info
     /\ UNCHANGED notify_list
     /\ UNCHANGED <<next_val, state, version>>
     /\ UNCHANGED node_vars
     /\ UNCHANGED alert_enabled
+
+
+DisableAlert(t) ==
+    /\ alert_enabled[t]
+    /\ alert_enabled' = [alert_enabled EXCEPT ![t] = FALSE]
+    /\ UNCHANGED node_vars
 
 
 TerminateCond ==
@@ -187,6 +193,7 @@ Next ==
     \/ \E t \in Type:
         \/ RetrySendAlert(t)
         \/ GetChangedKey(t)
+        \* \/ DisableAlert(t) TODO
     \/ PushNotify
     \/ Terminated
 
@@ -246,7 +253,7 @@ SendCountZeroForOK ==
 
 
 SendCountLimit ==
-    \A t \in Type: send_info[t].count <= max_send_count + max_send_count
+    \A t \in Type: send_info[t].count <= max_send_count
 
 
 SendStatusActiveWhenAlert ==
@@ -259,6 +266,23 @@ AlwaysEnabledGetOrRetry ==
         ~state_is_ok(t) =>
             \/ pc = "Init" => ENABLED GetChangedKey(t)
             \/ send_info[t].count < max_send_count =>
-                    ENABLED RetrySendAlert(t) /\ retry_update_cond(t)
+                    ENABLED RetrySendAlert(t)
+
+
+CheckEnabledGetKey ==
+    LET
+        cond(t) ==
+            /\ t \in need_alert
+            /\ pc = "Init"
+    IN
+    \A t \in Type:
+        cond(t) => ENABLED GetChangedKey(t)
+
+
+CheckEnabledPushNotify ==
+    pc = "PushNotify" => ENABLED PushNotify
+
+
+Sym == Permutations(Type) \union Permutations(Key)
 
 ====
