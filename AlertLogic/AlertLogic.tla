@@ -355,8 +355,12 @@ AlertEnabledMatchSendInfo ==
 
 
 CanRetryMatchRunning ==
+    LET
+        cond(t) ==
+            /\ send_info[t].status = "Sending"
+    IN
     \A t \in Type: send_info[t] # nil =>
-        (send_info[t].can_retry => send_info[t].status = "Sending")
+        (send_info[t].can_retry => cond(t))
 
 
 Sym == Permutations(Type) \union Permutations(Key)
