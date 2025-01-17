@@ -40,6 +40,7 @@ SendInfo == [
     enabled: BOOLEAN,
     count: 0..max_send_count,
     status: {"Sending", "Stopped"},
+    can_retry: BOOLEAN,
     last_status: NullStatus
 ]
 
@@ -106,7 +107,6 @@ state_is_ok(t) ==
     \A k \in Key: state[t][k].status = "OK"
 
 
-
 GetChangedKey(t) ==
     LET
         not_allow_set ==
@@ -119,7 +119,8 @@ GetChangedKey(t) ==
             enabled |-> TRUE,
             count |-> 1,
             status |-> "Sending",
-            last_status |-> local_status'
+            last_status |-> local_status',
+            can_retry |-> TRUE
         ]
 
         set_info_sending ==
@@ -128,13 +129,15 @@ GetChangedKey(t) ==
                 ELSE send_info' = [send_info EXCEPT
                         ![t].count = @ + 1,
                         ![t].status = "Sending",
-                        ![t].last_status = local_status']
+                        ![t].last_status = local_status',
+                        ![t].can_retry = TRUE]
         
         new_stopped_info == [
             enabled |-> TRUE,
             count |-> 0,
             status |-> "Stopped",
-            last_status |-> local_status'
+            last_status |-> local_status',
+            can_retry |-> FALSE
         ]
     IN
     /\ pc = "Init"
@@ -184,11 +187,13 @@ RetrySendAlert(t) ==
     /\ send_info[t] # nil
     /\ send_info[t].status = "Sending"
     /\ send_info[t].enabled
-    /\ t \notin need_alert
+    /\ send_info[t].can_retry
     /\ send_info[t].count < max_send_count
 
     /\ need_alert' = need_alert \union {t}
-    /\ send_info' = [send_info EXCEPT ![t].last_status = nil]
+    /\ send_info' = [send_info EXCEPT
+            ![t].last_status = nil,
+            ![t].can_retry = FALSE]
 
     /\ UNCHANGED alerting
     /\ UNCHANGED notify_list
@@ -347,6 +352,11 @@ NotRetryWhenDisabled ==
 AlertEnabledMatchSendInfo ==
     \A t \in Type: send_info[t] # nil =>
         alert_enabled[t] <=> send_info[t].enabled
+
+
+CanRetryMatchRunning ==
+    \A t \in Type: send_info[t] # nil =>
+        (send_info[t].can_retry => send_info[t].status = "Sending")
 
 
 Sym == Permutations(Type) \union Permutations(Key)
