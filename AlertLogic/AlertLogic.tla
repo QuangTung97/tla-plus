@@ -447,6 +447,10 @@ PCInitInv ==
         /\ local_index = nil
 
 
+NeedAlertEmptyWhenTerminate ==
+    TerminateCond => need_alert = {}
+
+
 Sym == Permutations(Type) \union Permutations(Key)
 
 ====
