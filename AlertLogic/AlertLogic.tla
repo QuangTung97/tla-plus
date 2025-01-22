@@ -41,8 +41,7 @@ new_state == [val |-> 30, status |-> "OK"]
 SendInfo == [
     enabled: BOOLEAN,
     count: 0..max_send_count,
-    status: {"Sending", "Stopped"},
-    last_status: NullStatus
+    status: {"Sending", "Stopped", "Retrying"}
 ]
 
 NullSendInfo == SendInfo \union {nil}
@@ -123,17 +122,21 @@ UpdateKey(t, k) ==
 
 GetChangedKey(t) ==
     LET
-        not_allow_set ==
-            /\ send_info[t] # nil
-            /\ local_status' = send_info[t].last_status
+        allow_send_fail ==
+            /\ local_status' = "Failed"
+            /\ \/ send_info[t] = nil
+               \/ send_info[t].status = "Retrying"
+               \/ send_info[t].status = "Stopped"
         
-        allow_set == ~not_allow_set
+        allow_send_success ==
+            /\ local_status' = "OK"
+            /\ send_info[t] # nil
+            /\ send_info[t].status # "Stopped"
 
         new_sending_info == [
             enabled |-> TRUE,
             count |-> 1,
-            status |-> "Sending",
-            last_status |-> local_status'
+            status |-> "Sending"
         ]
 
         set_info_sending ==
@@ -141,14 +144,12 @@ GetChangedKey(t) ==
                 THEN send_info' = [send_info EXCEPT ![t] = new_sending_info]
                 ELSE send_info' = [send_info EXCEPT
                         ![t].count = @ + 1,
-                        ![t].status = "Sending",
-                        ![t].last_status = local_status']
+                        ![t].status = "Sending"]
         
         new_stopped_info == [
             enabled |-> TRUE,
             count |-> 0,
-            status |-> "Stopped",
-            last_status |-> local_status'
+            status |-> "Stopped"
         ]
     IN
     /\ pc = "Init"
@@ -159,19 +160,14 @@ GetChangedKey(t) ==
     /\ local_type' = t
     /\ local_status' = IF state_is_ok(t) THEN "OK" ELSE "Failed"
     /\ local_index' = Len(status_list[t])
-    /\ IF allow_set THEN
-            IF local_status' = "Failed" THEN
-                /\ alerting' = alerting \union {t}
-                /\ set_info_sending
-                /\ pc' = "PushNotify"
-            ELSE IF send_info[t] = nil THEN
-                /\ UNCHANGED alerting
-                /\ UNCHANGED send_info
-                /\ pc' = "ClearLocals"
-            ELSE
-                /\ alerting' = alerting \ {t}
-                /\ send_info' = [send_info EXCEPT ![t] = new_stopped_info]
-                /\ pc' = "PushNotify"
+    /\ IF allow_send_fail THEN
+            /\ alerting' = alerting \union {t}
+            /\ set_info_sending
+            /\ pc' = "PushNotify"
+        ELSE IF allow_send_success THEN
+            /\ alerting' = alerting \ {t}
+            /\ send_info' = [send_info EXCEPT ![t] = new_stopped_info]
+            /\ pc' = "PushNotify"
         ELSE
             /\ UNCHANGED alerting
             /\ UNCHANGED send_info
@@ -224,17 +220,16 @@ ClearLocals ==
 
 
 can_retry(t) ==
-    send_info[t].last_status = "Failed"
+    send_info[t].status = "Sending"
 
 RetrySendAlert(t) ==
     /\ send_info[t] # nil
     /\ send_info[t].status = "Sending"
     /\ send_info[t].enabled
-    /\ can_retry(t)
     /\ send_info[t].count < max_send_count
 
     /\ need_alert' = need_alert \union {t}
-    /\ send_info' = [send_info EXCEPT ![t].last_status = nil]
+    /\ send_info' = [send_info EXCEPT ![t].status = "Retrying"]
 
     /\ UNCHANGED alerting
     /\ UNCHANGED notify_list
@@ -372,7 +367,7 @@ SendStatusActiveWhenAlert ==
     LET
         is_active(t) ==
             /\ send_info[t] # nil
-            /\ send_info[t].status = "Sending"
+            /\ send_info[t].status \in {"Sending", "Retrying"}
     IN
         \A t \in Type: t \in alerting <=> is_active(t)
 
