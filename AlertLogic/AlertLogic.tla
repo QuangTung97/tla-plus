@@ -448,7 +448,10 @@ PCInitInv ==
 
 
 NeedAlertEmptyWhenTerminate ==
-    TerminateCond => need_alert = {}
+    TerminateCond =>
+        /\ need_alert = {}
+        /\ \A t \in Type:
+            state_is_ok(t) <=> t \notin alerting
 
 
 Sym == Permutations(Type) \union Permutations(Key)
