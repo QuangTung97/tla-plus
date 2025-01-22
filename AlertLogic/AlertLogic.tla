@@ -448,7 +448,7 @@ PCInitInv ==
 
 
 NeedAlertEmptyWhenTerminate ==
-    TerminateCond =>
+    notifyStopCond =>
         /\ need_alert = {}
         /\ \A t \in Type:
             state_is_ok(t) <=> t \notin alerting
