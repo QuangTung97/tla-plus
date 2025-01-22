@@ -5,15 +5,17 @@ CONSTANTS Type, Key, nil
 
 VARIABLES alert_enabled, need_alert,
     state, alerting, num_disable,
-    send_info,
-    notify_list, next_val, pc, local_type, local_status
+    send_info, status_list,
+    notify_list, next_val,
+    pc, local_type, local_status, local_index
 
 vars == <<alert_enabled, need_alert,
     state, alerting, num_disable,
-    send_info,
-    notify_list, next_val, pc, local_type, local_status>>
+    send_info, status_list,
+    notify_list, next_val, pc,
+    local_type, local_status, local_index>>
 
-node_vars == <<pc, local_type, local_status>>
+node_vars == <<pc, local_type, local_status, local_index>>
 
 
 max_val == 34
@@ -32,7 +34,7 @@ NullStatus == StateStatus \union {nil}
 
 State == [val: Value, status: StateStatus]
 
-Notify == [type: Type, status: StateStatus]
+Notify == [type: Type, status: StateStatus, index: 1..100]
 
 new_state == [val |-> 30, status |-> "OK"]
 
@@ -55,10 +57,12 @@ TypeOK ==
     /\ send_info \in [Type -> NullSendInfo]
     /\ state \in [Type -> [Key -> State]]
     /\ notify_list \in Seq(Notify)
+    /\ status_list \in [Type -> Seq(StateStatus)]
     /\ next_val \in Value
     /\ pc \in {"Init", "PushNotify"}
     /\ local_type \in NullType
     /\ local_status \in NullStatus
+    /\ local_index \in (1..100 \union {nil})
 
 
 Init ==
@@ -69,10 +73,12 @@ Init ==
     /\ send_info = [t \in Type |-> nil]
     /\ state = [t \in Type |-> [k \in Key |-> new_state]]
     /\ notify_list = <<>>
+    /\ status_list = [t \in Type |-> <<>>]
     /\ next_val = 30
     /\ pc = "Init"
     /\ local_type = nil
     /\ local_status = nil
+    /\ local_index = nil
 
 
 UpdateKey(t, k) ==
@@ -95,6 +101,7 @@ UpdateKey(t, k) ==
         /\ state' = [state EXCEPT
             ![t][k].val = next_val',
             ![t][k].status = status]
+        /\ status_list' = [status_list EXCEPT ![t] = Append(@, status)]
         /\ update_changeset(status)
     /\ UNCHANGED alerting
     /\ UNCHANGED send_info
@@ -147,6 +154,7 @@ GetChangedKey(t) ==
 
     /\ local_type' = t
     /\ local_status' = IF state_is_ok(t) THEN "OK" ELSE "Failed"
+    /\ local_index' = Len(status_list[t])
     /\ pc' = "PushNotify"
     /\ IF allow_set THEN
             IF local_status' = "Failed" THEN
@@ -160,6 +168,7 @@ GetChangedKey(t) ==
             /\ UNCHANGED send_info
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
+    /\ UNCHANGED status_list
     /\ UNCHANGED state
     /\ UNCHANGED <<alert_enabled, num_disable>>
 
@@ -168,7 +177,11 @@ PushNotify ==
     LET
         noti_status == local_status
 
-        new_noti == [type |-> local_type, status |-> noti_status]
+        new_noti == [
+            type |-> local_type,
+            status |-> noti_status,
+            index |-> local_index
+        ]
     IN
     /\ pc = "PushNotify"
     /\ pc' = "Init"
@@ -176,11 +189,13 @@ PushNotify ==
 
     /\ local_type' = nil \* clear local
     /\ local_status' = nil \* clear local
+    /\ local_index' = nil \* clear local
 
     /\ UNCHANGED alerting
     /\ UNCHANGED <<alert_enabled, num_disable>>
     /\ UNCHANGED send_info
     /\ UNCHANGED <<need_alert, state, next_val>>
+    /\ UNCHANGED status_list
 
 
 RetrySendAlert(t) ==
@@ -197,6 +212,7 @@ RetrySendAlert(t) ==
 
     /\ UNCHANGED alerting
     /\ UNCHANGED notify_list
+    /\ UNCHANGED status_list
     /\ UNCHANGED <<next_val, state>>
     /\ UNCHANGED node_vars
     /\ UNCHANGED <<alert_enabled, num_disable>>
@@ -214,6 +230,7 @@ DisableAlert(t) ==
     /\ UNCHANGED <<need_alert, alerting>>
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
+    /\ UNCHANGED status_list
     /\ UNCHANGED node_vars
 
 
@@ -228,6 +245,7 @@ EnableAlert(t) ==
     /\ UNCHANGED <<need_alert, alerting>>
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
+    /\ UNCHANGED status_list
     /\ UNCHANGED node_vars
 
 
@@ -361,6 +379,35 @@ CanRetryMatchRunning ==
     IN
     \A t \in Type: send_info[t] # nil =>
         (send_info[t].can_retry => cond(t))
+
+
+checkStatusList(t, list) ==
+    \A idx \in DOMAIN list:
+        LET
+            e == list[idx]
+
+            prev ==
+                IF idx > 1
+                    THEN list[idx - 1]
+                    ELSE nil
+
+            pre_cond ==
+                status_list[t][e.index] = "OK"
+
+            cond ==
+                /\ prev # nil
+                /\ status_list[t][prev.index] = "Failed"
+        IN
+            pre_cond => cond
+
+StatusListSuccessMustFollowFail ==
+    \A t \in Type:
+        LET
+            select_list(x) == x.type = t
+
+            list == SelectSeq(notify_list, select_list)
+        IN
+            checkStatusList(t, list)
 
 
 Sym == Permutations(Type) \union Permutations(Key)
