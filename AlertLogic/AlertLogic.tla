@@ -59,7 +59,7 @@ TypeOK ==
     /\ notify_list \in Seq(Notify)
     /\ status_list \in [Type -> Seq(StateStatus)]
     /\ next_val \in Value
-    /\ pc \in {"Init", "PushNotify"}
+    /\ pc \in {"Init", "PushNotify", "ClearLocals"}
     /\ local_type \in NullType
     /\ local_status \in NullStatus
     /\ local_index \in (1..100 \union {nil})
@@ -81,6 +81,12 @@ Init ==
     /\ local_index = nil
 
 
+state_is_ok(t) ==
+    \A k \in Key: state[t][k].status = "OK"
+
+state_is_ok_new(t) ==
+    \A k \in Key: state'[t][k].status = "OK"
+
 UpdateKey(t, k) ==
     LET
         update_cond(status) ==
@@ -94,6 +100,12 @@ UpdateKey(t, k) ==
                 /\ need_alert' = need_alert \union {t}
             ELSE
                 /\ UNCHANGED need_alert
+
+        new_st ==
+            IF state_is_ok_new(t)
+                THEN "OK"
+                ELSE "Failed"
+
     IN
     /\ next_val < max_val
     /\ next_val' = next_val + 1
@@ -101,17 +113,13 @@ UpdateKey(t, k) ==
         /\ state' = [state EXCEPT
             ![t][k].val = next_val',
             ![t][k].status = status]
-        /\ status_list' = [status_list EXCEPT ![t] = Append(@, status)]
+        /\ status_list' = [status_list EXCEPT ![t] = Append(@, new_st)]
         /\ update_changeset(status)
     /\ UNCHANGED alerting
     /\ UNCHANGED send_info
     /\ UNCHANGED notify_list
     /\ UNCHANGED node_vars
     /\ UNCHANGED <<alert_enabled, num_disable>>
-
-
-state_is_ok(t) ==
-    \A k \in Key: state[t][k].status = "OK"
 
 
 GetChangedKey(t) ==
@@ -155,23 +163,34 @@ GetChangedKey(t) ==
     /\ local_type' = t
     /\ local_status' = IF state_is_ok(t) THEN "OK" ELSE "Failed"
     /\ local_index' = Len(status_list[t])
-    /\ pc' = "PushNotify"
     /\ IF allow_set THEN
             IF local_status' = "Failed" THEN
                 /\ alerting' = alerting \union {t}
                 /\ set_info_sending
+                /\ pc' = "PushNotify"
+            ELSE IF send_info[t] = nil THEN
+                /\ UNCHANGED alerting
+                /\ UNCHANGED send_info
+                /\ pc' = "ClearLocals"
             ELSE
                 /\ alerting' = alerting \ {t}
                 /\ send_info' = [send_info EXCEPT ![t] = new_stopped_info]
+                /\ pc' = "PushNotify"
         ELSE
             /\ UNCHANGED alerting
             /\ UNCHANGED send_info
+            /\ pc' = "ClearLocals"
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
     /\ UNCHANGED status_list
     /\ UNCHANGED state
     /\ UNCHANGED <<alert_enabled, num_disable>>
 
+
+doClearLocals ==
+    /\ local_type' = nil
+    /\ local_status' = nil
+    /\ local_index' = nil
 
 PushNotify ==
     LET
@@ -186,11 +205,21 @@ PushNotify ==
     /\ pc = "PushNotify"
     /\ pc' = "Init"
     /\ notify_list' = Append(notify_list, new_noti)
+    /\ doClearLocals
 
-    /\ local_type' = nil \* clear local
-    /\ local_status' = nil \* clear local
-    /\ local_index' = nil \* clear local
+    /\ UNCHANGED alerting
+    /\ UNCHANGED <<alert_enabled, num_disable>>
+    /\ UNCHANGED send_info
+    /\ UNCHANGED <<need_alert, state, next_val>>
+    /\ UNCHANGED status_list
 
+
+ClearLocals ==
+    /\ pc = "ClearLocals"
+    /\ pc' = "Init"
+    /\ doClearLocals
+
+    /\ UNCHANGED notify_list
     /\ UNCHANGED alerting
     /\ UNCHANGED <<alert_enabled, num_disable>>
     /\ UNCHANGED send_info
@@ -273,6 +302,7 @@ Next ==
         \/ DisableAlert(t)
         \/ EnableAlert(t)
     \/ PushNotify
+    \/ ClearLocals
     \/ Terminated
 
 
@@ -408,6 +438,13 @@ StatusListSuccessMustFollowFail ==
             list == SelectSeq(notify_list, select_list)
         IN
             checkStatusList(t, list)
+
+
+PCInitInv ==
+    pc = "Init" =>
+        /\ local_type = nil
+        /\ local_status = nil
+        /\ local_index = nil
 
 
 Sym == Permutations(Type) \union Permutations(Key)
