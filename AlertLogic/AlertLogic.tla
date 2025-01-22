@@ -42,7 +42,6 @@ SendInfo == [
     enabled: BOOLEAN,
     count: 0..max_send_count,
     status: {"Sending", "Stopped"},
-    can_retry: BOOLEAN,
     last_status: NullStatus
 ]
 
@@ -134,8 +133,7 @@ GetChangedKey(t) ==
             enabled |-> TRUE,
             count |-> 1,
             status |-> "Sending",
-            last_status |-> local_status',
-            can_retry |-> TRUE
+            last_status |-> local_status'
         ]
 
         set_info_sending ==
@@ -144,15 +142,13 @@ GetChangedKey(t) ==
                 ELSE send_info' = [send_info EXCEPT
                         ![t].count = @ + 1,
                         ![t].status = "Sending",
-                        ![t].last_status = local_status',
-                        ![t].can_retry = TRUE]
+                        ![t].last_status = local_status']
         
         new_stopped_info == [
             enabled |-> TRUE,
             count |-> 0,
             status |-> "Stopped",
-            last_status |-> local_status',
-            can_retry |-> FALSE
+            last_status |-> local_status'
         ]
     IN
     /\ pc = "Init"
@@ -227,17 +223,18 @@ ClearLocals ==
     /\ UNCHANGED status_list
 
 
+can_retry(t) ==
+    send_info[t].last_status = "Failed"
+
 RetrySendAlert(t) ==
     /\ send_info[t] # nil
     /\ send_info[t].status = "Sending"
     /\ send_info[t].enabled
-    /\ send_info[t].can_retry
+    /\ can_retry(t)
     /\ send_info[t].count < max_send_count
 
     /\ need_alert' = need_alert \union {t}
-    /\ send_info' = [send_info EXCEPT
-            ![t].last_status = nil,
-            ![t].can_retry = FALSE]
+    /\ send_info' = [send_info EXCEPT ![t].last_status = nil]
 
     /\ UNCHANGED alerting
     /\ UNCHANGED notify_list
@@ -408,7 +405,7 @@ CanRetryMatchRunning ==
             /\ send_info[t].status = "Sending"
     IN
     \A t \in Type: send_info[t] # nil =>
-        (send_info[t].can_retry => cond(t))
+        (can_retry(t) => cond(t))
 
 
 checkStatusList(t, list) ==
