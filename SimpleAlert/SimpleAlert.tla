@@ -14,10 +14,9 @@ vars == <<state, status_list,
 local_vars == <<pc, local_type, local_status, local_index>>
 
 max_update == 4
-
 max_send == 3
-
 max_disable == 2
+\* => Diameter = 41, Found = 670,875, Distinct = 221,392
 
 NullType == Type \union {nil}
 
