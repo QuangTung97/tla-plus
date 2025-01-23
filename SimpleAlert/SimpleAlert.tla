@@ -5,17 +5,19 @@ CONSTANTS Type, nil
 
 VARIABLES state, status_list,
     pc, local_type, local_status, local_index,
-    notify_list, num_update
+    notify_list, num_update, num_disable
 
 vars == <<state, status_list,
     pc, local_type, local_status, local_index,
-    notify_list, num_update>>
+    notify_list, num_update, num_disable>>
 
 local_vars == <<pc, local_type, local_status, local_index>>
 
 max_update == 4
 
 max_send == 3
+
+max_disable == 2
 
 NullType == Type \union {nil}
 
@@ -47,6 +49,7 @@ TypeOK ==
     /\ local_status \in NullStatus
     /\ local_index \in (1..100 \union {nil})
     /\ num_update \in 0..max_update
+    /\ num_disable \in 0..max_disable
 
 init_state == [
     status |-> "OK",
@@ -65,6 +68,7 @@ Init ==
     /\ local_status = nil
     /\ local_index = nil
     /\ num_update = 0
+    /\ num_disable = 0
 
 
 doUpdateState(t, st) ==
@@ -100,6 +104,7 @@ UpdateStatus(t) ==
         /\ status_list' = [status_list EXCEPT ![t] = Append(@, st)]
     /\ UNCHANGED local_vars
     /\ UNCHANGED <<notify_list>>
+    /\ UNCHANGED num_disable
 
 
 GetNeedAlert(t) ==
@@ -110,6 +115,7 @@ GetNeedAlert(t) ==
                 ELSE "Sending"
     IN
     /\ pc = "Init"
+    /\ state[t].enabled
     /\ state[t].send_status = "NeedSend"
     /\ pc' = "SendNotify"
     /\ state' = [state EXCEPT
@@ -123,16 +129,19 @@ GetNeedAlert(t) ==
     /\ UNCHANGED status_list
     /\ UNCHANGED notify_list
     /\ UNCHANGED num_update
+    /\ UNCHANGED num_disable
 
 
 RetrySendAlert(t) ==
     /\ state[t].send_status = "Sending"
+    /\ state[t].enabled
     /\ state[t].send_count < max_send
     /\ state' = [state EXCEPT ![t].send_status = "NeedSend"]
     /\ UNCHANGED status_list
     /\ UNCHANGED local_vars
     /\ UNCHANGED notify_list
     /\ UNCHANGED num_update
+    /\ UNCHANGED num_disable
 
 
 SendNotify ==
@@ -151,6 +160,29 @@ SendNotify ==
     /\ UNCHANGED state
     /\ UNCHANGED status_list
     /\ UNCHANGED num_update
+    /\ UNCHANGED num_disable
+
+
+DisableState(t) ==
+    /\ state[t].enabled
+    /\ num_disable < max_disable
+    /\ num_disable' = num_disable + 1
+    /\ state' = [state EXCEPT ![t].enabled = FALSE]
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED status_list
+    /\ UNCHANGED notify_list
+    /\ UNCHANGED num_update
+
+
+EnableState(t) ==
+    /\ ~state[t].enabled
+    /\ state' = [state EXCEPT ![t].enabled = TRUE]
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED status_list
+    /\ UNCHANGED notify_list
+    /\ UNCHANGED num_update
+    /\ UNCHANGED num_disable
+
 
 
 stopCond(t) ==
@@ -161,6 +193,8 @@ stopCond(t) ==
 TerminateCond ==
     /\ \A t \in Type: stopCond(t)
     /\ num_update = max_update
+    /\ num_disable = max_disable
+    /\ \A t \in Type: state[t].enabled
 
 Terminated ==
     /\ TerminateCond
@@ -172,11 +206,18 @@ Next ==
         \/ UpdateStatus(t)
         \/ GetNeedAlert(t)
         \/ RetrySendAlert(t)
+        \/ DisableState(t)
+        \/ EnableState(t)
     \/ SendNotify
     \/ Terminated
 
 
 Spec == Init /\ [][Next]_vars
+
+FairSpec == Spec /\ WF_vars(Next)
+
+
+AlwaysTerminate == <> TerminateCond
 
 
 NotifyListMatchState ==
@@ -190,8 +231,10 @@ NotifyListMatchState ==
 
             match_cond ==
                 state[t].status = "Failed" <=> last_notify_is_failed
+
+            is_enabled == state[t].enabled
         IN
-            stopCond(t) => match_cond
+            is_enabled /\ stopCond(t) => match_cond
 
 
 NotSendDuplicateOK ==
@@ -225,6 +268,7 @@ MustSendFullFailure ==
         LET
             pre_cond ==
                 /\ stopCond(t)
+                /\ state[t].enabled
                 /\ state[t].status = "Failed"
 
             list == notify_list[t]
@@ -237,5 +281,13 @@ MustSendFullFailure ==
                 /\ \A idx \in start..end: list[idx].status = "Failed"
         IN
             pre_cond => check_cond
+
+
+MustNotSendWhenDisable ==
+    \A t \in Type:
+        ~state[t].enabled =>
+            /\ ~(ENABLED GetNeedAlert(t))
+            /\ ~(ENABLED RetrySendAlert(t))
+            /\ ~(ENABLED DisableState(t))
 
 ====
