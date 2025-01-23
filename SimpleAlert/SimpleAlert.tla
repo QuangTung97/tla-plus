@@ -13,9 +13,11 @@ vars == <<state, status_list,
 
 local_vars == <<pc, local_type, local_status, local_index>>
 
-max_update == 4
+max_update == 5
 max_send == 3
 max_disable == 2
+required_failed == 2
+
 \* => Diameter = 41, Found = 670,875, Distinct = 221,392
 
 NullType == Type \union {nil}
@@ -28,6 +30,7 @@ SendStatus == {"NoAction", "NeedSend", "Sending"}
 
 State == [
     status: StateStatus,
+    failed_count: 0..100,
     enabled: BOOLEAN,
     send_status: SendStatus,
     last_status: NullStatus,
@@ -52,6 +55,7 @@ TypeOK ==
 
 init_state == [
     status |-> "OK",
+    failed_count |-> 0,
     enabled |-> TRUE,
     send_status |-> "NoAction",
     last_status |-> nil,
@@ -72,27 +76,51 @@ Init ==
 
 doUpdateState(t, st) ==
     LET
+        only_update_fail_count ==
+            /\ st = "Failed"
+            /\ state[t].failed_count + 1 < required_failed
+        
+
         last_st == state[t].last_status
 
-        to_need_send_cond ==
-            \/ st = "OK" /\ last_st = "Failed"
+        update_to_need_alert ==
             \/ st = "Failed"
+            \/
 
-        new_send_status ==
-            IF to_need_send_cond THEN
-                "NeedSend"
-            ELSE
-                "NoAction"
+        \* to_need_send_cond ==
+        \*     \/ st = "OK" /\ last_st = "Failed"
+        \*     \/ st = "Failed"
 
-        new_send_count == \* reset send count when send status changed
-            IF new_send_status # state[t].send_status
-                THEN 0
-                ELSE state[t].send_count
+        \* new_send_status ==
+        \*     IF to_need_send_cond THEN
+        \*         "NeedSend"
+        \*     ELSE
+        \*         "NoAction"
+
+        \* old_status == state[t].send_status
+        
+        \* can_update ==
+        \*     \/ old_status = "NoAction" /\ new_send_status # "NoAction"
+        \*     \/ old_status \in {"NeedSend"} /\ new_send_status = "NoAction"
+        
+        \* new_fail_count ==
+        \*     IF st = "OK" THEN
+        \*         0
+        \*     ELSE
+        \*         state[t].failed_count + 1
     IN
-        /\ state' = [state EXCEPT
+        IF only_update_fail_count THEN
+            state' = [state EXCEPT ![t].failed_count = @ + 1]
+        ELSE IF can_update THEN
+            state' = [state EXCEPT
                 ![t].status = st,
-                ![t].send_status = new_send_status,
-                ![t].send_count = new_send_count
+                ![t].failed_count = new_fail_count,
+                ![t].send_status = new_send_status
+            ]
+        ELSE
+            state' = [state EXCEPT
+                ![t].status = st,
+                ![t].failed_count = 0
             ]
 
 UpdateStatus(t) ==
@@ -288,5 +316,21 @@ MustNotSendWhenDisable ==
             /\ ~(ENABLED GetNeedAlert(t))
             /\ ~(ENABLED RetrySendAlert(t))
             /\ ~(ENABLED DisableState(t))
+
+
+StatusFailedRequiredFailCount ==
+    \A t \in Type:
+        state[t].status = "Failed" <=> state[t].failed_count = required_failed
+
+
+ReverseInvStep ==
+    \A t \in Type:
+        \/ /\ state[t].status = "OK"
+           /\ state'[t].status = "Failed"
+        \/ state'[t].status = state[t].status
+
+
+ReverseInv ==
+    [][ReverseInvStep]_state
 
 ====
