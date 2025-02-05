@@ -16,7 +16,7 @@ local_vars == <<pc, local_type, local_status, local_index>>
 max_update == 7
 max_send == 3
 max_disable == 2
-required_failed == 3
+required_failed == 2
 
 \* => Diameter = 28, Found = 143,707, Distinct = 45,088
 \* => Diameter = 30, Found = 624,011, Distinct = 190,192
