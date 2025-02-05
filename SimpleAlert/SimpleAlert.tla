@@ -21,6 +21,9 @@ required_failed == 3
 \* => Diameter = 28, Found = 143,707, Distinct = 45,088
 \* => Diameter = 30, Found = 624,011, Distinct = 190,192
 
+\* => Diameter = 30, Found = 402,399, Distinct = 121,360
+\* => Diameter = 38, Found = 2,359,411, Distinct = 708,232 (with required_failed = 2)
+
 NullType == Type \union {nil}
 
 StateStatus == {"OK", "Failed"}
@@ -34,7 +37,8 @@ State == [
     failed_count: 0..100,
     enabled: BOOLEAN,
     send_status: SendStatus,
-    send_count: 0..100
+    send_count: 0..100,
+    send_failed: BOOLEAN
 ]
 
 Notify == [
@@ -58,7 +62,8 @@ init_state == [
     failed_count |-> 0,
     enabled |-> TRUE,
     send_status |-> "NoAction",
-    send_count |-> 0
+    send_count |-> 0,
+    send_failed |-> FALSE
 ]
 
 Init ==
@@ -91,7 +96,11 @@ doUpdateState(t, st) ==
 
         send_ok ==
             /\ update_to_ok
-            /\ state[t].send_count > 0
+            /\ state[t].send_failed
+
+        reset_counter_only ==
+            /\ st = "OK"
+            /\ state[t].failed_count > 0
         
     IN
         IF only_update_fail_count THEN
@@ -116,6 +125,10 @@ doUpdateState(t, st) ==
                 ![t].failed_count = 0,
                 ![t].send_status = "NoAction",
                 ![t].send_count = 0
+            ]
+        ELSE IF reset_counter_only THEN
+            state' = [state EXCEPT
+                ![t].failed_count = 0
             ]
         ELSE
             UNCHANGED state
@@ -144,7 +157,8 @@ GetNeedAlert(t) ==
     /\ pc' = "SendNotify"
     /\ state' = [state EXCEPT
             ![t].send_status = new_send_status,
-            ![t].send_count = @ + 1
+            ![t].send_count = @ + 1,
+            ![t].send_failed = (new_send_status = "Sending")
         ]
     /\ local_type' = t
     /\ local_status' = state[t].status
@@ -306,6 +320,25 @@ MustSendFullFailure ==
             pre_cond => check_cond
 
 
+MustSendMaxOneOK ==
+    \A t \in Type:
+        LET
+            list == notify_list[t]
+
+            pre_cond ==
+                /\ stopCond(t)
+                /\ state[t].enabled
+                /\ state[t].status = "OK"
+                /\ Len(list) > 0
+
+            idx == Len(list)
+
+            check_cond ==
+                /\ idx > 1 => list[idx - 1].status = "Failed"
+        IN
+            pre_cond => check_cond
+
+
 MustNotSendWhenDisable ==
     \A t \in Type:
         ~state[t].enabled =>
@@ -329,6 +362,23 @@ StatusListLastOK ==
 
             cond ==
                 /\ state[t].status = "OK"
+                /\ state[t].failed_count = 0
+                /\ state[t].send_count \in {0, 1}
+        IN
+            pre_cond => cond
+
+
+StateStatusOKMustResetSendFailed ==
+    \A t \in Type:
+        LET
+            pre_cond ==
+                /\ state[t].status = "OK"
+                /\ state[t].enabled
+                /\ stopCond(t)
+
+            cond ==
+                /\ state[t].send_count <= 1
+                /\ state[t].send_failed = FALSE
         IN
             pre_cond => cond
 
