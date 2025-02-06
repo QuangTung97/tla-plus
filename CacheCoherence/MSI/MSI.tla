@@ -43,7 +43,8 @@ CacheToLLC == Seq([
 LLCToCache == Seq([
     req: {"DataResp", "Fwd-GetS"},
     line: Line,
-    data: NullValue
+    data: NullValue,
+    ack: 0..10
 ])
 
 ----------------------------------------------------------
@@ -137,7 +138,7 @@ CpuRequestStore(c, l) ==
             line |-> l
         ]
     IN
-    /\ cache[c][l].status = "I"
+    /\ cache[c][l].status = "I" \* TODO status = S
     /\ cache[c][l].active_status = "None"
 
     /\ cache' = [cache EXCEPT
@@ -148,6 +149,26 @@ CpuRequestStore(c, l) ==
         ]
 
     /\ UNCHANGED llc_to_cache
+    /\ UNCHANGED <<llc, mem>>
+
+
+CpuFwdGetS(c, l) ==
+    LET
+        new_resp == llc_to_cache[c][1]
+
+        push_to_llc ==
+            cache_to_llc' = [cache_to_llc EXCEPT ![c] = Append(@, nil)]
+    IN
+    /\ llc_to_cache[c] # <<>>
+    /\ new_resp.line = l
+    /\ new_resp.req = "Fwd-GetS"
+
+    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+    /\ cache' = [cache EXCEPT
+            ![c][l].status = "S"
+        ]
+    /\ push_to_llc
+
     /\ UNCHANGED <<llc, mem>>
 
 ----------------------------------------------------------
@@ -163,7 +184,8 @@ LLCGetS(c, l) ==
         data_resp == [
             req |-> "DataResp",
             line |-> l,
-            data |-> mem[l]
+            data |-> mem[l],
+            ack |-> 0
         ]
 
         when_invalid ==
@@ -187,7 +209,8 @@ LLCGetS(c, l) ==
         fwd_gets_resp == [
             req |-> "Fwd-GetS",
             line |-> l,
-            data |-> nil
+            data |-> nil,
+            ack |-> 0
         ]
         
         when_mutable ==
@@ -219,7 +242,8 @@ LLCGetM(c, l) ==
         data_resp == [
             req |-> "DataResp",
             line |-> l,
-            data |-> mem[l]
+            data |-> mem[l],
+            ack |-> 0
         ]
 
         handle_when_invalid ==
@@ -231,6 +255,13 @@ LLCGetM(c, l) ==
                 ]
             /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, data_resp)]
         
+        data_resp_ack == [
+            req |-> "DataResp",
+            line |-> l,
+            data |-> mem[l],
+            ack |-> Cardinality(llc[l].sharer)
+        ]
+
         handle_when_shared ==
             /\ llc[l].status = "S"
             /\ llc' = [llc EXCEPT
@@ -280,6 +311,7 @@ Next ==
         \/ CpuDataDir(c, l)
 
         \/ CpuRequestStore(c, l)
+        \/ CpuFwdGetS(c, l)
 
         \/ LLCGetS(c, l)
         \/ LLCGetM(c, l)
