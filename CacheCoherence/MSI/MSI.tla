@@ -41,7 +41,7 @@ CacheToLLC == Seq([
 ])
 
 LLCToCache == Seq([
-    req: {"DataResp", "Fwd-GetS"},
+    req: {"DataResp", "Fwd-GetS", "Fwd-GetM", "Inv"},
     line: Line,
     data: NullValue,
     ack: 0..10
@@ -262,6 +262,24 @@ LLCGetM(c, l) ==
             ack |-> Cardinality(llc[l].sharer)
         ]
 
+        inv_resp == [
+            req |-> "Inv",
+            line |-> l,
+            data |-> nil,
+            ack |-> 0
+        ]
+
+        push_to_cache_network ==
+            llc_to_cache' = [recv \in CPU |->
+                LET old == llc_to_cache[recv] IN
+                    IF recv = c THEN
+                        Append(old, data_resp_ack)
+                    ELSE IF recv \in llc[l].sharer THEN
+                        Append(old, inv_resp)
+                    ELSE
+                        old
+            ]
+
         handle_when_shared ==
             /\ llc[l].status = "S"
             /\ llc' = [llc EXCEPT
@@ -269,15 +287,22 @@ LLCGetM(c, l) ==
                     ![l].data = mem[l],
                     ![l].sharer = {}
                 ]
-            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, data_resp)]
+            /\ push_to_cache_network
+
+
+        fwd_getm_resp == [
+            req |-> "Fwd-GetM",
+            line |-> l,
+            data |-> nil,
+            ack |-> 0
+        ]
+
+        owner == llc[l].owner
 
         handle_when_mutable ==
             /\ llc[l].status = "M"
-            /\ llc' = [llc EXCEPT
-                    ![l].status = "M",
-                    ![l].data = mem[l]
-                ]
-            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, data_resp)]
+            /\ llc' = [llc EXCEPT ![l].owner = c]
+            /\ llc_to_cache' = [llc_to_cache EXCEPT ![owner] = Append(@, fwd_getm_resp)]
     IN
     /\ cache_to_llc[c] # <<>>
     /\ req.line = l
