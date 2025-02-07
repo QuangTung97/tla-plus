@@ -308,8 +308,19 @@ CpuInvAck(c, l) ==
                         ![c][l].need_ack = @ - 1
                     ]
 
-            when_im_a ==
+            need_ack_is_zero ==
+                cache[c][l].need_ack - 1 = 0
+
+            when_im_a_ack_non_zero ==
                 /\ cache[c][l].status = "IM_A"
+                /\ ~need_ack_is_zero
+                /\ cache' = [cache EXCEPT
+                        ![c][l].need_ack = @ - 1
+                    ]
+
+            when_im_a_ack_zero ==
+                /\ cache[c][l].status = "IM_A"
+                /\ need_ack_is_zero
                 /\ cache' = [cache EXCEPT
                         ![c][l].status = "M",
                         ![c][l].need_ack = 0
@@ -321,7 +332,8 @@ CpuInvAck(c, l) ==
 
         /\ cpu_network' = cpu_network \ {msg}
         /\ \/ when_im_ad
-           \/ when_im_a
+           \/ when_im_a_ack_non_zero
+           \/ when_im_a_ack_zero
 
         /\ UNCHANGED cache_to_llc
         /\ UNCHANGED llc_to_cache
