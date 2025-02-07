@@ -337,6 +337,13 @@ CpuDataToReq(c, l) ==
                         ![c][l].status = "S",
                         ![c][l].data = msg.data
                     ]
+
+            when_im_ad ==
+                /\ cache[c][l].status = "IM_AD"
+                /\ cache' = [cache EXCEPT
+                        ![c][l].status = "M",
+                        ![c][l].data = msg.data
+                    ]
         IN
         /\ msg.type = "DataToReq"
         /\ msg.cpu = c
@@ -344,6 +351,7 @@ CpuDataToReq(c, l) ==
 
         /\ cpu_network' = cpu_network \ {msg}
         /\ \/ when_is_d
+           \/ when_im_ad
 
         /\ UNCHANGED cache_to_llc
         /\ UNCHANGED llc_to_cache
@@ -587,5 +595,11 @@ CacheStableStateInv ==
     \A c \in CPU, l \in Line:
         cache[c][l].status \in CacheStatus =>
             /\ cache[c][l].need_ack = 0
+
+
+CacheStateMInv ==
+    \A c \in CPU, l \in Line:
+        cache[c][l].status = "M" =>
+            /\ cache[c][l].data # nil
 
 ====
