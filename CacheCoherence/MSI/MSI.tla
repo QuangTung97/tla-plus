@@ -1,11 +1,11 @@
 ------ MODULE MSI ----
-EXTENDS TLC, Naturals, Sequences, FiniteSets
+EXTENDS TLC, Integers, Sequences, FiniteSets
 
 CONSTANTS Line, CPU, nil
 
-VARIABLES cache, llc, mem, cache_to_llc, llc_to_cache
+VARIABLES cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network
 
-vars == <<cache, llc, mem, cache_to_llc, llc_to_cache>>
+vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network>>
 
 ----------------------------------------------------------
 
@@ -17,12 +17,12 @@ NullValue == Value \union {nil}
 
 CacheStatus == {"I", "S", "M"} \* Stable States
 
-CacheActiveStatus == {"None", "IS_D", "IM_AD"}
+CacheTransientStatus == {"IS_D", "IM_AD", "IM_A"}
 
 CacheInfo == [
-    status: CacheStatus,
-    active_status: CacheActiveStatus,
-    data: NullValue
+    status: CacheStatus \union CacheTransientStatus,
+    data: NullValue,
+    need_ack: -10..10
 ]
 
 LLCActiveStatus == {"None"}
@@ -35,17 +35,50 @@ LLCInfo == [
     data: NullValue
 ]
 
-CacheToLLC == Seq([
-    req: {"GetS", "GetM"},
-    line: Line
-])
 
-LLCToCache == Seq([
-    req: {"DataResp", "Fwd-GetS", "Fwd-GetM", "Inv"},
+GetReq == [
+    type: {"GetS", "GetM"},
+    line: Line
+]
+
+DataMResp == [
+    type: {"DataM"},
     line: Line,
-    data: NullValue,
+    data: Value
+]
+
+CacheToLLC == Seq(GetReq \union DataMResp)
+
+
+FwdGetType == [
+    type: {"Fwd-GetS", "Fwd-GetM"},
+    req_cpu: CPU,
+    line: Line
+]
+
+InvType == [
+    type: {"Inv"},
+    req_cpu: CPU,
+    line: Line
+]
+
+DataRespType == [
+    type: {"DataResp"},
+    line: Line,
+    data: Value,
     ack: 0..10
-])
+]
+
+LLCToCache == Seq(DataRespType \union FwdGetType \union InvType)
+
+
+CpuNetwork ==
+    LET
+        InvAckMsg == [type: {"Inv-Ack"}, cpu: CPU, line: Line]
+
+        DataToReqMsg == [type: {"DataToReq"}, cpu: CPU, line: Line, data: Value]
+    IN
+        InvAckMsg \union DataToReqMsg
 
 ----------------------------------------------------------
 
@@ -55,12 +88,13 @@ TypeOK ==
     /\ mem \in [Line -> Value]
     /\ cache_to_llc \in [CPU -> CacheToLLC]
     /\ llc_to_cache \in [CPU -> LLCToCache]
+    /\ cpu_network \subseteq CpuNetwork
 
 
 init_cache == [
     status |-> "I",
-    active_status |-> "None",
-    data |-> nil
+    data |-> nil,
+    need_ack |-> 0
 ]
 
 init_llc == [
@@ -77,27 +111,29 @@ Init ==
     /\ mem = [l \in Line |-> 20]
     /\ cache_to_llc = [c \in CPU |-> <<>>]
     /\ llc_to_cache = [c \in CPU |-> <<>>]
+    /\ cpu_network = {}
 
 ----------------------------------------------------------
+
+cpu_unchanged ==
+    /\ UNCHANGED <<llc, mem>>
 
 CpuLoad(c, l) ==
     LET
         new_req == [
-            req |-> "GetS",
+            type |-> "GetS",
             line |-> l
         ]
     IN
     /\ cache[c][l].status = "I"
-    /\ cache[c][l].active_status = "None"
-    /\ cache' = [cache EXCEPT
-            ![c][l].active_status = "IS_D"
-        ]
+    /\ cache' = [cache EXCEPT ![c][l].status = "IS_D"]
     /\ cache_to_llc' = [cache_to_llc EXCEPT
             ![c] = Append(@, new_req)
         ]
 
-    /\ UNCHANGED <<llc, mem>>
+    /\ cpu_unchanged
     /\ UNCHANGED llc_to_cache
+    /\ UNCHANGED cpu_network
 
 
 CpuDataDir(c, l) ==
@@ -105,84 +141,178 @@ CpuDataDir(c, l) ==
         new_resp == llc_to_cache[c][1]
 
         when_is_d ==
-            /\ cache[c][l].active_status = "IS_D"
+            /\ cache[c][l].status = "IS_D"
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "S",
-                    ![c][l].active_status = "None",
                     ![c][l].data = new_resp.data
                 ]
+            /\ UNCHANGED cpu_network
 
-        when_im_ad ==
-            /\ cache[c][l].active_status = "IM_AD"
+        when_im_ad_ack_zero ==
+            /\ cache[c][l].status = "IM_AD"
+            /\ new_resp.ack = 0
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "M",
-                    ![c][l].active_status = "None",
                     ![c][l].data = new_resp.data
                 ]
+            /\ UNCHANGED cpu_network
+
+        when_im_ad_ack_non_zero ==
+            /\ cache[c][l].status = "IM_AD"
+            /\ new_resp.ack > 0
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "IM_A",
+                    ![c][l].data = new_resp.data,
+                    ![c][l].need_ack = @ + new_resp.ack
+                ]
+            /\ UNCHANGED cpu_network
     IN
     /\ llc_to_cache[c] # <<>>
     /\ new_resp.line = l
 
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
     /\ \/ when_is_d
-       \/ when_im_ad
+       \/ when_im_ad_ack_zero
+       \/ when_im_ad_ack_non_zero
 
     /\ UNCHANGED cache_to_llc
-    /\ UNCHANGED <<llc, mem>>
+    /\ cpu_unchanged
 
 
 CpuRequestStore(c, l) ==
     LET
         new_req == [
-            req |-> "GetM",
+            type |-> "GetM",
             line |-> l
         ]
     IN
     /\ cache[c][l].status = "I" \* TODO status = S
-    /\ cache[c][l].active_status = "None"
 
-    /\ cache' = [cache EXCEPT
-            ![c][l].active_status = "IM_AD"
-        ]
+    /\ cache' = [cache EXCEPT ![c][l].status = "IM_AD"]
     /\ cache_to_llc' = [cache_to_llc EXCEPT
             ![c] = Append(@, new_req)
         ]
 
     /\ UNCHANGED llc_to_cache
-    /\ UNCHANGED <<llc, mem>>
+    /\ UNCHANGED cpu_network
+    /\ cpu_unchanged
 
 
 CpuFwdGetS(c, l) ==
     LET
         new_resp == llc_to_cache[c][1]
 
+        dir_data == [
+            type |-> "DataM",
+            line |-> l,
+            data |-> cache[c][l].data
+        ]
+
         push_to_llc ==
-            cache_to_llc' = [cache_to_llc EXCEPT ![c] = Append(@, nil)]
+            cache_to_llc' = [cache_to_llc EXCEPT ![c] = Append(@, dir_data)]
+
+        data_to_req_msg == [
+            type |-> "DataToReq",
+            cpu |-> new_resp.req_cpu,
+            line |-> l,
+            data |-> cache[c][l].data
+        ]
+
+        when_mutable ==
+            /\ cache[c][l].status = "M"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "S"
+                ]
+            /\ push_to_llc
+            /\ cpu_network' = cpu_network \union {data_to_req_msg}
     IN
     /\ llc_to_cache[c] # <<>>
     /\ new_resp.line = l
-    /\ new_resp.req = "Fwd-GetS"
+    /\ new_resp.type = "Fwd-GetS"
 
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
-    /\ cache' = [cache EXCEPT
-            ![c][l].status = "S"
-        ]
-    /\ push_to_llc
+    /\ \/ when_mutable
 
-    /\ UNCHANGED <<llc, mem>>
+    /\ cpu_unchanged
+
+
+CpuFwdGetM(c, l) ==
+    LET
+        resp == llc_to_cache[c][1]
+
+        data_to_req_msg == [
+            type |-> "DataToReq",
+            cpu |-> resp.req_cpu,
+            line |-> l,
+            data |-> cache[c][l].data
+        ]
+
+        when_mutable ==
+            /\ cache[c][l].status = "M"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "I"
+                ]
+            /\ cpu_network' = cpu_network \union {data_to_req_msg}
+    IN
+    /\ llc_to_cache[c] # <<>>
+    /\ resp.line = l
+    /\ resp.type = "Fwd-GetM"
+
+    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+    /\ \/ when_mutable
+
+    /\ UNCHANGED cache_to_llc
+    /\ cpu_unchanged
+
+
+CpuInv(c, l) ==
+    LET
+        resp == llc_to_cache[c][1]
+
+        inv_ack_msg == [
+            type |-> "Inv-Ack",
+            cpu |-> resp.req_cpu,
+            line |-> l
+        ]
+
+        when_shared ==
+            /\ cache[c][l].status = "S"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "I"
+                ]
+            /\ cpu_network' = cpu_network \union {inv_ack_msg}
+    IN
+    /\ llc_to_cache[c] # <<>>
+    /\ resp.line = l
+    /\ resp.type = "Inv"
+
+    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+    /\ \/ when_shared
+
+    /\ UNCHANGED cache_to_llc
+    /\ cpu_unchanged
+
+CpuDataToReq(c, l) ==
+    \E msg \in cpu_network:
+        /\ msg.type = "DataToReq"
+        /\ msg.cpu = c
+        /\ msg.line = l
+
+        /\ cpu_unchanged
 
 ----------------------------------------------------------
 
-llcUnchanged ==
+llc_unchanged ==
     /\ UNCHANGED cache
     /\ UNCHANGED mem
+    /\ UNCHANGED cpu_network
 
 LLCGetS(c, l) ==
     LET
         req == cache_to_llc[c][1]
 
         data_resp == [
-            req |-> "DataResp",
+            type |-> "DataResp",
             line |-> l,
             data |-> mem[l],
             ack |-> 0
@@ -207,10 +337,9 @@ LLCGetS(c, l) ==
         owner == llc[l].owner
 
         fwd_gets_resp == [
-            req |-> "Fwd-GetS",
-            line |-> l,
-            data |-> nil,
-            ack |-> 0
+            type |-> "Fwd-GetS",
+            req_cpu |-> c,
+            line |-> l
         ]
         
         when_mutable ==
@@ -225,14 +354,14 @@ LLCGetS(c, l) ==
     IN
     /\ cache_to_llc[c] # <<>>
     /\ req.line = l
-    /\ req.req = "GetS"
+    /\ req.type = "GetS"
 
     /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
     /\ \/ when_invalid
        \/ when_shared
        \/ when_mutable
 
-    /\ llcUnchanged
+    /\ llc_unchanged
 
 
 LLCGetM(c, l) ==
@@ -240,7 +369,7 @@ LLCGetM(c, l) ==
         req == cache_to_llc[c][1]
 
         data_resp == [
-            req |-> "DataResp",
+            type |-> "DataResp",
             line |-> l,
             data |-> mem[l],
             ack |-> 0
@@ -256,17 +385,16 @@ LLCGetM(c, l) ==
             /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, data_resp)]
         
         data_resp_ack == [
-            req |-> "DataResp",
+            type |-> "DataResp",
             line |-> l,
             data |-> mem[l],
             ack |-> Cardinality(llc[l].sharer)
         ]
 
         inv_resp == [
-            req |-> "Inv",
-            line |-> l,
-            data |-> nil,
-            ack |-> 0
+            type |-> "Inv",
+            req_cpu |-> c,
+            line |-> l
         ]
 
         push_to_cache_network ==
@@ -291,10 +419,9 @@ LLCGetM(c, l) ==
 
 
         fwd_getm_resp == [
-            req |-> "Fwd-GetM",
-            line |-> l,
-            data |-> nil,
-            ack |-> 0
+            type |-> "Fwd-GetM",
+            req_cpu |-> c,
+            line |-> l
         ]
 
         owner == llc[l].owner
@@ -302,18 +429,19 @@ LLCGetM(c, l) ==
         handle_when_mutable ==
             /\ llc[l].status = "M"
             /\ llc' = [llc EXCEPT ![l].owner = c]
-            /\ llc_to_cache' = [llc_to_cache EXCEPT ![owner] = Append(@, fwd_getm_resp)]
+            /\ llc_to_cache' = [llc_to_cache EXCEPT
+                    ![owner] = Append(@, fwd_getm_resp)]
     IN
     /\ cache_to_llc[c] # <<>>
     /\ req.line = l
-    /\ req.req = "GetM"
+    /\ req.type = "GetM"
 
     /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
     /\ \/ handle_when_invalid
        \/ handle_when_shared
        \/ handle_when_mutable
 
-    /\ llcUnchanged
+    /\ llc_unchanged
 
 ----------------------------------------------------------
 
@@ -321,6 +449,7 @@ StopCond ==
     /\ \A c \in CPU:
         /\ cache_to_llc[c] = <<>>
         /\ llc_to_cache[c] = <<>>
+    /\ cpu_network = {}
 
 TerminateCond ==
     /\ StopCond
@@ -336,7 +465,12 @@ Next ==
         \/ CpuDataDir(c, l)
 
         \/ CpuRequestStore(c, l)
+
         \/ CpuFwdGetS(c, l)
+        \/ CpuFwdGetM(c, l)
+        \/ CpuInv(c, l)
+
+        \/ CpuDataToReq(c, l)
 
         \/ LLCGetS(c, l)
         \/ LLCGetM(c, l)
@@ -351,7 +485,7 @@ StopCondNoActiveStatus ==
     LET
         cond ==
             \A c \in CPU, l \in Line:
-                cache[c][l].active_status = "None"
+                cache[c][l].status \in CacheStatus
     IN
         StopCond => cond
 
