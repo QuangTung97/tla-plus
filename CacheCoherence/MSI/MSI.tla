@@ -148,18 +148,23 @@ CpuDataDir(c, l) ==
                 ]
             /\ UNCHANGED cpu_network
 
+        ack_is_zero ==
+            \/ new_resp.ack = 0
+            \/ cache[c][l].need_ack + new_resp.ack = 0
+
         when_im_ad_ack_zero ==
             /\ cache[c][l].status = "IM_AD"
-            /\ new_resp.ack = 0
+            /\ ack_is_zero
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "M",
-                    ![c][l].data = new_resp.data
+                    ![c][l].data = new_resp.data,
+                    ![c][l].need_ack = 0
                 ]
             /\ UNCHANGED cpu_network
 
         when_im_ad_ack_non_zero ==
             /\ cache[c][l].status = "IM_AD"
-            /\ new_resp.ack > 0
+            /\ ~ack_is_zero
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "IM_A",
                     ![c][l].data = new_resp.data,
@@ -169,6 +174,7 @@ CpuDataDir(c, l) ==
     IN
     /\ llc_to_cache[c] # <<>>
     /\ new_resp.line = l
+    /\ new_resp.type = "DataResp"
 
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
     /\ \/ when_is_d
@@ -292,12 +298,55 @@ CpuInv(c, l) ==
     /\ UNCHANGED cache_to_llc
     /\ cpu_unchanged
 
+
+CpuInvAck(c, l) ==
+    \E msg \in cpu_network:
+        LET
+            when_im_ad ==
+                /\ cache[c][l].status = "IM_AD"
+                /\ cache' = [cache EXCEPT
+                        ![c][l].need_ack = @ - 1
+                    ]
+
+            when_im_a ==
+                /\ cache[c][l].status = "IM_A"
+                /\ cache' = [cache EXCEPT
+                        ![c][l].status = "M",
+                        ![c][l].need_ack = 0
+                    ]
+        IN
+        /\ msg.type = "Inv-Ack"
+        /\ msg.cpu = c
+        /\ msg.line = l
+
+        /\ cpu_network' = cpu_network \ {msg}
+        /\ \/ when_im_ad
+           \/ when_im_a
+
+        /\ UNCHANGED cache_to_llc
+        /\ UNCHANGED llc_to_cache
+        /\ cpu_unchanged
+
+
 CpuDataToReq(c, l) ==
     \E msg \in cpu_network:
+        LET
+            when_is_d ==
+                /\ cache[c][l].status = "IS_D"
+                /\ cache' = [cache EXCEPT
+                        ![c][l].status = "S",
+                        ![c][l].data = msg.data
+                    ]
+        IN
         /\ msg.type = "DataToReq"
         /\ msg.cpu = c
         /\ msg.line = l
 
+        /\ cpu_network' = cpu_network \ {msg}
+        /\ \/ when_is_d
+
+        /\ UNCHANGED cache_to_llc
+        /\ UNCHANGED llc_to_cache
         /\ cpu_unchanged
 
 ----------------------------------------------------------
@@ -413,6 +462,7 @@ LLCGetM(c, l) ==
             /\ llc' = [llc EXCEPT
                     ![l].status = "M",
                     ![l].data = mem[l],
+                    ![l].owner = c,
                     ![l].sharer = {}
                 ]
             /\ push_to_cache_network
@@ -443,6 +493,28 @@ LLCGetM(c, l) ==
 
     /\ llc_unchanged
 
+
+LLCDataM(c, l) ==
+    LET
+        req == cache_to_llc[c][1]
+
+        when_s_d ==
+            /\ llc[l].status = "S_D"
+            /\ llc' = [llc EXCEPT
+                    ![l].status = "S",
+                    ![l].data = req.data
+                ]
+    IN
+    /\ cache_to_llc[c] # <<>>
+    /\ req.line = l
+    /\ req.type = "DataM"
+
+    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
+    /\ when_s_d
+
+    /\ UNCHANGED llc_to_cache
+    /\ llc_unchanged
+
 ----------------------------------------------------------
 
 StopCond ==
@@ -470,10 +542,12 @@ Next ==
         \/ CpuFwdGetM(c, l)
         \/ CpuInv(c, l)
 
+        \/ CpuInvAck(c, l)
         \/ CpuDataToReq(c, l)
 
         \/ LLCGetS(c, l)
         \/ LLCGetM(c, l)
+        \/ LLCDataM(c, l)
     \/ Terminated
 
 
@@ -502,5 +576,16 @@ CacheCoherenceInv ==
                 /\ Cardinality(mutable_list) <= 1
         IN
             cond
+
+
+LLCMStateOwnerNonNull ==
+    \A l \in Line:
+        llc[l].status = "M" => llc[l].owner # nil
+
+
+CacheStableStateInv ==
+    \A c \in CPU, l \in Line:
+        cache[c][l].status \in CacheStatus =>
+            /\ cache[c][l].need_ack = 0
 
 ====
