@@ -3,15 +3,17 @@ EXTENDS TLC, Integers, Sequences, FiniteSets
 
 CONSTANTS Line, CPU, nil
 
-VARIABLES cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network
+VARIABLES cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network, global_data
 
-vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network>>
+vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network, global_data>>
 
 ----------------------------------------------------------
 
 NullCPU == CPU \union {nil}
 
 Value == 20..29
+
+max_value == 22
 
 NullValue == Value \union {nil}
 
@@ -104,6 +106,7 @@ TypeOK ==
     /\ cache_to_llc \in [CPU -> CacheToLLC]
     /\ llc_to_cache \in [CPU -> LLCToCache]
     /\ cpu_network \subseteq CpuNetwork
+    /\ global_data \in [Line -> Value]
 
 
 init_cache == [
@@ -127,11 +130,13 @@ Init ==
     /\ cache_to_llc = [c \in CPU |-> <<>>]
     /\ llc_to_cache = [c \in CPU |-> <<>>]
     /\ cpu_network = {}
+    /\ global_data = [l \in Line |-> 20]
 
 ----------------------------------------------------------
 
 cpu_unchanged ==
     /\ UNCHANGED <<llc, mem>>
+    /\ UNCHANGED global_data
 
 CpuLoad(c, l) ==
     LET
@@ -248,6 +253,19 @@ CpuRequestStore(c, l) ==
     /\ UNCHANGED cpu_network
     /\ cpu_unchanged
 
+
+CpuUpdate(c, l) ==
+    /\ cache[c][l].status \in WritableStatus
+    /\ cache[c][l].data <= max_value
+    /\ cache' = [cache EXCEPT
+            ![c][l].data = @ + 1
+        ]
+    /\ global_data' = [global_data EXCEPT ![l] = cache'[c][l].data]
+
+    /\ UNCHANGED llc_to_cache
+    /\ UNCHANGED cpu_network
+    /\ UNCHANGED cache_to_llc
+    /\ UNCHANGED <<llc, mem>>
 
 CpuFwdGetS(c, l) ==
     LET
@@ -448,6 +466,7 @@ llc_unchanged ==
     /\ UNCHANGED cache
     /\ UNCHANGED mem
     /\ UNCHANGED cpu_network
+    /\ UNCHANGED global_data
 
 LLCGetS(c, l) ==
     LET
@@ -456,7 +475,7 @@ LLCGetS(c, l) ==
         data_resp == [
             type |-> "DataResp",
             line |-> l,
-            data |-> mem[l],
+            data |-> llc'[l].data,
             ack |-> 0
         ]
 
@@ -513,7 +532,7 @@ LLCGetM(c, l) ==
         data_resp == [
             type |-> "DataResp",
             line |-> l,
-            data |-> mem[l],
+            data |-> llc'[l].data,
             ack |-> 0
         ]
 
@@ -529,7 +548,7 @@ LLCGetM(c, l) ==
         data_resp_ack == [
             type |-> "DataResp",
             line |-> l,
-            data |-> mem[l],
+            data |-> llc'[l].data,
             ack |-> Cardinality(llc[l].sharer \ {c})
         ]
 
@@ -550,11 +569,14 @@ LLCGetM(c, l) ==
                         old
             ]
 
+        update_when_nil(old) ==
+            IF old = nil THEN mem[l] ELSE old
+
         handle_when_shared ==
             /\ llc[l].status = "S"
             /\ llc' = [llc EXCEPT
                     ![l].status = "M",
-                    ![l].data = mem[l],
+                    ![l].data = update_when_nil(@),
                     ![l].owner = c,
                     ![l].sharer = {}
                 ]
@@ -630,6 +652,7 @@ Next ==
         \/ CpuDataDir(c, l)
 
         \/ CpuRequestStore(c, l)
+        \/ CpuUpdate(c, l)
 
         \/ CpuFwdGetS(c, l)
         \/ CpuFwdGetM(c, l)
@@ -720,6 +743,12 @@ LLCWhenMutableInv ==
         llc[l].status = "M" =>
             /\ llc[l].owner # nil
             /\ llc[l].sharer = {}
+
+
+GlobalDataCoherence ==
+    \A c \in CPU, l \in Line:
+        cache[c][l].status \in ReadableStatus =>
+            /\ cache[c][l].data = global_data[l]
 
 
 NotPossibleCpuStates ==
