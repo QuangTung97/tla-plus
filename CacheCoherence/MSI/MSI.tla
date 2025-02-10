@@ -19,6 +19,10 @@ CacheStatus == {"I", "S", "M"} \* Stable States
 
 CacheTransientStatus == {"IS_D", "IM_AD", "IM_A"}
 
+ReadableStatus == {"S"}
+
+WritableStatus == {"M"}
+
 CacheInfo == [
     status: CacheStatus \union CacheTransientStatus,
     data: NullValue,
@@ -74,9 +78,20 @@ LLCToCache == Seq(DataRespType \union FwdGetType \union InvType)
 
 CpuNetwork ==
     LET
-        InvAckMsg == [type: {"Inv-Ack"}, cpu: CPU, line: Line]
+        InvAckMsg == [
+            type: {"Inv-Ack"},
+            from_cpu: CPU,
+            to_cpu: CPU,
+            line: Line
+        ]
 
-        DataToReqMsg == [type: {"DataToReq"}, cpu: CPU, line: Line, data: Value]
+        DataToReqMsg == [
+            type: {"DataToReq"},
+            from_cpu: CPU,
+            to_cpu: CPU,
+            line: Line,
+            data: Value
+        ]
     IN
         InvAckMsg \union DataToReqMsg
 
@@ -206,7 +221,7 @@ CpuRequestStore(c, l) ==
 
 CpuFwdGetS(c, l) ==
     LET
-        new_resp == llc_to_cache[c][1]
+        resp == llc_to_cache[c][1]
 
         dir_data == [
             type |-> "DataM",
@@ -219,7 +234,8 @@ CpuFwdGetS(c, l) ==
 
         data_to_req_msg == [
             type |-> "DataToReq",
-            cpu |-> new_resp.req_cpu,
+            from_cpu |-> c,
+            to_cpu |-> resp.req_cpu,
             line |-> l,
             data |-> cache[c][l].data
         ]
@@ -233,8 +249,8 @@ CpuFwdGetS(c, l) ==
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
     IN
     /\ llc_to_cache[c] # <<>>
-    /\ new_resp.line = l
-    /\ new_resp.type = "Fwd-GetS"
+    /\ resp.line = l
+    /\ resp.type = "Fwd-GetS"
 
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
     /\ \/ when_mutable
@@ -248,7 +264,8 @@ CpuFwdGetM(c, l) ==
 
         data_to_req_msg == [
             type |-> "DataToReq",
-            cpu |-> resp.req_cpu,
+            from_cpu |-> c,
+            to_cpu |-> resp.req_cpu,
             line |-> l,
             data |-> cache[c][l].data
         ]
@@ -277,7 +294,8 @@ CpuInv(c, l) ==
 
         inv_ack_msg == [
             type |-> "Inv-Ack",
-            cpu |-> resp.req_cpu,
+            from_cpu |-> c,
+            to_cpu |-> resp.req_cpu,
             line |-> l
         ]
 
@@ -327,7 +345,7 @@ CpuInvAck(c, l) ==
                     ]
         IN
         /\ msg.type = "Inv-Ack"
-        /\ msg.cpu = c
+        /\ msg.to_cpu = c
         /\ msg.line = l
 
         /\ cpu_network' = cpu_network \ {msg}
@@ -358,7 +376,7 @@ CpuDataToReq(c, l) ==
                     ]
         IN
         /\ msg.type = "DataToReq"
-        /\ msg.cpu = c
+        /\ msg.to_cpu = c
         /\ msg.line = l
 
         /\ cpu_network' = cpu_network \ {msg}
@@ -573,7 +591,11 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ----------------------------------------------------------
+
+AlwaysTerminate == <> TerminateCond
 
 StopCondNoActiveStatus ==
     LET
@@ -613,5 +635,24 @@ CacheStateMInv ==
     \A c \in CPU, l \in Line:
         cache[c][l].status = "M" =>
             /\ cache[c][l].data # nil
+
+
+ReadWriteStatusInv ==
+    /\ ReadableStatus \subseteq CacheStatus
+    /\ WritableStatus \subseteq CacheStatus
+
+
+CacheCoherenceInvV2 ==
+    \A l \in Line:
+        LET
+            shared_list == {c \in CPU: cache[c][l].status \in ReadableStatus}
+
+            mutable_list == {c \in CPU: cache[c][l].status \in WritableStatus}
+
+            cond ==
+                /\ mutable_list # {} => shared_list = {}
+                /\ Cardinality(mutable_list) <= 1
+        IN
+            cond
 
 ====
