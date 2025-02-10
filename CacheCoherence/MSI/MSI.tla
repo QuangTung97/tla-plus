@@ -721,4 +721,59 @@ LLCWhenMutableInv ==
             /\ llc[l].owner # nil
             /\ llc[l].sharer = {}
 
+
+NotPossibleCpuStates ==
+    \A c \in CPU, l \in Line:
+        LET
+            resp == llc_to_cache[c][1]
+
+            llc_msg_existed(type) ==
+                /\ llc_to_cache[c] # <<>>
+                /\ resp.type = type
+                /\ resp.line = l
+
+            inv_resp == llc_msg_existed("Inv")
+            fwd_gets_resp == llc_msg_existed("Fwd-GetS")
+            fwd_getm_resp == llc_msg_existed("Fwd-GetM")
+            data_from_dir == llc_msg_existed("DataResp")
+
+            cpu_net_existed(type) ==
+                \E msg \in cpu_network:
+                    /\ msg.type = type
+                    /\ msg.to_cpu = c
+                    /\ msg.line = l
+
+            data_from_owner == cpu_net_existed("DataToReq")
+
+            when_is_d ==
+                /\ cache[c][l].status = "IS_D"
+                /\ \/ fwd_gets_resp
+                   \/ fwd_getm_resp
+
+            when_sm_a ==
+                /\ cache[c][l].status = "SM_A"
+                /\ \/ inv_resp
+                   \/ data_from_owner
+                   \/ data_from_dir
+
+            when_sm_ad ==
+                /\ cache[c][l].status = "SM_AD"
+                /\ \/ data_from_owner
+
+            when_s ==
+                /\ cache[c][l].status = "S"
+                /\ \/ fwd_gets_resp
+                   \/ fwd_getm_resp
+                   \/ data_from_owner
+                   \/ data_from_dir
+
+            neg_cond ==
+                \/ when_is_d
+                \/ when_s
+                \/ when_sm_a
+                \/ when_sm_ad
+        IN
+            ~neg_cond
+
+
 ====
