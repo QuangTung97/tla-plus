@@ -744,11 +744,18 @@ NotPossibleCpuStates ==
                     /\ msg.line = l
 
             data_from_owner == cpu_net_existed("DataToReq")
+            inv_ack_msg == cpu_net_existed("Inv-Ack")
+
+            when_i ==
+                /\ cache[c][l].status = "I"
+                /\ \/ fwd_gets_resp
+                   \/ fwd_getm_resp
 
             when_is_d ==
                 /\ cache[c][l].status = "IS_D"
                 /\ \/ fwd_gets_resp
                    \/ fwd_getm_resp
+                   \/ inv_ack_msg
 
             when_sm_a ==
                 /\ cache[c][l].status = "SM_A"
@@ -766,12 +773,22 @@ NotPossibleCpuStates ==
                    \/ fwd_getm_resp
                    \/ data_from_owner
                    \/ data_from_dir
+                   \/ inv_ack_msg
+
+            when_m ==
+                /\ cache[c][l].status = "M"
+                /\ \/ inv_resp
+                   \/ data_from_dir
+                   \/ data_from_owner
+                   \/ inv_ack_msg
 
             neg_cond ==
+                \/ when_i
                 \/ when_is_d
                 \/ when_s
                 \/ when_sm_a
                 \/ when_sm_ad
+                \/ when_m
         IN
             ~neg_cond
 
