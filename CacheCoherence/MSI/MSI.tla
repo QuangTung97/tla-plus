@@ -17,9 +17,9 @@ NullValue == Value \union {nil}
 
 CacheStatus == {"I", "S", "M"} \* Stable States
 
-CacheTransientStatus == {"IS_D", "IM_AD", "IM_A"}
+CacheTransientStatus == {"IS_D", "IM_AD", "IM_A", "SM_AD", "SM_A"}
 
-ReadableStatus == {"S"}
+ReadableStatus == {"S", "M", "SM_AD", "SM_A"}
 
 WritableStatus == {"M"}
 
@@ -153,26 +153,26 @@ CpuLoad(c, l) ==
 
 CpuDataDir(c, l) ==
     LET
-        new_resp == llc_to_cache[c][1]
+        resp == llc_to_cache[c][1]
 
         when_is_d ==
             /\ cache[c][l].status = "IS_D"
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "S",
-                    ![c][l].data = new_resp.data
+                    ![c][l].data = resp.data
                 ]
             /\ UNCHANGED cpu_network
 
         ack_is_zero ==
-            \/ new_resp.ack = 0
-            \/ cache[c][l].need_ack + new_resp.ack = 0
+            \/ resp.ack = 0
+            \/ cache[c][l].need_ack + resp.ack = 0
 
         when_im_ad_ack_zero ==
             /\ cache[c][l].status = "IM_AD"
             /\ ack_is_zero
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "M",
-                    ![c][l].data = new_resp.data,
+                    ![c][l].data = resp.data,
                     ![c][l].need_ack = 0
                 ]
             /\ UNCHANGED cpu_network
@@ -182,19 +182,39 @@ CpuDataDir(c, l) ==
             /\ ~ack_is_zero
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "IM_A",
-                    ![c][l].data = new_resp.data,
-                    ![c][l].need_ack = @ + new_resp.ack
+                    ![c][l].data = resp.data,
+                    ![c][l].need_ack = @ + resp.ack
+                ]
+            /\ UNCHANGED cpu_network
+
+        when_sm_ad_ack_zero ==
+            /\ cache[c][l].status = "SM_AD"
+            /\ ack_is_zero
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "M",
+                    ![c][l].need_ack = 0
+                ]
+            /\ UNCHANGED cpu_network
+
+        when_sm_ad_ack_non_zero ==
+            /\ cache[c][l].status = "SM_AD"
+            /\ ~ack_is_zero
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "SM_A",
+                    ![c][l].need_ack = @ + resp.ack
                 ]
             /\ UNCHANGED cpu_network
     IN
     /\ llc_to_cache[c] # <<>>
-    /\ new_resp.line = l
-    /\ new_resp.type = "DataResp"
+    /\ resp.line = l
+    /\ resp.type = "DataResp"
 
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
     /\ \/ when_is_d
        \/ when_im_ad_ack_zero
        \/ when_im_ad_ack_non_zero
+       \/ when_sm_ad_ack_zero
+       \/ when_sm_ad_ack_non_zero
 
     /\ UNCHANGED cache_to_llc
     /\ cpu_unchanged
@@ -206,13 +226,23 @@ CpuRequestStore(c, l) ==
             type |-> "GetM",
             line |-> l
         ]
-    IN
-    /\ cache[c][l].status = "I" \* TODO status = S
 
-    /\ cache' = [cache EXCEPT ![c][l].status = "IM_AD"]
-    /\ cache_to_llc' = [cache_to_llc EXCEPT
-            ![c] = Append(@, new_req)
-        ]
+        when_i ==
+            /\ cache[c][l].status = "I"
+            /\ cache' = [cache EXCEPT ![c][l].status = "IM_AD"]
+            /\ cache_to_llc' = [cache_to_llc EXCEPT
+                    ![c] = Append(@, new_req)
+                ]
+
+        when_s ==
+            /\ cache[c][l].status = "S"
+            /\ cache' = [cache EXCEPT ![c][l].status = "SM_AD"]
+            /\ cache_to_llc' = [cache_to_llc EXCEPT
+                    ![c] = Append(@, new_req)
+                ]
+    IN
+    /\ \/ when_i
+       \/ when_s
 
     /\ UNCHANGED llc_to_cache
     /\ UNCHANGED cpu_network
@@ -305,6 +335,13 @@ CpuInv(c, l) ==
                     ![c][l].status = "I"
                 ]
             /\ cpu_network' = cpu_network \union {inv_ack_msg}
+
+        when_sm_ad ==
+            /\ cache[c][l].status = "SM_AD"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "IM_AD"
+                ]
+            /\ cpu_network' = cpu_network \union {inv_ack_msg}
     IN
     /\ llc_to_cache[c] # <<>>
     /\ resp.line = l
@@ -312,6 +349,7 @@ CpuInv(c, l) ==
 
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
     /\ \/ when_shared
+       \/ when_sm_ad
 
     /\ UNCHANGED cache_to_llc
     /\ cpu_unchanged
@@ -343,6 +381,21 @@ CpuInvAck(c, l) ==
                         ![c][l].status = "M",
                         ![c][l].need_ack = 0
                     ]
+
+            when_sm_a_ack_non_zero ==
+                /\ cache[c][l].status = "SM_A"
+                /\ ~need_ack_is_zero
+                /\ cache' = [cache EXCEPT
+                        ![c][l].need_ack = @ - 1
+                    ]
+
+            when_sm_a_ack_zero ==
+                /\ cache[c][l].status = "SM_A"
+                /\ need_ack_is_zero
+                /\ cache' = [cache EXCEPT
+                        ![c][l].status = "M",
+                        ![c][l].need_ack = 0
+                    ]
         IN
         /\ msg.type = "Inv-Ack"
         /\ msg.to_cpu = c
@@ -352,6 +405,8 @@ CpuInvAck(c, l) ==
         /\ \/ when_im_ad
            \/ when_im_a_ack_non_zero
            \/ when_im_a_ack_zero
+           \/ when_sm_a_ack_non_zero
+           \/ when_sm_a_ack_zero
 
         /\ UNCHANGED cache_to_llc
         /\ UNCHANGED llc_to_cache
@@ -475,7 +530,7 @@ LLCGetM(c, l) ==
             type |-> "DataResp",
             line |-> l,
             data |-> mem[l],
-            ack |-> Cardinality(llc[l].sharer)
+            ack |-> Cardinality(llc[l].sharer \ {c})
         ]
 
         inv_resp == [
@@ -638,8 +693,12 @@ CacheStateMInv ==
 
 
 ReadWriteStatusInv ==
-    /\ ReadableStatus \subseteq CacheStatus
-    /\ WritableStatus \subseteq CacheStatus
+    LET
+        all_status == CacheStatus \union CacheTransientStatus
+    IN
+    /\ ReadableStatus \subseteq all_status
+    /\ WritableStatus \subseteq all_status
+    /\ WritableStatus \subseteq ReadableStatus
 
 
 CacheCoherenceInvV2 ==
@@ -650,9 +709,16 @@ CacheCoherenceInvV2 ==
             mutable_list == {c \in CPU: cache[c][l].status \in WritableStatus}
 
             cond ==
-                /\ mutable_list # {} => shared_list = {}
+                /\ mutable_list # {} => shared_list = mutable_list
                 /\ Cardinality(mutable_list) <= 1
         IN
             cond
+
+
+LLCWhenMutableInv ==
+    \A l \in Line:
+        llc[l].status = "M" =>
+            /\ llc[l].owner # nil
+            /\ llc[l].sharer = {}
 
 ====
