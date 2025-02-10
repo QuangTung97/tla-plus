@@ -9,6 +9,36 @@ vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network, global_data>
 
 ----------------------------------------------------------
 
+(*
+CONSTANTS
+    CPU = {c1, c2, c3}
+    Line = {l1}
+
+max_value == 22
+
+FairSpec => 32 | 202,692 | 72,564
+*)
+
+(*
+CONSTANTS
+    CPU = {c1, c2}
+    Line = {l1, l2}
+
+max_value == 22
+
+FairSpec => 51 | 4,890,553 | 1,422,364
+*)
+
+(*
+CONSTANTS
+    CPU = {c1, c2, c3, c4}
+    Line = {l1}
+
+max_value == 22
+
+FairSpec => 38 | 16,481,565 | 4,544,772
+*)
+
 NullCPU == CPU \union {nil}
 
 Value == 20..29
