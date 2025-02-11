@@ -135,8 +135,25 @@ StartJob(k) ==
 
 
 MoveToHead(k) ==
+    LET
+        filter_fn(x) == x # k
+
+        removed == SelectSeq(pending_queue, filter_fn)
+    IN
     /\ num_move < max_move
     /\ num_move' = num_move + 1
+    /\ pending_map[k] # nil
+    /\ pending_map[k].in_queue
+    /\ pending_queue[1] # k
+
+    /\ pending_queue' = <<k>> \o removed
+
+    /\ UNCHANGED <<consume_chan, wait_queue>>
+    /\ UNCHANGED <<pending_map, running_set>>
+    /\ UNCHANGED handled_key
+    /\ UNCHANGED <<pc, local_key, local_val>>
+    /\ UNCHANGED next_val
+    /\ UNCHANGED last_val
 
 
 getPendingKeyValue(n) ==
@@ -265,7 +282,7 @@ Terminated ==
 Next ==
     \/ \E k \in Key:
         \/ StartJob(k)
-        \* \/ MoveToHead(k) TODO
+        \/ MoveToHead(k)
     \/ \E n \in Node:
         \/ SetWaitChan(n)
         \/ WaitOnChan(n)
