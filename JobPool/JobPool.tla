@@ -1,18 +1,22 @@
 ------ MODULE JobPool ----
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-CONSTANTS Node, Key, nil, max_val
+CONSTANTS Node, Key, nil, max_val, max_move
 
 VARIABLES running_set, pending_map, pending_queue,
     last_val, next_val,
     pc, wait_queue, consume_chan,
-    local_key, local_val, handled_key
+    local_key, local_val, handled_key,
+    num_move
 
 vars == <<running_set, pending_map, pending_queue,
     last_val, next_val,
     pc, wait_queue, consume_chan,
-    local_key, local_val, handled_key
-    >>
+    local_key, local_val, handled_key,
+    num_move
+>>
+
+aux_vars == <<num_move>>
 
 -------------------------------------------------------
 
@@ -21,6 +25,13 @@ NullKey == Key \union {nil}
 Value == 20..29
 
 NullValue == Value \union {nil}
+
+PendingInfo == [
+    val: Value,
+    in_queue: BOOLEAN
+]
+
+NullPendingInfo == PendingInfo \union {nil}
 
 KeyVal == [key: Key, val: Value]
 
@@ -37,7 +48,7 @@ Range(f) == {f[x]: x \in DOMAIN f}
 
 TypeOK ==
     /\ running_set \subseteq Key
-    /\ pending_map \in [Key -> NullValue]
+    /\ pending_map \in [Key -> NullPendingInfo]
     /\ pending_queue \in Seq(Key)
     /\ last_val \in [Key -> Value]
     /\ next_val \in Value
@@ -47,6 +58,7 @@ TypeOK ==
     /\ handled_key \in [Key -> NullValue]
     /\ local_key \in [Node -> NullKey]
     /\ local_val \in [Node -> NullValue]
+    /\ num_move \in 0..max_move
 
 
 Init ==
@@ -61,6 +73,7 @@ Init ==
     /\ handled_key = [k \in Key |-> nil]
     /\ local_key = [n \in Node |-> nil]
     /\ local_val = [n \in Node |-> nil]
+    /\ num_move = 0
 
 
 pushToWaitQueueIfNotEmpty(k, val, else_stmt) ==
@@ -83,10 +96,15 @@ pushToWaitQueueIfNotEmpty(k, val, else_stmt) ==
         ELSE else_stmt
 
 
+upsert_pending(new_val, in_queue) ==
+    [val |-> new_val, in_queue |-> in_queue]
+
 StartJob(k) ==
     LET
         handle_running ==
-            /\ pending_map' = [pending_map EXCEPT ![k] = next_val']
+            /\ pending_map' = [pending_map EXCEPT
+                    ![k] = upsert_pending(next_val', FALSE)
+                ]
             /\ UNCHANGED pending_queue
             /\ UNCHANGED wait_queue
             /\ UNCHANGED consume_chan
@@ -96,11 +114,12 @@ StartJob(k) ==
             /\ IF pending_map[k] = nil
                 THEN pending_queue' = Append(pending_queue, k)
                 ELSE UNCHANGED pending_queue
-            /\ pending_map' = [pending_map EXCEPT ![k] = next_val']
+            /\ pending_map' = [pending_map EXCEPT
+                    ![k] = upsert_pending(next_val', TRUE)
+                ]
             /\ UNCHANGED wait_queue
             /\ UNCHANGED consume_chan
             /\ UNCHANGED running_set
-
     IN
     /\ next_val < max_val
     /\ next_val' = next_val + 1
@@ -112,6 +131,12 @@ StartJob(k) ==
 
     /\ UNCHANGED handled_key
     /\ UNCHANGED <<pc, local_key, local_val>>
+    /\ UNCHANGED aux_vars
+
+
+MoveToHead(k) ==
+    /\ num_move < max_move
+    /\ num_move' = num_move + 1
 
 
 getPendingKeyValue(n) ==
@@ -119,7 +144,7 @@ getPendingKeyValue(n) ==
         k == pending_queue[1]
     IN
         /\ local_key' = [local_key EXCEPT ![n] = k]
-        /\ local_val' = [local_val EXCEPT ![n] = pending_map[k]]
+        /\ local_val' = [local_val EXCEPT ![n] = pending_map[k].val]
 
         /\ pending_queue' = Tail(pending_queue)
         /\ pending_map' = [pending_map EXCEPT ![k] = nil]
@@ -148,6 +173,7 @@ SetWaitChan(n) ==
     /\ UNCHANGED handled_key
     /\ UNCHANGED last_val
     /\ UNCHANGED next_val
+    /\ UNCHANGED aux_vars
 
 
 WaitOnChan(n) ==
@@ -167,6 +193,7 @@ WaitOnChan(n) ==
     /\ UNCHANGED <<next_val, last_val>>
     /\ UNCHANGED handled_key
     /\ UNCHANGED <<pending_map, pending_queue, running_set, wait_queue>>
+    /\ UNCHANGED aux_vars
 
 
 HandleKey(n) ==
@@ -185,6 +212,7 @@ HandleKey(n) ==
     /\ UNCHANGED wait_queue
     /\ UNCHANGED next_val
     /\ UNCHANGED <<pending_queue, pending_map, running_set>>
+    /\ UNCHANGED aux_vars
 
 
 ClearRunning(n) ==
@@ -196,7 +224,7 @@ ClearRunning(n) ==
         else_stmt ==
             /\ running_set' = new_set
             /\ pending_queue' = Append(pending_queue, k)
-            /\ UNCHANGED pending_map
+            /\ pending_map' = [pending_map EXCEPT ![k].in_queue = TRUE]
             /\ UNCHANGED <<wait_queue, consume_chan>>
     IN
     /\ pc[n] = "ClearRunning"
@@ -204,7 +232,7 @@ ClearRunning(n) ==
 
     /\ IF pending_map[k] # nil
         THEN
-            /\ pushToWaitQueueIfNotEmpty(k, pending_map[k], else_stmt)
+            /\ pushToWaitQueueIfNotEmpty(k, pending_map[k].val, else_stmt)
         ELSE
             /\ running_set' = new_set
             /\ UNCHANGED <<pending_map, pending_queue>>
@@ -215,6 +243,7 @@ ClearRunning(n) ==
 
     /\ UNCHANGED <<next_val, last_val>>
     /\ UNCHANGED handled_key
+    /\ UNCHANGED aux_vars
 
 
 StopCond ==
@@ -235,7 +264,8 @@ Terminated ==
 
 Next ==
     \/ \E k \in Key:
-        StartJob(k)
+        \/ StartJob(k)
+        \* \/ MoveToHead(k) TODO
     \/ \E n \in Node:
         \/ SetWaitChan(n)
         \/ WaitOnChan(n)
@@ -264,7 +294,7 @@ Inv ==
         StopCond => cond
 
 
-MustNotHandleSameKey ==
+MustNotHandleSameKeyConcurrently ==
     LET
         running_nodes == {n \in Node: pc[n] = "HandleKey"}
 
@@ -288,5 +318,27 @@ PendingMapIsSubsetPendingQueueAndRunningSet ==
         union_set == Range(pending_queue) \union running_set
     IN
         cmp_set \subseteq union_set
+
+
+PendingQueueIsSubsetOfPendingMap ==
+    LET
+        cmp_set == {k \in Key: pending_map[k] # nil}
+    IN
+        Range(pending_queue) \subseteq cmp_set
+
+
+ChannelLenNotGreaterThanOne ==
+    \A n \in Node:
+        Len(consume_chan[n].data) <= 1
+
+
+InQueueMatchPendingQueue ==
+    LET
+        is_in_queue(k) ==
+            /\ pending_map[k] # nil
+            /\ pending_map[k].in_queue
+    IN
+    \A k \in Key:
+        is_in_queue(k) <=> k \in Range(pending_queue)
 
 ====
