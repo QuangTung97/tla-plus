@@ -148,7 +148,6 @@ MoveToHead(k) ==
     IN
     /\ num_move < max_move
     /\ num_move' = num_move + 1
-    /\ ~closed
     /\ pending_map[k] # nil
     /\ pending_map[k].in_queue
     /\ pending_queue[1] # k
