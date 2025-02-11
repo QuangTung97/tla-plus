@@ -4,13 +4,13 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 CONSTANTS Node, Key, nil, max_val, max_move
 
 VARIABLES running_set, pending_map, pending_queue,
-    last_val, next_val,
+    closed, last_val, next_val,
     pc, wait_queue, consume_chan,
     local_key, local_val, handled_key,
     num_move
 
 vars == <<running_set, pending_map, pending_queue,
-    last_val, next_val,
+    closed, last_val, next_val,
     pc, wait_queue, consume_chan,
     local_key, local_val, handled_key,
     num_move
@@ -44,15 +44,18 @@ init_chan == [data |-> <<>>, closed |-> FALSE]
 
 Range(f) == {f[x]: x \in DOMAIN f}
 
+PC == {"Init", "WaitOnChan", "HandleKey", "ClearRunning", "Terminated"}
+
 -------------------------------------------------------
 
 TypeOK ==
     /\ running_set \subseteq Key
     /\ pending_map \in [Key -> NullPendingInfo]
     /\ pending_queue \in Seq(Key)
+    /\ closed \in BOOLEAN
     /\ last_val \in [Key -> Value]
     /\ next_val \in Value
-    /\ pc \in [Node -> {"Init", "WaitOnChan", "HandleKey", "ClearRunning"}]
+    /\ pc \in [Node -> PC]
     /\ consume_chan \in [Node -> Channel]
     /\ wait_queue \in Seq(Node)
     /\ handled_key \in [Key -> NullValue]
@@ -65,6 +68,7 @@ Init ==
     /\ running_set = {}
     /\ pending_map = [k \in Key |-> nil]
     /\ pending_queue = <<>>
+    /\ closed = FALSE
     /\ last_val = [k \in Key |-> 20]
     /\ next_val = 20
     /\ pc = [n \in Node |-> "Init"]
@@ -124,6 +128,7 @@ StartJob(k) ==
     /\ next_val < max_val
     /\ next_val' = next_val + 1
     /\ last_val' = [last_val EXCEPT ![k] = next_val']
+    /\ ~closed
 
     /\ IF k \in running_set
         THEN handle_running
@@ -131,6 +136,7 @@ StartJob(k) ==
 
     /\ UNCHANGED handled_key
     /\ UNCHANGED <<pc, local_key, local_val>>
+    /\ UNCHANGED closed
     /\ UNCHANGED aux_vars
 
 
@@ -142,6 +148,7 @@ MoveToHead(k) ==
     IN
     /\ num_move < max_move
     /\ num_move' = num_move + 1
+    /\ ~closed
     /\ pending_map[k] # nil
     /\ pending_map[k].in_queue
     /\ pending_queue[1] # k
@@ -154,6 +161,7 @@ MoveToHead(k) ==
     /\ UNCHANGED <<pc, local_key, local_val>>
     /\ UNCHANGED next_val
     /\ UNCHANGED last_val
+    /\ UNCHANGED closed
 
 
 getPendingKeyValue(n) ==
@@ -174,13 +182,20 @@ getPendingKeyValue(n) ==
 SetWaitChan(n) ==
     /\ pc[n] = "Init"
 
-    /\ IF pending_queue # <<>>
-        THEN
+    /\ IF pending_queue # <<>> THEN
             /\ getPendingKeyValue(n)
             /\ pc' = [pc EXCEPT ![n] = "HandleKey"]
-        ELSE
+        ELSE IF ~closed THEN
             /\ pc' = [pc EXCEPT ![n] = "WaitOnChan"]
             /\ wait_queue' = Append(wait_queue, n)
+            /\ UNCHANGED consume_chan
+            /\ UNCHANGED pending_map
+            /\ UNCHANGED pending_queue
+            /\ UNCHANGED running_set
+            /\ UNCHANGED <<local_key, local_val>>
+        ELSE
+            /\ pc' = [pc EXCEPT ![n] = "Terminated"]
+            /\ UNCHANGED wait_queue
             /\ UNCHANGED consume_chan
             /\ UNCHANGED pending_map
             /\ UNCHANGED pending_queue
@@ -191,25 +206,41 @@ SetWaitChan(n) ==
     /\ UNCHANGED last_val
     /\ UNCHANGED next_val
     /\ UNCHANGED aux_vars
+    /\ UNCHANGED closed
 
 
 WaitOnChan(n) ==
     LET
         e == consume_chan[n].data[1]
+
+        goto_handle_key ==
+            /\ consume_chan[n].data # <<>>
+            /\ pc' = [pc EXCEPT ![n] = "HandleKey"]
+
+            /\ consume_chan' = [consume_chan EXCEPT
+                    ![n].data = Tail(@)
+                ]
+            /\ local_key' = [local_key EXCEPT ![n] = e.key]
+            /\ local_val' = [local_val EXCEPT ![n] = e.val]
+
+        goto_terminated ==
+            /\ consume_chan[n].closed
+            /\ consume_chan[n].data = <<>>
+            /\ pc' = [pc EXCEPT ![n] = "Terminated"]
+            /\ local_key' = [local_key EXCEPT ![n] = nil]
+            /\ local_val' = [local_val EXCEPT ![n] = nil]
+            /\ UNCHANGED consume_chan
+
     IN
     /\ pc[n] = "WaitOnChan"
-    /\ consume_chan[n].data # <<>>
-    /\ pc' = [pc EXCEPT ![n] = "HandleKey"]
 
-    /\ consume_chan' = [consume_chan EXCEPT
-            ![n].data = Tail(@)
-        ]
-    /\ local_key' = [local_key EXCEPT ![n] = e.key]
-    /\ local_val' = [local_val EXCEPT ![n] = e.val]
+    /\ \/ goto_handle_key
+       \/ goto_terminated
 
     /\ UNCHANGED <<next_val, last_val>>
     /\ UNCHANGED handled_key
     /\ UNCHANGED <<pending_map, pending_queue, running_set, wait_queue>>
+    /\ UNCHANGED closed
     /\ UNCHANGED aux_vars
 
 
@@ -227,6 +258,7 @@ HandleKey(n) ==
     /\ UNCHANGED last_val
     /\ UNCHANGED consume_chan
     /\ UNCHANGED wait_queue
+    /\ UNCHANGED closed
     /\ UNCHANGED next_val
     /\ UNCHANGED <<pending_queue, pending_map, running_set>>
     /\ UNCHANGED aux_vars
@@ -260,18 +292,46 @@ ClearRunning(n) ==
 
     /\ UNCHANGED <<next_val, last_val>>
     /\ UNCHANGED handled_key
+    /\ UNCHANGED closed
     /\ UNCHANGED aux_vars
 
 
+Shutdown ==
+    LET
+        close_set == Range(wait_queue)
+
+        do_close_ch(n, old) ==
+            IF n \in close_set
+                THEN [old EXCEPT !.closed = TRUE]
+                ELSE old
+
+        close_all_wait_queue ==
+            consume_chan' = [
+                n \in Node |-> do_close_ch(n, consume_chan[n])
+            ]
+    IN
+    /\ ~closed
+    /\ closed' = TRUE
+    /\ close_all_wait_queue
+    /\ wait_queue' = <<>>
+
+    /\ UNCHANGED <<last_val, next_val>>
+    /\ UNCHANGED <<pending_map, pending_queue, running_set>>
+    /\ UNCHANGED <<pc, local_key, local_val>>
+    /\ UNCHANGED handled_key
+    /\ UNCHANGED aux_vars
+
+-------------------------------------------------------
+
 StopCond ==
-    /\ pending_queue = <<>>
-    /\ \A n \in Node:
-        /\ pc[n] = "WaitOnChan"
-        /\ consume_chan[n].data = <<>>
+    \A n \in Node:
+        \/ pc[n] = "Terminated"
+        \/ /\ pc[n] = "WaitOnChan"
+           /\ consume_chan[n].data = <<>>
 
 TerminateCond ==
-    /\ StopCond
-    /\ next_val = max_val
+    /\ \A n \in Node: pc[n] = "Terminated"
+    /\ closed
 
 Terminated ==
     /\ TerminateCond
@@ -288,6 +348,7 @@ Next ==
         \/ WaitOnChan(n)
         \/ HandleKey(n)
         \/ ClearRunning(n)
+    \/ Shutdown
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -357,5 +418,22 @@ InQueueMatchPendingQueue ==
     IN
     \A k \in Key:
         is_in_queue(k) <=> k \in Range(pending_queue)
+
+
+TerminateCondIsStopCond ==
+    TerminateCond => StopCond
+
+
+WaitQueueNonEmptyWhenPendingQueueEmpty ==
+    wait_queue # <<>> => pending_queue = <<>>
+
+
+canNotPushToChanWhenClosedStep ==
+    \A n \in Node:
+        consume_chan[n].closed =>
+            Len(consume_chan'[n].data) <= Len(consume_chan[n].data)
+
+CanNotPushToChanWhenClosed ==
+    [][canNotPushToChanWhenClosedStep]_consume_chan
 
 ====
