@@ -58,7 +58,7 @@ TypeOK ==
     /\ pc \in [Node -> PC]
     /\ consume_chan \in [Node -> Channel]
     /\ wait_queue \in Seq(Node)
-    /\ handled_key \in [Key -> NullValue]
+    /\ handled_key \in [Key -> Seq(Value)]
     /\ local_key \in [Node -> NullKey]
     /\ local_val \in [Node -> NullValue]
     /\ num_move \in 0..max_move
@@ -74,7 +74,7 @@ Init ==
     /\ pc = [n \in Node |-> "Init"]
     /\ consume_chan = [n \in Node |-> init_chan]
     /\ wait_queue = <<>>
-    /\ handled_key = [k \in Key |-> nil]
+    /\ handled_key = [k \in Key |-> <<>>]
     /\ local_key = [n \in Node |-> nil]
     /\ local_val = [n \in Node |-> nil]
     /\ num_move = 0
@@ -252,7 +252,7 @@ HandleKey(n) ==
     /\ pc[n] = "HandleKey"
     /\ pc' = [pc EXCEPT ![n] = "ClearRunning"]
 
-    /\ handled_key' = [handled_key EXCEPT ![k] = val]
+    /\ handled_key' = [handled_key EXCEPT ![k] = Append(@, val)]
 
     /\ UNCHANGED <<local_key, local_val>>
     /\ UNCHANGED last_val
@@ -359,17 +359,32 @@ FairSpec == Spec /\ WF_vars(Next)
 
 AlwaysTerminate == <> TerminateCond
 
+
+seqNotDuplicated(seq) ==
+    Len(seq) = Cardinality(Range(seq))
+
+
 QueueNotContainDuplicate ==
     Len(pending_queue) = Cardinality(Range(pending_queue))
 
 
 Inv ==
     LET
+        handled_last(k) == handled_key[k][Len(handled_key[k])]
+
         cond ==
             \A k \in Key:
-                last_val[k] > 20 => handled_key[k] = last_val[k]
+                last_val[k] > 20 => handled_last(k) = last_val[k]
     IN
         StopCond => cond
+
+
+HandledKeyNoDuplicate ==
+    \A k \in Key:
+        LET
+            keys == handled_key[k]
+        IN
+            seqNotDuplicated(keys)
 
 
 MustNotHandleSameKeyConcurrently ==
@@ -435,5 +450,16 @@ canNotPushToChanWhenClosedStep ==
 
 CanNotPushToChanWhenClosed ==
     [][canNotPushToChanWhenClosedStep]_consume_chan
+
+
+PendingMapMustBeUpToDate ==
+    \A k \in Key:
+        pending_map[k] # nil => pending_map[k].val = last_val[k]
+
+
+ReverseInv ==
+    \A k \in Key:
+        k \in running_set => pending_map[k] = nil
+
 
 ====
