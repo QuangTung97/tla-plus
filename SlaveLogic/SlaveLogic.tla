@@ -2,13 +2,13 @@
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 CONSTANTS Node, Entry, User, nil,
-    max_action, max_timeout, max_restart
+    max_action, max_timeout, max_restart, max_retry
 
-VARIABLES status, replica_status, dir_state,
+VARIABLES status, status_retry, replica_status, dir_state,
     pc, local_req,
     request_queue, num_action, num_restart
 
-vars == <<status, replica_status, dir_state,
+vars == <<status, status_retry, replica_status, dir_state,
     pc, local_req,
     request_queue, num_action, num_restart>>
 
@@ -16,7 +16,7 @@ vars == <<status, replica_status, dir_state,
 Status == {
     "None", "CreatingEntry", "Writing",
     "WriteTimeout", "WriteCompleted",
-    "Synced"
+    "Synced", "SyncFailed"
 }
 
 ReplicaStatus == {"Empty", "Writing", "Written"}
@@ -31,7 +31,7 @@ PC == {
     "UpdateReplicaToWriting", "UpdateStatusToWriting",
     "UpdateToWriteTimeout", "UpdateToWriteCompleted",
     "SyncToWritten",
-    "UpdateToSynced"
+    "UpdateToSynced", "UpdateToSyncFailed"
 }
 
 WriteReq == [type: {"Write"}, entry: Entry, user: User]
@@ -44,6 +44,7 @@ NullRequest == Request \union {nil}
 
 TypeOK ==
     /\ status \in [Entry -> Status]
+    /\ status_retry \in [Entry -> 0..max_retry]
     /\ replica_status \in [Entry -> ReplicaStatus]
     /\ dir_state \in [Entry -> DirState]
     /\ pc \in [Node -> PC]
@@ -60,6 +61,7 @@ init_dir_state == [
 
 Init ==
     /\ status = [e \in Entry |-> "None"]
+    /\ status_retry = [e \in Entry |-> 0]
     /\ replica_status = [e \in Entry |-> "Empty"]
     /\ dir_state = [e \in Entry |-> init_dir_state]
     /\ pc = [n \in Node |-> "Init"]
@@ -78,6 +80,7 @@ InsertEntry(e) ==
     /\ status[e] = "None"
     /\ status' = [status EXCEPT ![e] = "CreatingEntry"]
 
+    /\ UNCHANGED status_retry
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED request_queue
     /\ input_unchanged
@@ -99,6 +102,7 @@ AddWriteReq(e, u) ==
     /\ request_queue' = [request_queue EXCEPT ![e] = Append(@, new_req)]
 
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
     /\ UNCHANGED num_restart
     /\ input_unchanged
 
@@ -117,6 +121,7 @@ AddWriteCompleted(e, u) ==
     /\ request_queue' = [request_queue EXCEPT ![e] = Append(@, new_req)]
 
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
     /\ UNCHANGED num_restart
     /\ input_unchanged
 
@@ -164,6 +169,7 @@ HandleWriteReq(e, n) ==
     /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
 
 
 CreateDir(n) ==
@@ -176,6 +182,7 @@ CreateDir(n) ==
     /\ dir_state' = [dir_state EXCEPT ![e].status = "Created"]
 
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
     /\ UNCHANGED local_req
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED request_queue
@@ -194,6 +201,7 @@ AddWritePerm(n) ==
 
     /\ UNCHANGED local_req
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
     /\ UNCHANGED request_queue
     /\ UNCHANGED replica_status
     /\ UNCHANGED <<num_action, num_restart>>
@@ -217,6 +225,7 @@ UpdateReplicaToWriting(n) ==
     /\ UNCHANGED dir_state
     /\ UNCHANGED local_req
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
     /\ UNCHANGED request_queue
     /\ UNCHANGED <<num_action, num_restart>>
 
@@ -230,6 +239,7 @@ UpdateStatusToWriting(n) ==
     /\ goto(n, "Init")
 
     /\ status' = [status EXCEPT ![e] = "Writing"]
+    /\ status_retry' = [status_retry EXCEPT ![e] = 0]
     /\ local_req' = [local_req EXCEPT ![n] = nil]
 
     /\ UNCHANGED dir_state
@@ -266,6 +276,7 @@ HandleTimeout(e, n) ==
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
 
 
 UpdateToWriteTimeout(n) ==
@@ -287,6 +298,7 @@ UpdateToWriteTimeout(n) ==
             ![e] = Append(@, new_req)
         ]
 
+    /\ UNCHANGED status_retry
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED <<dir_state, replica_status>>
 
@@ -302,6 +314,7 @@ SyncToWritten(n) ==
     /\ replica_status' = [replica_status EXCEPT ![e] = "Written"]
 
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
     /\ UNCHANGED local_req
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED request_queue
@@ -317,6 +330,7 @@ UpdateToSynced(n) ==
     /\ goto(n, "Init")
 
     /\ status' = [status EXCEPT ![e] = "Synced"]
+    /\ status_retry' = [status_retry EXCEPT ![e] = 0]
     /\ local_req' = [local_req EXCEPT ![n] = nil]
 
     /\ UNCHANGED <<dir_state, replica_status>>
@@ -348,6 +362,7 @@ HandleSyncReq(e, n) ==
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
 
 
 HandleWriteCompletedReq(e, n) ==
@@ -372,6 +387,7 @@ HandleWriteCompletedReq(e, n) ==
     /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
 
 
 UpdateToWriteCompleted(n) ==
@@ -393,8 +409,26 @@ UpdateToWriteCompleted(n) ==
             ![e] = Append(@, new_req)
         ]
 
+    /\ UNCHANGED status_retry
     /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED <<dir_state, replica_status>>
+
+
+UpdateToSyncFailed(n) ==
+    LET
+        req == local_req[n]
+        e == req.entry
+    IN
+    /\ pc[n] = "UpdateToSyncFailed"
+    /\ goto(n, "Init")
+
+    /\ status' = [status EXCEPT ![e] = "SyncFailed"]
+    /\ status_retry' = [status_retry EXCEPT ![e] = 0]
+    /\ local_req' = [local_req EXCEPT ![n] = nil]
+
+    /\ UNCHANGED <<dir_state, replica_status>>
+    /\ UNCHANGED <<num_action, num_restart>>
+    /\ UNCHANGED request_queue
 
 -------------------------------------------------------
 
@@ -421,6 +455,7 @@ WriteTimeout(e, n) ==
         ]
 
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
     /\ UNCHANGED <<pc, local_req>>
     /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED <<num_action, num_restart>>
@@ -438,6 +473,36 @@ Restart(n) ==
     /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED num_action
     /\ UNCHANGED status
+    /\ UNCHANGED status_retry
+
+
+ActionFailed(n) ==
+    LET
+        req == local_req[n]
+        e == req.entry
+
+        when_retry_not_reach_limit ==
+            /\ status_retry[e] < max_retry
+            /\ goto(n, "Init")
+            /\ local_req' = [local_req EXCEPT ![n] = nil]
+            /\ status_retry' = [status_retry EXCEPT ![e] = @ + 1]
+
+        when_retry_reach_limit ==
+            /\ status_retry[e] >= max_retry
+            /\ goto(n, "UpdateToSyncFailed")
+            /\ UNCHANGED local_req
+            /\ UNCHANGED status_retry
+    IN
+    /\ pc[n] \in {"SyncToWritten"}
+
+    /\ \/ when_retry_not_reach_limit
+       \/ when_retry_reach_limit
+
+    /\ UNCHANGED status
+    /\ UNCHANGED <<num_action, num_restart>>
+    /\ UNCHANGED request_queue
+    /\ UNCHANGED <<dir_state, replica_status>>
+
 
 -------------------------------------------------------
 
@@ -471,7 +536,9 @@ Next ==
         \/ UpdateToWriteCompleted(n)
         \/ SyncToWritten(n)
         \/ UpdateToSynced(n)
+        \/ UpdateToSyncFailed(n)
         \/ Restart(n)
+        \/ ActionFailed(n)
 
     \/ \E n \in Node, e \in Entry:
         \/ HandleWriteReq(e, n)
@@ -491,36 +558,59 @@ FairSpec == Spec /\ WF_vars(Next)
 AlwaysTerminate == <> TerminateCond
 
 statusTransitionStep ==
+    LET
+        update_written_failed(e) ==
+            \/ /\ status[e] = "WriteCompleted"
+               /\ status'[e] = "WriteCompleted"
+               /\ status_retry'[e] = status_retry[e] + 1
+
+            \/ /\ status[e] = "WriteTimeout"
+               /\ status'[e] = "WriteTimeout"
+               /\ status_retry'[e] = status_retry[e] + 1
+
+        to_sync_failed(e) ==
+            /\ status[e] \in {"WriteCompleted", "WriteTimeout"}
+            /\ status'[e] = "SyncFailed"
+            /\ status_retry'[e] = 0
+
+        to_writing(e) ==
+            /\ status[e] \in {
+                "WriteTimeout", "WriteCompleted", "Synced", "SyncFailed"}
+            /\ status'[e] = "Writing"
+            /\ status_retry'[e] = 0
+    IN
     \E e \in Entry:
         \/ /\ status[e] = "None"
            /\ status'[e] = "CreatingEntry"
+           /\ status_retry'[e] = 0
 
         \/ /\ status[e] = "CreatingEntry"
            /\ status'[e] = "Writing"
+           /\ status_retry'[e] = 0
 
         \/ /\ status[e] = "Writing"
            /\ status'[e] = "WriteTimeout"
+           /\ status_retry'[e] = 0
 
         \/ /\ status[e] = "Writing"
            /\ status'[e] = "WriteCompleted"
+           /\ status_retry'[e] = 0
 
         \/ /\ status[e] = "WriteTimeout"
            /\ status'[e] = "Synced"
+           /\ status_retry'[e] = 0
 
         \/ /\ status[e] = "WriteCompleted"
            /\ status'[e] = "Synced"
+           /\ status_retry'[e] = 0
 
-        \/ /\ status[e] = "WriteTimeout"
-           /\ status'[e] = "Writing"
+        \/ update_written_failed(e)
+        \/ to_sync_failed(e)
+        \/ to_writing(e)
 
-        \/ /\ status[e] = "WriteCompleted"
-           /\ status'[e] = "Writing"
-
-        \/ /\ status[e] = "Synced"
-           /\ status'[e] = "Writing"
 
 StatusTransitionInv ==
-    [][statusTransitionStep]_status
+    [][statusTransitionStep]_<<status, status_retry>>
 
 
 CanNotHandleEntryConcurrently ==
@@ -542,7 +632,7 @@ StopCondReplicaStatusMustBeWritten ==
     LET
         cond ==
             \A e \in Entry:
-                status[e] # "CreatingEntry" => replica_status[e] = "Written"
+                status[e] = "Synced" => replica_status[e] = "Written"
     IN
         StopCond => cond
 
