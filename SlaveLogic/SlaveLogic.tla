@@ -12,7 +12,11 @@ vars == <<status, replica_status, dir_state,
     request_queue, num_action>>
 
 -------------------------------------------------------
-Status == {"None", "CreatingEntry", "Writing", "WriteTimeout", "Synced"}
+Status == {
+    "None", "CreatingEntry", "Writing",
+    "WriteTimeout", "WriteCompleted",
+    "Synced"
+}
 
 ReplicaStatus == {"Empty", "Writing", "Written"}
 
@@ -24,16 +28,16 @@ DirState == [
 PC == {
     "Init", "CreateDir", "AddWritePerm",
     "UpdateReplicaToWriting", "UpdateStatusToWriting",
-    "UpdateToWriteTimeout",
+    "UpdateToWriteTimeout", "UpdateToWriteCompleted",
     "SyncToWritten",
     "UpdateToSynced"
 }
 
 WriteReq == [type: {"Write"}, entry: Entry, user: User]
 
-TimeoutReq == [type: {"Timeout"}, entry: Entry]
+OtherReq == [type: {"Timeout", "WriteCompleted", "Sync"}, entry: Entry]
 
-Request == WriteReq \union TimeoutReq
+Request == WriteReq \union OtherReq
 
 NullRequest == Request \union {nil}
 
@@ -93,6 +97,24 @@ AddWriteReq(e, u) ==
 
     /\ UNCHANGED status
     /\ input_unchanged
+
+
+AddWriteCompleted(e, u) ==
+    LET
+        new_req == [
+            type |-> "WriteCompleted",
+            entry |-> e
+        ]
+    IN
+    /\ num_action < max_action
+    /\ num_action' = num_action + 1
+    /\ status_existed(e)
+
+    /\ request_queue' = [request_queue EXCEPT ![e] = Append(@, new_req)]
+
+    /\ UNCHANGED status
+    /\ input_unchanged
+
 
 -------------------------------------------------------
 
@@ -216,12 +238,12 @@ HandleTimeout(e, n) ==
             /\ local_req' = [local_req EXCEPT ![n] = req]
 
         when_write_timeout ==
-            /\ status[e] = "WriteTimeout"
+            /\ status[e] \in {"WriteTimeout", "WriteCompleted"}
             /\ goto(n, "SyncToWritten")
             /\ local_req' = [local_req EXCEPT ![n] = req]
 
         when_other ==
-            /\ status[e] \notin {"Writing", "WriteTimeout"}
+            /\ status[e] \notin {"Writing", "WriteTimeout", "WriteCompleted"}
             /\ goto(n, "Init")
             /\ UNCHANGED local_req
     IN
@@ -240,15 +262,22 @@ UpdateToWriteTimeout(n) ==
     LET
         req == local_req[n]
         e == req.entry
+
+        new_req == [
+            type |-> "Sync",
+            entry |-> e
+        ]
     IN
     /\ pc[n] = "UpdateToWriteTimeout"
     /\ goto(n, "Init")
 
     /\ status' = [status EXCEPT ![e] = "WriteTimeout"]
     /\ local_req' = [local_req EXCEPT ![n] = nil]
+    /\ request_queue' = [request_queue EXCEPT
+            ![e] = Append(@, new_req)
+        ]
 
     /\ UNCHANGED num_action
-    /\ UNCHANGED request_queue
     /\ UNCHANGED <<dir_state, replica_status>>
 
 
@@ -284,6 +313,79 @@ UpdateToSynced(n) ==
     /\ UNCHANGED num_action
     /\ UNCHANGED request_queue
 
+
+HandleSyncReq(e, n) ==
+    LET
+        req == request_queue[e][1]
+
+        valid_status == {"WriteTimeout", "WriteCompleted"}
+
+        when_valid ==
+            /\ status[e] \in valid_status
+            /\ goto(n, "SyncToWritten")
+            /\ local_req' = [local_req EXCEPT ![n] = req]
+
+        when_invalid_status ==
+            /\ status[e] \notin valid_status
+            /\ goto(n, "Init")
+            /\ UNCHANGED local_req
+    IN
+    /\ request_contain(e, n, "Sync")
+
+    /\ \/ when_valid
+       \/ when_invalid_status
+
+    /\ UNCHANGED num_action
+    /\ UNCHANGED <<dir_state, replica_status>>
+    /\ UNCHANGED status
+
+
+HandleWriteCompletedReq(e, n) ==
+    LET
+        req == request_queue[e][1]
+
+        when_writing ==
+            /\ status[e] = "Writing"
+            /\ goto(n, "UpdateToWriteCompleted")
+            /\ local_req' = [local_req EXCEPT ![n] = req]
+
+        when_other ==
+            /\ status[e] # "Writing"
+            /\ goto(n, "Init")
+            /\ UNCHANGED local_req
+    IN
+    /\ request_contain(e, n, "WriteCompleted")
+
+    /\ \/ when_writing
+       \/ when_other
+
+    /\ UNCHANGED <<dir_state, replica_status>>
+    /\ UNCHANGED num_action
+    /\ UNCHANGED status
+
+
+UpdateToWriteCompleted(n) ==
+    LET
+        req == local_req[n]
+        e == req.entry
+
+        new_req == [
+            type |-> "Sync",
+            entry |-> e
+        ]
+    IN
+    /\ pc[n] = "UpdateToWriteCompleted"
+    /\ goto(n, "Init")
+
+    /\ status' = [status EXCEPT ![e] = "WriteCompleted"]
+    /\ local_req' = [local_req EXCEPT ![n] = nil]
+    /\ request_queue' = [request_queue EXCEPT
+            ![e] = Append(@, new_req)
+        ]
+
+    /\ UNCHANGED num_action
+    /\ UNCHANGED <<dir_state, replica_status>>
+
 -------------------------------------------------------
 
 Range(f) == {f[x]: x \in DOMAIN f}
@@ -318,7 +420,8 @@ WriteTimeout(e, n) ==
 TerminateCond ==
     /\ \A e \in Entry:
         /\ request_queue[e] = <<>>
-        /\ status[e] \in {"Synced", "SyncFailed"}
+        /\ status[e] \in {"CreatingEntry", "Synced", "SyncFailed"}
+    /\ num_action = max_action
 
 Terminated ==
     /\ TerminateCond
@@ -330,6 +433,7 @@ Next ==
 
     \/ \E e \in Entry, u \in User:
         \/ AddWriteReq(e, u)
+        \/ AddWriteCompleted(e, u)
 
     \/ \E n \in Node:
         \/ CreateDir(n)
@@ -337,6 +441,7 @@ Next ==
         \/ UpdateReplicaToWriting(n)
         \/ UpdateStatusToWriting(n)
         \/ UpdateToWriteTimeout(n)
+        \/ UpdateToWriteCompleted(n)
         \/ SyncToWritten(n)
         \/ UpdateToSynced(n)
 
@@ -344,12 +449,18 @@ Next ==
         \/ HandleWriteReq(e, n)
         \/ HandleTimeout(e, n)
         \/ WriteTimeout(e, n)
+        \/ HandleSyncReq(e, n)
+        \/ HandleWriteCompletedReq(e, n)
 
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 -------------------------------------------------------
+
+AlwaysTerminate == <> TerminateCond
 
 statusTransitionStep ==
     \E e \in Entry:
@@ -362,10 +473,19 @@ statusTransitionStep ==
         \/ /\ status[e] = "Writing"
            /\ status'[e] = "WriteTimeout"
 
+        \/ /\ status[e] = "Writing"
+           /\ status'[e] = "WriteCompleted"
+
         \/ /\ status[e] = "WriteTimeout"
            /\ status'[e] = "Synced"
 
+        \/ /\ status[e] = "WriteCompleted"
+           /\ status'[e] = "Synced"
+
         \/ /\ status[e] = "WriteTimeout"
+           /\ status'[e] = "Writing"
+
+        \/ /\ status[e] = "WriteCompleted"
            /\ status'[e] = "Writing"
 
         \/ /\ status[e] = "Synced"
@@ -381,6 +501,12 @@ CanNotHandleEntryConcurrently ==
 
 MustNotCreateDirWhenNonCreatingEntry ==
     \A n \in Node:
-        pc[n] = "CreateDir"  => status[local_req[n].entry] = "CreatingEntry"
+        pc[n] = "CreateDir" => status[local_req[n].entry] = "CreatingEntry"
+
+
+PCInitInv ==
+    \A n \in Node:
+        pc[n] = "Init" =>
+            /\ local_req[n] = nil
 
 ====
