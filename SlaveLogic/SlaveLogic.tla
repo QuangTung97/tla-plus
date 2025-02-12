@@ -198,11 +198,16 @@ UpdateReplicaToWriting(n) ==
     LET
         req == local_req[n]
         e == req.entry
+
+        update_if_not_written(old) ==
+            IF old = "Written"
+                THEN old
+                ELSE "Writing"
     IN
     /\ pc[n] = "UpdateReplicaToWriting"
     /\ goto(n, "UpdateStatusToWriting")
 
-    /\ replica_status' = [replica_status EXCEPT ![e] = "Writing"]
+    /\ replica_status' = [replica_status EXCEPT ![e] = update_if_not_written(@)]
 
     /\ UNCHANGED dir_state
     /\ UNCHANGED local_req
@@ -417,10 +422,13 @@ WriteTimeout(e, n) ==
 
 -------------------------------------------------------
 
-TerminateCond ==
+StopCond ==
     /\ \A e \in Entry:
         /\ request_queue[e] = <<>>
         /\ status[e] \in {"CreatingEntry", "Synced", "SyncFailed"}
+
+TerminateCond ==
+    /\ StopCond
     /\ num_action = max_action
 
 Terminated ==
@@ -508,5 +516,14 @@ PCInitInv ==
     \A n \in Node:
         pc[n] = "Init" =>
             /\ local_req[n] = nil
+
+
+StopCondReplicaStatusMustBeWritten ==
+    LET
+        cond ==
+            \A e \in Entry:
+                status[e] # "CreatingEntry" => replica_status[e] = "Written"
+    IN
+        StopCond => cond
 
 ====
