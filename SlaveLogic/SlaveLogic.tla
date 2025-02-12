@@ -1,15 +1,16 @@
 ------ MODULE SlaveLogic ----
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-CONSTANTS Node, Entry, User, nil, max_action, max_timeout
+CONSTANTS Node, Entry, User, nil,
+    max_action, max_timeout, max_restart
 
 VARIABLES status, replica_status, dir_state,
     pc, local_req,
-    request_queue, num_action
+    request_queue, num_action, num_restart
 
 vars == <<status, replica_status, dir_state,
     pc, local_req,
-    request_queue, num_action>>
+    request_queue, num_action, num_restart>>
 
 -------------------------------------------------------
 Status == {
@@ -49,6 +50,7 @@ TypeOK ==
     /\ local_req \in [Node -> NullRequest]
     /\ request_queue \in [Entry -> Seq(Request)]
     /\ num_action \in 0..max_action
+    /\ num_restart \in 0..max_restart
 
 -------------------------------------------------------
 
@@ -64,6 +66,7 @@ Init ==
     /\ local_req = [n \in Node |-> nil]
     /\ request_queue = [e \in Entry |-> <<>>]
     /\ num_action = 0
+    /\ num_restart = 0
 
 -------------------------------------------------------
 
@@ -75,7 +78,7 @@ InsertEntry(e) ==
     /\ status[e] = "None"
     /\ status' = [status EXCEPT ![e] = "CreatingEntry"]
 
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED request_queue
     /\ input_unchanged
 
@@ -96,6 +99,7 @@ AddWriteReq(e, u) ==
     /\ request_queue' = [request_queue EXCEPT ![e] = Append(@, new_req)]
 
     /\ UNCHANGED status
+    /\ UNCHANGED num_restart
     /\ input_unchanged
 
 
@@ -113,6 +117,7 @@ AddWriteCompleted(e, u) ==
     /\ request_queue' = [request_queue EXCEPT ![e] = Append(@, new_req)]
 
     /\ UNCHANGED status
+    /\ UNCHANGED num_restart
     /\ input_unchanged
 
 
@@ -157,7 +162,7 @@ HandleWriteReq(e, n) ==
        \/ when_other
 
     /\ UNCHANGED <<dir_state, replica_status>>
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED status
 
 
@@ -172,7 +177,7 @@ CreateDir(n) ==
 
     /\ UNCHANGED status
     /\ UNCHANGED local_req
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED request_queue
     /\ UNCHANGED replica_status
 
@@ -191,7 +196,7 @@ AddWritePerm(n) ==
     /\ UNCHANGED status
     /\ UNCHANGED request_queue
     /\ UNCHANGED replica_status
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
 
 
 UpdateReplicaToWriting(n) ==
@@ -213,7 +218,7 @@ UpdateReplicaToWriting(n) ==
     /\ UNCHANGED local_req
     /\ UNCHANGED status
     /\ UNCHANGED request_queue
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
 
 
 UpdateStatusToWriting(n) ==
@@ -228,7 +233,7 @@ UpdateStatusToWriting(n) ==
     /\ local_req' = [local_req EXCEPT ![n] = nil]
 
     /\ UNCHANGED dir_state
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED request_queue
     /\ UNCHANGED replica_status
 
@@ -258,7 +263,7 @@ HandleTimeout(e, n) ==
        \/ when_write_timeout
        \/ when_other
 
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED status
 
@@ -282,7 +287,7 @@ UpdateToWriteTimeout(n) ==
             ![e] = Append(@, new_req)
         ]
 
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED <<dir_state, replica_status>>
 
 
@@ -298,7 +303,7 @@ SyncToWritten(n) ==
 
     /\ UNCHANGED status
     /\ UNCHANGED local_req
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED request_queue
     /\ UNCHANGED dir_state
 
@@ -315,7 +320,7 @@ UpdateToSynced(n) ==
     /\ local_req' = [local_req EXCEPT ![n] = nil]
 
     /\ UNCHANGED <<dir_state, replica_status>>
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED request_queue
 
 
@@ -340,7 +345,7 @@ HandleSyncReq(e, n) ==
     /\ \/ when_valid
        \/ when_invalid_status
 
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED status
 
@@ -365,7 +370,7 @@ HandleWriteCompletedReq(e, n) ==
        \/ when_other
 
     /\ UNCHANGED <<dir_state, replica_status>>
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED status
 
 
@@ -388,7 +393,7 @@ UpdateToWriteCompleted(n) ==
             ![e] = Append(@, new_req)
         ]
 
-    /\ UNCHANGED num_action
+    /\ UNCHANGED <<num_action, num_restart>>
     /\ UNCHANGED <<dir_state, replica_status>>
 
 -------------------------------------------------------
@@ -408,7 +413,7 @@ WriteTimeout(e, n) ==
 
         num_timeout == Cardinality(timeout_reqs)
     IN
-    /\ status[e] \in {"Writing", "WriteTimeout"}
+    /\ status[e] \in {"Writing", "WriteTimeout", "WriteCompleted"}
     /\ num_timeout < max_timeout
 
     /\ request_queue' = [request_queue EXCEPT
@@ -418,7 +423,21 @@ WriteTimeout(e, n) ==
     /\ UNCHANGED status
     /\ UNCHANGED <<pc, local_req>>
     /\ UNCHANGED <<dir_state, replica_status>>
+    /\ UNCHANGED <<num_action, num_restart>>
+
+
+Restart(n) ==
+    /\ pc[n] # "Init"
+    /\ num_restart < max_restart
+    /\ num_restart' = num_restart + 1
+
+    /\ goto(n, "Init")
+    /\ local_req' = [local_req EXCEPT ![n] = nil]
+    /\ request_queue' = [e \in Entry |-> <<>>]
+
+    /\ UNCHANGED <<dir_state, replica_status>>
     /\ UNCHANGED num_action
+    /\ UNCHANGED status
 
 -------------------------------------------------------
 
@@ -452,6 +471,7 @@ Next ==
         \/ UpdateToWriteCompleted(n)
         \/ SyncToWritten(n)
         \/ UpdateToSynced(n)
+        \/ Restart(n)
 
     \/ \E n \in Node, e \in Entry:
         \/ HandleWriteReq(e, n)
