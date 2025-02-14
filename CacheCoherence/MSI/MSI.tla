@@ -505,17 +505,26 @@ CpuReplacement(c, l) ==
 CpuPutAck(c, l) ==
     LET
         resp == llc_to_cache[c][1]
+
+        when_sa ==
+            /\ cache[c][l].status = "SI_A"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "I"
+                ]
+
+        when_ii ==
+            /\ cache[c][l].status = "II"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "I"
+                ]
     IN
     /\ llc_to_cache[c] # <<>>
     /\ resp.type = "Put-Ack"
     /\ resp.line = l
 
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
-
-    /\ cache[c][l].status = "SI_A" \* TODO
-    /\ cache' = [cache EXCEPT
-            ![c][l].status = "I"
-        ]
+    /\ \/ when_sa
+       \/ when_ii
 
     /\ UNCHANGED cache_to_llc
     /\ UNCHANGED cpu_network
@@ -529,6 +538,12 @@ llc_unchanged ==
     /\ UNCHANGED mem
     /\ UNCHANGED cpu_network
     /\ UNCHANGED global_data
+
+
+get_from_mem(l, old) ==
+    IF old = nil
+        THEN mem[l]
+        ELSE old
 
 LLCGetS(c, l) ==
     LET
@@ -545,7 +560,7 @@ LLCGetS(c, l) ==
             /\ llc[l].status = "I"
             /\ llc' = [llc EXCEPT
                     ![l].status = "S",
-                    ![l].data = mem[l],
+                    ![l].data = get_from_mem(l, @),
                     ![l].sharer = @ \union {c}
                 ]
             /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, data_resp)]
@@ -602,7 +617,7 @@ LLCGetM(c, l) ==
             /\ llc[l].status = "I"
             /\ llc' = [llc EXCEPT
                     ![l].status = "M",
-                    ![l].data = mem[l],
+                    ![l].data = get_from_mem(l, @),
                     ![l].owner = c
                 ]
             /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, data_resp)]
