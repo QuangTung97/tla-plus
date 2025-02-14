@@ -337,7 +337,8 @@ CpuFwdGetM(c, l) ==
         when_mutable ==
             /\ cache[c][l].status = "M"
             /\ cache' = [cache EXCEPT
-                    ![c][l].status = "I"
+                    ![c][l].status = "I",
+                    ![c][l].data = nil
                 ]
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
     IN
@@ -366,7 +367,8 @@ CpuInv(c, l) ==
         when_shared ==
             /\ cache[c][l].status = "S"
             /\ cache' = [cache EXCEPT
-                    ![c][l].status = "I"
+                    ![c][l].status = "I",
+                    ![c][l].data = nil
                 ]
             /\ cpu_network' = cpu_network \union {inv_ack_msg}
 
@@ -493,7 +495,10 @@ CpuReplacement(c, l) ==
         ]
     IN
     /\ cache[c][l].status = "S" \* TODO status = M
-    /\ cache' = [cache EXCEPT ![c][l].status = "SI_A"]
+    /\ cache' = [cache EXCEPT
+            ![c][l].status = "SI_A",
+            ![c][l].data = nil
+        ]
     /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Append(@, new_req)]
 
 
@@ -838,6 +843,16 @@ CacheStateMInv ==
     \A c \in CPU, l \in Line:
         cache[c][l].status = "M" =>
             /\ cache[c][l].data # nil
+
+CacheStateSInv ==
+    \A c \in CPU, l \in Line:
+        cache[c][l].status = "S" =>
+            /\ cache[c][l].data # nil
+
+CacheStateIInv ==
+    \A c \in CPU, l \in Line:
+        cache[c][l].status = "I" =>
+            /\ cache[c][l].data = nil
 
 
 ReadWriteStatusInv ==
