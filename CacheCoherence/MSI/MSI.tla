@@ -11,12 +11,11 @@ vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network, global_data>
 
 (*
 CONSTANTS
-    CPU = {c1, c2, c3, c4}
+    CPU = {c1, c2, c3}
     Line = {l1}
+    max_value = 22
 
-max_value == 22
-
-FairSpec => 38 | 16,481,565 | 4,544,772
+FairSpec => 41 | 796,552 | 267,045
 *)
 
 NullCPU == CPU \union {nil}
@@ -323,8 +322,8 @@ CpuFwdGetS(c, l) ==
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "SI_A"
                 ]
+            /\ push_to_llc
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
-            /\ UNCHANGED cache_to_llc \* TODO
     IN
     /\ llc_to_cache[c] # <<>>
     /\ resp.line = l
@@ -549,8 +548,15 @@ CpuPutAck(c, l) ==
     LET
         resp == llc_to_cache[c][1]
 
-        when_sa ==
+        when_si_a ==
             /\ cache[c][l].status = "SI_A"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "I",
+                    ![c][l].data = nil
+                ]
+
+        when_mi_a ==
+            /\ cache[c][l].status = "MI_A"
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "I",
                     ![c][l].data = nil
@@ -568,7 +574,8 @@ CpuPutAck(c, l) ==
     /\ resp.line = l
 
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
-    /\ \/ when_sa
+    /\ \/ when_si_a
+       \/ when_mi_a
        \/ when_ii
 
     /\ UNCHANGED cache_to_llc
@@ -810,8 +817,9 @@ LLCPutM(c, l) ==
             /\ llc_to_cache' = [llc_to_cache
                     EXCEPT ![c] = Append(@, put_ack_resp)]
 
-        when_m ==
+        when_m_owner ==
             /\ llc[l].status = "M"
+            /\ llc[l].owner = c
             /\ llc' = [llc EXCEPT
                     ![l].status = "I",
                     ![l].data = req.data,
@@ -831,7 +839,7 @@ LLCPutM(c, l) ==
     /\ req.type = "PutM"
 
     /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
-    /\ \/ when_m
+    /\ \/ when_m_owner
        \/ when_sd
 
     /\ llc_unchanged
