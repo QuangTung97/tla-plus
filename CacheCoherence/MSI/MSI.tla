@@ -1,33 +1,13 @@
 ------ MODULE MSI ----
 EXTENDS TLC, Integers, Sequences, FiniteSets
 
-CONSTANTS Line, CPU, nil
+CONSTANTS Line, CPU, max_value, nil
 
 VARIABLES cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network, global_data
 
 vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network, global_data>>
 
 ----------------------------------------------------------
-
-(*
-CONSTANTS
-    CPU = {c1, c2, c3}
-    Line = {l1}
-
-max_value == 22
-
-FairSpec => 32 | 202,692 | 72,564
-*)
-
-(*
-CONSTANTS
-    CPU = {c1, c2}
-    Line = {l1, l2}
-
-max_value == 22
-
-FairSpec => 51 | 4,890,553 | 1,422,364
-*)
 
 (*
 CONSTANTS
@@ -43,13 +23,14 @@ NullCPU == CPU \union {nil}
 
 Value == 20..29
 
-max_value == 22
-
 NullValue == Value \union {nil}
 
 CacheStatus == {"I", "S", "M"} \* Stable States
 
-CacheTransientStatus == {"IS_D", "IM_AD", "IM_A", "SM_AD", "SM_A"}
+CacheTransientStatus == {
+    "IS_D", "IM_AD", "IM_A", "SM_AD", "SM_A",
+    "SI_A", "II" \* TODO do we need II?
+}
 
 ReadableStatus == {"S", "M", "SM_AD", "SM_A"}
 
@@ -73,7 +54,7 @@ LLCInfo == [
 
 
 GetReq == [
-    type: {"GetS", "GetM"},
+    type: {"GetS", "GetM", "PutS"},
     line: Line
 ]
 
@@ -92,6 +73,11 @@ FwdGetType == [
     line: Line
 ]
 
+PutAckType == [
+    type: {"Put-Ack"},
+    line: Line
+]
+
 InvType == [
     type: {"Inv"},
     req_cpu: CPU,
@@ -105,7 +91,7 @@ DataRespType == [
     ack: 0..10
 ]
 
-LLCToCache == Seq(DataRespType \union FwdGetType \union InvType)
+LLCToCache == Seq(DataRespType \union FwdGetType \union InvType \union PutAckType)
 
 
 CpuNetwork ==
@@ -390,6 +376,13 @@ CpuInv(c, l) ==
                     ![c][l].status = "IM_AD"
                 ]
             /\ cpu_network' = cpu_network \union {inv_ack_msg}
+
+        when_si_a ==
+            /\ cache[c][l].status = "SI_A"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "II"
+                ]
+            /\ cpu_network' = cpu_network \union {inv_ack_msg}
     IN
     /\ llc_to_cache[c] # <<>>
     /\ resp.line = l
@@ -398,6 +391,7 @@ CpuInv(c, l) ==
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
     /\ \/ when_shared
        \/ when_sm_ad
+       \/ when_si_a
 
     /\ UNCHANGED cache_to_llc
     /\ cpu_unchanged
@@ -489,6 +483,44 @@ CpuDataToReq(c, l) ==
         /\ UNCHANGED cache_to_llc
         /\ UNCHANGED llc_to_cache
         /\ cpu_unchanged
+
+
+CpuReplacement(c, l) ==
+    LET
+        new_req == [
+            type |-> "PutS",
+            line |-> l
+        ]
+    IN
+    /\ cache[c][l].status = "S" \* TODO status = M
+    /\ cache' = [cache EXCEPT ![c][l].status = "SI_A"]
+    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Append(@, new_req)]
+
+
+    /\ cpu_unchanged
+    /\ UNCHANGED llc_to_cache
+    /\ UNCHANGED cpu_network
+
+
+CpuPutAck(c, l) ==
+    LET
+        resp == llc_to_cache[c][1]
+    IN
+    /\ llc_to_cache[c] # <<>>
+    /\ resp.type = "Put-Ack"
+    /\ resp.line = l
+
+    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+
+    /\ cache[c][l].status = "SI_A" \* TODO
+    /\ cache' = [cache EXCEPT
+            ![c][l].status = "I"
+        ]
+
+    /\ UNCHANGED cache_to_llc
+    /\ UNCHANGED cpu_network
+    /\ cpu_unchanged
+
 
 ----------------------------------------------------------
 
@@ -647,7 +679,8 @@ LLCDataM(c, l) ==
             /\ llc[l].status = "S_D"
             /\ llc' = [llc EXCEPT
                     ![l].status = "S",
-                    ![l].data = req.data
+                    ![l].data = req.data,
+                    ![l].owner = nil
                 ]
     IN
     /\ cache_to_llc[c] # <<>>
@@ -658,6 +691,49 @@ LLCDataM(c, l) ==
     /\ when_s_d
 
     /\ UNCHANGED llc_to_cache
+    /\ llc_unchanged
+
+
+LLCPutS(c, l) ==
+    LET
+        req == cache_to_llc[c][1]
+
+        new_resp == [
+            type |-> "Put-Ack",
+            line |-> l
+        ]
+
+        when_s_last ==
+            /\ llc[l].status = "S"
+            /\ llc[l].sharer = {c}
+            /\ llc' = [llc EXCEPT
+                    ![l].status = "I",
+                    ![l].sharer = {}
+                ]
+            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, new_resp)]
+
+        when_s_not_last ==
+            /\ llc[l].status = "S"
+            /\ llc[l].sharer # {c}
+            /\ llc' = [llc EXCEPT
+                    ![l].sharer = @ \ {c}
+                ]
+            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, new_resp)]
+
+        when_m ==
+            /\ llc[l].status = "M"
+            /\ UNCHANGED llc
+            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, new_resp)]
+    IN
+    /\ cache_to_llc[c] # <<>>
+    /\ req.line = l
+    /\ req.type = "PutS"
+
+    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
+    /\ \/ when_s_last
+       \/ when_s_not_last
+       \/ when_m
+
     /\ llc_unchanged
 
 ----------------------------------------------------------
@@ -691,9 +767,13 @@ Next ==
         \/ CpuInvAck(c, l)
         \/ CpuDataToReq(c, l)
 
+        \/ CpuReplacement(c, l)
+        \/ CpuPutAck(c, l)
+
         \/ LLCGetS(c, l)
         \/ LLCGetM(c, l)
         \/ LLCDataM(c, l)
+        \/ LLCPutS(c, l)
     \/ Terminated
 
 
@@ -772,6 +852,20 @@ LLCWhenMutableInv ==
     \A l \in Line:
         llc[l].status = "M" =>
             /\ llc[l].owner # nil
+            /\ llc[l].sharer = {}
+
+
+LLCWhenSharedInv ==
+    \A l \in Line:
+        llc[l].status = "S" =>
+            /\ llc[l].owner = nil
+            /\ llc[l].sharer # {}
+
+
+LLCWhenInvalidInv ==
+    \A l \in Line:
+        llc[l].status = "I" =>
+            /\ llc[l].owner = nil
             /\ llc[l].sharer = {}
 
 
