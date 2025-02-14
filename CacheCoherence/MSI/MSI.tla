@@ -15,7 +15,7 @@ CONSTANTS
     Line = {l1}
     max_value = 22
 
-FairSpec => 41 | 796,552 | 267,045
+FairSpec => 41 | 854,452 | 277,815
 *)
 
 NullCPU == CPU \union {nil}
@@ -827,6 +827,12 @@ LLCPutM(c, l) ==
                 ]
             /\ send_put_ack
 
+        when_m_non_owner ==
+            /\ llc[l].status = "M"
+            /\ llc[l].owner # c
+            /\ UNCHANGED llc
+            /\ send_put_ack
+
         when_sd ==
             /\ llc[l].status = "S_D"
             /\ llc' = [llc EXCEPT
@@ -840,6 +846,7 @@ LLCPutM(c, l) ==
 
     /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
     /\ \/ when_m_owner
+       \/ when_m_non_owner
        \/ when_sd
 
     /\ llc_unchanged
