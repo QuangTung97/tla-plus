@@ -771,6 +771,9 @@ LLCPutS(c, l) ==
             line |-> l
         ]
 
+        push_put_ack ==
+            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, new_resp)]
+
         when_s_last ==
             /\ llc[l].status = "S"
             /\ llc[l].sharer = {c}
@@ -778,7 +781,7 @@ LLCPutS(c, l) ==
                     ![l].status = "I",
                     ![l].sharer = {}
                 ]
-            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, new_resp)]
+            /\ push_put_ack
 
         when_s_not_last ==
             /\ llc[l].status = "S"
@@ -786,12 +789,17 @@ LLCPutS(c, l) ==
             /\ llc' = [llc EXCEPT
                     ![l].sharer = @ \ {c}
                 ]
-            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, new_resp)]
+            /\ push_put_ack
 
         when_m ==
             /\ llc[l].status = "M"
             /\ UNCHANGED llc
-            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, new_resp)]
+            /\ push_put_ack
+
+        when_i ==
+            /\ llc[l].status = "I"
+            /\ UNCHANGED llc
+            /\ push_put_ack
     IN
     /\ cache_to_llc[c] # <<>>
     /\ req.line = l
@@ -801,6 +809,7 @@ LLCPutS(c, l) ==
     /\ \/ when_s_last
        \/ when_s_not_last
        \/ when_m
+       \/ when_i
 
     /\ llc_unchanged
 
@@ -840,6 +849,16 @@ LLCPutM(c, l) ==
                     ![l].sharer = @ \ {c}
                 ]
             /\ send_put_ack
+
+        when_s ==
+            /\ llc[l].status = "S"
+            /\ UNCHANGED llc \* TODO
+            /\ send_put_ack
+
+        when_i ==
+            /\ llc[l].status = "I"
+            /\ UNCHANGED llc
+            /\ send_put_ack
     IN
     /\ cache_to_llc[c] # <<>>
     /\ req.line = l
@@ -849,6 +868,8 @@ LLCPutM(c, l) ==
     /\ \/ when_m_owner
        \/ when_m_non_owner
        \/ when_sd
+       \/ when_s
+       \/ when_i
 
     /\ llc_unchanged
 
