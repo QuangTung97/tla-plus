@@ -3,9 +3,11 @@ EXTENDS TLC, Integers, Sequences, FiniteSets
 
 CONSTANTS Line, CPU, max_value, nil
 
-VARIABLES cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network, global_data
+VARIABLES cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network,
+    global_data, stopped
 
-vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network, global_data>>
+vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network,
+    global_data, stopped>>
 
 ----------------------------------------------------------
 
@@ -119,6 +121,7 @@ TypeOK ==
     /\ llc_to_cache \in [CPU -> LLCToCache]
     /\ cpu_network \subseteq CpuNetwork
     /\ global_data \in [Line -> Value]
+    /\ stopped \in BOOLEAN
 
 
 init_cache == [
@@ -143,12 +146,14 @@ Init ==
     /\ llc_to_cache = [c \in CPU |-> <<>>]
     /\ cpu_network = {}
     /\ global_data = [l \in Line |-> 20]
+    /\ stopped = FALSE
 
 ----------------------------------------------------------
 
 cpu_unchanged ==
     /\ UNCHANGED <<llc, mem>>
     /\ UNCHANGED global_data
+    /\ UNCHANGED stopped
 
 CpuLoad(c, l) ==
     LET
@@ -158,6 +163,7 @@ CpuLoad(c, l) ==
         ]
     IN
     /\ cache[c][l].status = "I"
+    /\ ~stopped
     /\ cache' = [cache EXCEPT ![c][l].status = "IS_D"]
     /\ cache_to_llc' = [cache_to_llc EXCEPT
             ![c] = Append(@, new_req)
@@ -258,6 +264,7 @@ CpuRequestStore(c, l) ==
                     ![c] = Append(@, new_req)
                 ]
     IN
+    /\ ~stopped
     /\ \/ when_i
        \/ when_s
 
@@ -278,6 +285,7 @@ CpuUpdate(c, l) ==
     /\ UNCHANGED cpu_network
     /\ UNCHANGED cache_to_llc
     /\ UNCHANGED <<llc, mem>>
+    /\ UNCHANGED stopped
 
 CpuFwdGetS(c, l) ==
     LET
@@ -527,6 +535,7 @@ CpuReplacement(c, l) ==
                 ]
             /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Append(@, putm_req)]
     IN
+    /\ ~stopped
     /\ \/ when_s
        \/ when_m
 
@@ -581,6 +590,7 @@ llc_unchanged ==
     /\ UNCHANGED mem
     /\ UNCHANGED cpu_network
     /\ UNCHANGED global_data
+    /\ UNCHANGED stopped
 
 
 get_from_mem(l, old) ==
@@ -844,6 +854,17 @@ LLCPutM(c, l) ==
 
 ----------------------------------------------------------
 
+StopCpuAction ==
+    /\ ~stopped
+    /\ stopped' = TRUE
+    /\ UNCHANGED cache
+    /\ UNCHANGED llc
+    /\ UNCHANGED <<cache_to_llc, llc_to_cache, cpu_network>>
+    /\ UNCHANGED mem
+    /\ UNCHANGED global_data
+
+----------------------------------------------------------
+
 StopCond ==
     /\ \A c \in CPU:
         /\ cache_to_llc[c] = <<>>
@@ -852,6 +873,7 @@ StopCond ==
 
 TerminateCond ==
     /\ StopCond
+    /\ stopped
 
 Terminated ==
     /\ TerminateCond
@@ -881,6 +903,7 @@ Next ==
         \/ LLCDataM(c, l)
         \/ LLCPutS(c, l)
         \/ LLCPutM(c, l)
+    \/ StopCpuAction
     \/ Terminated
 
 
