@@ -62,7 +62,6 @@ PutMReq == [
     data: Value
 ]
 
-\* TODO un-ordered instead
 CacheToLLC == Seq(GetReq \union DataMResp \union PutMReq)
 
 
@@ -175,6 +174,16 @@ CpuLoad(c, l) ==
     /\ UNCHANGED cpu_network
 
 
+llc_to_cache_existed(c, l, type) ==
+    LET
+        resp == llc_to_cache[c][1]
+    IN
+    /\ llc_to_cache[c] # <<>>
+    /\ resp.line = l
+    /\ resp.type = type
+    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+
+
 CpuDataDir(c, l) ==
     LET
         resp == llc_to_cache[c][1]
@@ -229,11 +238,7 @@ CpuDataDir(c, l) ==
                 ]
             /\ UNCHANGED cpu_network
     IN
-    /\ llc_to_cache[c] # <<>>
-    /\ resp.line = l
-    /\ resp.type = "DataResp"
-
-    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+    /\ llc_to_cache_existed(c, l, "DataResp")
     /\ \/ when_is_d
        \/ when_im_ad_ack_zero
        \/ when_im_ad_ack_non_zero
@@ -325,11 +330,7 @@ CpuFwdGetS(c, l) ==
             /\ push_to_llc
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
     IN
-    /\ llc_to_cache[c] # <<>>
-    /\ resp.line = l
-    /\ resp.type = "Fwd-GetS"
-
-    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+    /\ llc_to_cache_existed(c, l, "Fwd-GetS")
     /\ \/ when_mutable
        \/ when_mi_a
 
@@ -363,11 +364,7 @@ CpuFwdGetM(c, l) ==
                 ]
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
     IN
-    /\ llc_to_cache[c] # <<>>
-    /\ resp.line = l
-    /\ resp.type = "Fwd-GetM"
-
-    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+    /\ llc_to_cache_existed(c, l, "Fwd-GetM")
     /\ \/ when_mutable
        \/ when_mi_a
 
@@ -408,17 +405,20 @@ CpuInv(c, l) ==
                 ]
             /\ cpu_network' = cpu_network \union {inv_ack_msg}
     IN
-    /\ llc_to_cache[c] # <<>>
-    /\ resp.line = l
-    /\ resp.type = "Inv"
-
-    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+    /\ llc_to_cache_existed(c, l, "Inv")
     /\ \/ when_shared
        \/ when_sm_ad
        \/ when_si_a
 
     /\ UNCHANGED cache_to_llc
     /\ cpu_unchanged
+
+
+cpu_network_existed(msg, type, c, l) ==
+    /\ msg.type = type
+    /\ msg.to_cpu = c
+    /\ msg.line = l
+    /\ cpu_network' = cpu_network \ {msg}
 
 
 CpuInvAck(c, l) ==
@@ -463,11 +463,7 @@ CpuInvAck(c, l) ==
                         ![c][l].need_ack = 0
                     ]
         IN
-        /\ msg.type = "Inv-Ack"
-        /\ msg.to_cpu = c
-        /\ msg.line = l
-
-        /\ cpu_network' = cpu_network \ {msg}
+        /\ cpu_network_existed(msg, "Inv-Ack", c, l)
         /\ \/ when_im_ad
            \/ when_im_a_ack_non_zero
            \/ when_im_a_ack_zero
@@ -496,11 +492,7 @@ CpuDataToReq(c, l) ==
                         ![c][l].data = msg.data
                     ]
         IN
-        /\ msg.type = "DataToReq"
-        /\ msg.to_cpu = c
-        /\ msg.line = l
-
-        /\ cpu_network' = cpu_network \ {msg}
+        /\ cpu_network_existed(msg, "DataToReq", c, l)
         /\ \/ when_is_d
            \/ when_im_ad
 
@@ -570,11 +562,7 @@ CpuPutAck(c, l) ==
                     ![c][l].data = nil
                 ]
     IN
-    /\ llc_to_cache[c] # <<>>
-    /\ resp.type = "Put-Ack"
-    /\ resp.line = l
-
-    /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
+    /\ llc_to_cache_existed(c, l, "Put-Ack")
     /\ \/ when_si_a
        \/ when_mi_a
        \/ when_ii
@@ -598,6 +586,17 @@ get_from_mem(l, old) ==
     IF old = nil
         THEN mem[l]
         ELSE old
+
+
+llc_req_existed(c, l, type) ==
+    LET
+        req == cache_to_llc[c][1]
+    IN
+    /\ cache_to_llc[c] # <<>>
+    /\ req.line = l
+    /\ req.type = type
+    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
+
 
 LLCGetS(c, l) ==
     LET
@@ -644,11 +643,7 @@ LLCGetS(c, l) ==
                     ![owner] = Append(@, fwd_gets_resp)
                 ]
     IN
-    /\ cache_to_llc[c] # <<>>
-    /\ req.line = l
-    /\ req.type = "GetS"
-
-    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
+    /\ llc_req_existed(c, l, "GetS")
     /\ \/ when_invalid
        \/ when_shared
        \/ when_mutable
@@ -728,11 +723,7 @@ LLCGetM(c, l) ==
             /\ llc_to_cache' = [llc_to_cache EXCEPT
                     ![owner] = Append(@, fwd_getm_resp)]
     IN
-    /\ cache_to_llc[c] # <<>>
-    /\ req.line = l
-    /\ req.type = "GetM"
-
-    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
+    /\ llc_req_existed(c, l, "GetM")
     /\ \/ handle_when_invalid
        \/ handle_when_shared
        \/ handle_when_mutable
@@ -752,11 +743,7 @@ LLCDataM(c, l) ==
                     ![l].owner = nil
                 ]
     IN
-    /\ cache_to_llc[c] # <<>>
-    /\ req.line = l
-    /\ req.type = "DataM"
-
-    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
+    /\ llc_req_existed(c, l, "DataM")
     /\ when_s_d
 
     /\ UNCHANGED llc_to_cache
@@ -802,11 +789,7 @@ LLCPutS(c, l) ==
             /\ UNCHANGED llc
             /\ push_put_ack
     IN
-    /\ cache_to_llc[c] # <<>>
-    /\ req.line = l
-    /\ req.type = "PutS"
-
-    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
+    /\ llc_req_existed(c, l, "PutS")
     /\ \/ when_s_last
        \/ when_s_not_last
        \/ when_m
@@ -861,11 +844,7 @@ LLCPutM(c, l) ==
             /\ UNCHANGED llc
             /\ send_put_ack
     IN
-    /\ cache_to_llc[c] # <<>>
-    /\ req.line = l
-    /\ req.type = "PutM"
-
-    /\ cache_to_llc' = [cache_to_llc EXCEPT ![c] = Tail(@)]
+    /\ llc_req_existed(c, l, "PutM")
     /\ \/ when_m_owner
        \/ when_m_non_owner
        \/ when_sd
