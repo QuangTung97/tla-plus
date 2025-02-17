@@ -21,7 +21,7 @@ CacheStatus == {"I", "S", "M"} \* Stable States
 
 CacheTransientStatus == {
     "IS_D", "IM_AD", "IM_A", "SM_AD", "SM_A",
-    "SI_A", "MI_A", "II" \* TODO do we need II?
+    "SI_A", "MI_A", "II"
 }
 
 ReadableStatus == {"S", "M", "SM_AD", "SM_A"}
@@ -62,6 +62,7 @@ PutMReq == [
     data: Value
 ]
 
+\* TODO un-ordered instead
 CacheToLLC == Seq(GetReq \union DataMResp \union PutMReq)
 
 
@@ -852,7 +853,7 @@ LLCPutM(c, l) ==
 
         when_s ==
             /\ llc[l].status = "S"
-            /\ UNCHANGED llc \* TODO
+            /\ UNCHANGED llc
             /\ send_put_ack
 
         when_i ==
