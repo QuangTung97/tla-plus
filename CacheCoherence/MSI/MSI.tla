@@ -959,9 +959,25 @@ CacheCoherenceInv ==
             cond
 
 
-LLCMStateOwnerNonNull ==
+LLCStateMInv ==
     \A l \in Line:
-        llc[l].status = "M" => llc[l].owner # nil
+        llc[l].status = "M" =>
+            /\ llc[l].owner # nil
+            /\ llc[l].sharer = {}
+
+
+LLCStateSInv ==
+    \A l \in Line:
+        llc[l].status = "S" =>
+            /\ llc[l].owner = nil
+            /\ llc[l].sharer # {}
+
+
+LLCStateIInv ==
+    \A l \in Line:
+        llc[l].status = "I" =>
+            /\ llc[l].owner = nil
+            /\ llc[l].sharer = {}
 
 
 CacheStableStateInv ==
