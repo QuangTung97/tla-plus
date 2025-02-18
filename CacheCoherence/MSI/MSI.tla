@@ -910,7 +910,7 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-FairSpec == Spec /\ WF_vars(Next) /\ SF_stopped(StopCpuAction)
+FairSpec == Spec /\ WF_vars(Next) /\ WF_stopped(StopCpuAction)
 
 ----------------------------------------------------------
 
