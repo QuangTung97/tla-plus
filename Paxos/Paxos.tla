@@ -10,10 +10,10 @@ ASSUME \A Q1, Q2 \in Quorum: Q1 \intersect Q2 # {}
 ----------------------------------------------------------------
 
 VARIABLES ballot, value, value_ballot,
-    request, response, accepted
+    request, response, accepted, stopped_acceptor
 
 vars == <<ballot, value, value_ballot,
-    request, response, accepted>>
+    request, response, accepted, stopped_acceptor>>
 
 Ballot == 21..max_ballot_num
 
@@ -50,6 +50,7 @@ TypeOK ==
     /\ request \subseteq Request
     /\ response \subseteq Response
     /\ accepted \subseteq [bal: Ballot, acc: Acceptor, val: Value]
+    /\ stopped_acceptor \subseteq Acceptor
 
 Init ==
     /\ ballot = [a \in Acceptor |-> nil]
@@ -58,6 +59,7 @@ Init ==
     /\ request = {}
     /\ response = {}
     /\ accepted = {}
+    /\ stopped_acceptor = {}
 
 ----------------------------------------------------------------
 
@@ -69,6 +71,7 @@ request_unchanged ==
     /\ UNCHANGED <<ballot, value, value_ballot>>
     /\ UNCHANGED response
     /\ UNCHANGED accepted
+    /\ UNCHANGED stopped_acceptor
 
 
 propose_req_set == {req \in request: req.type = "Propose"}
@@ -102,6 +105,11 @@ nullLE(a, b) ==
         THEN TRUE
         ELSE a <= b
 
+
+handle_unchanged ==
+    /\ UNCHANGED request
+    /\ UNCHANGED stopped_acceptor
+
 HandlePropose(a) ==
     \E req \in request:
         LET
@@ -115,13 +123,14 @@ HandlePropose(a) ==
         IN
         /\ req.type = "Propose"
         /\ nullLT(ballot[a], req.bal)
+        /\ a \notin stopped_acceptor
 
         /\ ballot' = [ballot EXCEPT ![a] = req.bal]
         /\ response' = response \union {resp}
 
         /\ UNCHANGED <<value, value_ballot>>
-        /\ UNCHANGED request
         /\ UNCHANGED accepted
+        /\ handle_unchanged
 
 
 Accept(b, Q, v) ==
@@ -182,17 +191,34 @@ HandleAccept(a) ==
         IN
         /\ req.type = "Accept"
         /\ nullLE(ballot[a], req.bal)
+        /\ a \notin stopped_acceptor
+
         /\ ballot' = [ballot EXCEPT ![a] = req.bal]
         /\ value' = [value EXCEPT ![a] = req.val]
         /\ value_ballot' = [value_ballot EXCEPT ![a] = req.bal]
         /\ accepted' = accepted \union {new_val}
-        /\ UNCHANGED request
+
         /\ UNCHANGED response
+        /\ handle_unchanged
+
+
+StopAcceptor(a) ==
+    /\ a \notin stopped_acceptor
+    /\ Cardinality(stopped_acceptor) < Cardinality(Acceptor) - majority
+
+    /\ stopped_acceptor' = stopped_acceptor \union {a}
+
+    /\ UNCHANGED <<ballot, value, value_ballot>>
+    /\ UNCHANGED accepted
+    /\ UNCHANGED <<request, response>>
 
 ----------------------------------------------------------------
 
 TerminateCond ==
-    /\ \A a \in Acceptor: value_ballot[a] = max_ballot_num
+    LET
+        live_acceptor == Acceptor \ stopped_acceptor
+    IN
+    /\ \A a \in live_acceptor: value_ballot[a] = max_ballot_num
 
 Terminated ==
     /\ TerminateCond
@@ -204,6 +230,7 @@ Next ==
     \/ \E a \in Acceptor:
         \/ HandlePropose(a)
         \/ HandleAccept(a)
+        \/ StopAcceptor(a)
     \/ \E b \in Ballot, Q \in Quorum, v \in Value: Accept(b, Q, v)
     \/ Terminated
 
@@ -233,5 +260,13 @@ IsChosen(v) ==
 ChosenSet == {v \in Value: IsChosen(v)}
 
 Consensus == Cardinality(ChosenSet) <= 1
+
+
+TerminateLeadToConsensus ==
+    TerminateCond => Cardinality(ChosenSet) = 1
+
+
+StoppedAcceptorInv ==
+    /\ Cardinality(stopped_acceptor) <= Cardinality(Acceptor) - majority
 
 ====
