@@ -21,7 +21,7 @@ UpdatePC == {
 ReadonlyPC == {
     "Init", "GetFromCache", "HandleGetNil",
     "GetFromDB", "UseItem",
-    "LockSetCache", "SetBackToCache",
+    "LockSetCache", "SetBackToCache", "DoSetBack",
     "Terminated"
 }
 
@@ -182,19 +182,48 @@ SetBackToCache(n) ==
     LET
         k == local_key[n]
 
-        update_cond ==
-            /\ cache[k] # nil
-            /\ cache[k].cas = local_item[n].cas
+        jump_to_use ==
+            /\ goto(n, "UseItem")
+            /\ unlock_key(k)
+            /\ UNCHANGED cache
+
+        do_update_cache ==
+            /\ goto(n, "DoSetBack")
+            /\ UNCHANGED cache
+            /\ UNCHANGED locked
     IN
     /\ pc[n] = "SetBackToCache"
+
+    /\ IF cache[k] = nil THEN
+            jump_to_use
+        ELSE IF cache[k].cas = local_item[n].cas THEN
+            do_update_cache
+        ELSE
+            jump_to_use
+
+    /\ UNCHANGED next_cas
+    /\ UNCHANGED local_item
+    /\ UNCHANGED local_key
+    /\ UNCHANGED <<db, next_val>>
+
+
+DoSetBack(n) ==
+    LET
+        k == local_key[n]
+
+        new_item == [
+            cas |-> next_cas',
+            found |-> TRUE,
+            val |-> local_item[n].val
+        ]
+    IN
+    /\ pc[n] = "DoSetBack"
     /\ goto(n, "UseItem")
     /\ unlock_key(k)
 
-    /\ IF update_cond
-        THEN cache' = [cache EXCEPT ![k] = local_item[n]]
-        ELSE UNCHANGED cache
+    /\ next_cas' = next_cas + 1
+    /\ cache' = [cache EXCEPT ![k] = new_item]
 
-    /\ UNCHANGED next_cas
     /\ UNCHANGED local_item
     /\ UNCHANGED local_key
     /\ UNCHANGED <<db, next_val>>
@@ -339,6 +368,7 @@ Next ==
         \/ GetFromDB(n)
         \/ LockSetCache(n)
         \/ SetBackToCache(n)
+        \/ DoSetBack(n)
         \/ UseItem(n)
 
         \/ LockUpdateCache(n)
