@@ -269,4 +269,7 @@ TerminateLeadToConsensus ==
 StoppedAcceptorInv ==
     /\ Cardinality(stopped_acceptor) <= Cardinality(Acceptor) - majority
 
+
+Sym == Permutations(Acceptor)
+
 ====
