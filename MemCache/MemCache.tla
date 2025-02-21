@@ -3,10 +3,10 @@ EXTENDS TLC, Naturals
 
 CONSTANTS Key, Node, nil
 
-VARIABLES pc, db, locked, cache, next_cas,
+VARIABLES pc, db, locked, cache, next_cas, next_val,
     local_key, local_item
 
-vars == <<pc, db, locked, cache, next_cas,
+vars == <<pc, db, locked, cache, next_cas, next_val,
     local_key, local_item>>
 
 ----------------------------------------------------------------------------
@@ -14,7 +14,8 @@ vars == <<pc, db, locked, cache, next_cas,
 NullKey == Key \union {nil}
 
 UpdatePC == {
-    "LockUpdateCache", "UpdateCache"
+    "LockUpdateCache", "UpdateCache",
+    "LockDeleteCache", "DeleteCache"
 }
 
 ReadonlyPC == {
@@ -36,6 +37,7 @@ NullCAS == CAS \union {nil}
 
 CacheVal == [
     cas: CAS,
+    found: BOOLEAN,
     val: NullValue
 ]
 
@@ -43,6 +45,7 @@ NullCacheVal == CacheVal \union {nil}
 
 CacheValCASNull == [
     cas: NullCAS,
+    found: BOOLEAN,
     val: NullValue
 ]
 
@@ -50,10 +53,11 @@ CacheValCASNull == [
 
 TypeOK ==
     /\ pc \in [Node -> PC]
-    /\ db \in [Key -> Value]
+    /\ db \in [Key -> NullValue]
     /\ locked \in [Key -> BOOLEAN]
     /\ cache \in [Key -> NullCacheVal]
     /\ next_cas \in CAS
+    /\ next_val \in Value
     /\ local_key \in [Node -> NullKey]
     /\ local_item \in [Node -> (CacheValCASNull \union {nil})]
 
@@ -62,6 +66,7 @@ Init ==
     /\ db = [k \in Key |-> 20]
     /\ locked = [k \in Key |-> FALSE]
     /\ cache = [k \in Key |-> nil]
+    /\ next_val = 20
     /\ next_cas = 40
     /\ local_key = [n \in Node |-> nil]
     /\ local_item = [n \in Node |-> nil]
@@ -86,7 +91,7 @@ CacheGet(n, k) ==
     /\ local_key' = [local_key EXCEPT ![n] = k]
     /\ UNCHANGED local_item
     /\ UNCHANGED <<cache, next_cas>>
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 GetFromCache(n) ==
@@ -112,14 +117,14 @@ GetFromCache(n) ==
 
     /\ IF cache[k] = nil THEN
             handle_nil
-        ELSE IF cache[k].val = nil THEN
+        ELSE IF ~cache[k].found THEN
             need_get_from_db
         ELSE
             return_item
 
     /\ UNCHANGED <<cache, next_cas>>
     /\ UNCHANGED local_key
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 HandleGetNil(n) ==
@@ -128,6 +133,7 @@ HandleGetNil(n) ==
 
         new_item == [
             cas |-> next_cas',
+            found |-> FALSE,
             val |-> nil
         ]
     IN
@@ -140,7 +146,7 @@ HandleGetNil(n) ==
     /\ local_item' = [local_item EXCEPT ![n] = new_item]
 
     /\ UNCHANGED local_key
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 GetFromDB(n) ==
@@ -150,12 +156,12 @@ GetFromDB(n) ==
     /\ pc[n] = "GetFromDB"
     /\ goto(n, "LockSetCache")
 
-    /\ local_item' = [local_item EXCEPT ![n].val = db[k]]
+    /\ local_item' = [local_item EXCEPT ![n].val = db[k], ![n].found = TRUE]
 
     /\ UNCHANGED locked
     /\ UNCHANGED <<cache, next_cas>>
     /\ UNCHANGED local_key
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 LockSetCache(n) ==
@@ -169,7 +175,7 @@ LockSetCache(n) ==
     /\ UNCHANGED local_item
     /\ UNCHANGED <<cache, next_cas>>
     /\ UNCHANGED local_key
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 SetBackToCache(n) ==
@@ -191,7 +197,7 @@ SetBackToCache(n) ==
     /\ UNCHANGED next_cas
     /\ UNCHANGED local_item
     /\ UNCHANGED local_key
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 UseItem(n) ==
@@ -201,7 +207,7 @@ UseItem(n) ==
     /\ UNCHANGED <<local_key, local_item>>
     /\ UNCHANGED <<cache, next_cas>>
     /\ UNCHANGED locked
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 no_other_updating ==
@@ -209,15 +215,14 @@ no_other_updating ==
 
 UpdateDB(n, k) ==
     LET
-        new_val == db[k] + 1
-
-        new_item == [cas |-> nil, val |-> new_val]
+        new_item == [cas |-> nil, val |-> next_val', found |-> TRUE]
     IN
     /\ pc[n] = "Init"
     /\ no_other_updating
+    /\ next_val' = next_val + 1
 
     /\ goto(n, "LockUpdateCache")
-    /\ db' = [db EXCEPT ![k] = new_val]
+    /\ db' = [db EXCEPT ![k] = next_val']
 
     /\ local_key' = [local_key EXCEPT ![n] = k]
     /\ local_item' = [local_item EXCEPT ![n] = new_item]
@@ -236,7 +241,7 @@ LockUpdateCache(n) ==
 
     /\ UNCHANGED <<local_key, local_item>>
     /\ UNCHANGED <<cache, next_cas>>
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 UpdateCache(n) ==
@@ -245,6 +250,7 @@ UpdateCache(n) ==
 
         new_item == [
             cas |-> next_cas',
+            found |-> TRUE,
             val |-> local_item[n].val
         ]
     IN
@@ -256,7 +262,7 @@ UpdateCache(n) ==
     /\ cache' = [cache EXCEPT ![k] = new_item]
 
     /\ UNCHANGED <<local_key, local_item>>
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
 
 
 CacheLRU(k) ==
@@ -266,7 +272,50 @@ CacheLRU(k) ==
     /\ UNCHANGED <<pc, local_key, local_item>>
     /\ UNCHANGED next_cas
     /\ UNCHANGED locked
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, next_val>>
+
+
+DeleteDB(n, k) ==
+    /\ pc[n] = "Init"
+    /\ no_other_updating
+    /\ db[k] # nil
+    /\ db' = [db EXCEPT ![k] = nil]
+    /\ goto(n, "LockDeleteCache")
+
+    /\ local_key' = [local_key EXCEPT ![n] = k]
+
+    /\ UNCHANGED local_item
+    /\ UNCHANGED <<cache, next_cas>>
+    /\ UNCHANGED locked
+    /\ UNCHANGED next_val
+
+
+LockDeleteCache(n) ==
+    LET
+        k == local_key[n]
+    IN
+    /\ pc[n] = "LockDeleteCache"
+    /\ goto(n, "DeleteCache")
+    /\ lock_key(k)
+
+    /\ UNCHANGED <<local_key, local_item>>
+    /\ UNCHANGED <<cache, next_cas>>
+    /\ UNCHANGED <<db, next_val>>
+
+
+DeleteCache(n) ==
+    LET
+        k == local_key[n]
+    IN
+    /\ pc[n] = "DeleteCache"
+    /\ goto(n, "Terminated")
+    /\ unlock_key(k)
+
+    /\ cache' = [cache EXCEPT ![k] = nil]
+
+    /\ UNCHANGED <<local_key, local_item>>
+    /\ UNCHANGED next_cas
+    /\ UNCHANGED <<db, next_val>>
 
 ----------------------------------------------------------------------------
 
@@ -282,6 +331,7 @@ Next ==
     \/ \E n \in Node, k \in Key:
         \/ CacheGet(n, k)
         \/ UpdateDB(n, k)
+        \/ DeleteDB(n, k)
 
     \/ \E n \in Node:
         \/ GetFromCache(n)
@@ -293,6 +343,9 @@ Next ==
 
         \/ LockUpdateCache(n)
         \/ UpdateCache(n)
+
+        \/ LockDeleteCache(n)
+        \/ DeleteCache(n)
 
     \/ \E k \in Key: CacheLRU(k)
 
@@ -312,6 +365,7 @@ LockedStateInv ==
             "Init", "GetFromDB", "UseItem",
             "LockSetCache",
             "LockUpdateCache",
+            "LockDeleteCache",
             "Terminated"
         }
 
@@ -335,7 +389,7 @@ LockedStateInv ==
 
 UseItemWithData ==
     \A n \in Node:
-        pc[n] = "UseItem" => local_item[n].val # nil
+        pc[n] = "UseItem" => local_item[n].found
 
 
 DBMatchCache ==
