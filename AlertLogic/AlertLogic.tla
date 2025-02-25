@@ -172,17 +172,12 @@ GetChangedKey(t) ==
                         ![t].count = @ + 1,
                         ![t].status = "Sending"]
 
-        new_paused == [
+        new_paused_info == [
             enabled |-> TRUE,
             count |-> 0,
             status |-> "None",
             paused |-> TRUE
         ]
-
-        upsert_paused_info ==
-            IF send_info[t] = nil
-                THEN new_paused
-                ELSE [send_info[t] EXCEPT !.paused = TRUE]
 
         new_stopped_info == [
             enabled |-> TRUE,
@@ -207,7 +202,7 @@ GetChangedKey(t) ==
         ELSE IF pause_sending THEN
             /\ UNCHANGED alerting
             /\ UNCHANGED num_alerting
-            /\ send_info' = [send_info EXCEPT ![t] = upsert_paused_info]
+            /\ send_info' = [send_info EXCEPT ![t] = new_paused_info]
             /\ pc' = "ClearLocals"
         ELSE IF allow_send_success THEN
             /\ alerting' = alerting \ {t}
