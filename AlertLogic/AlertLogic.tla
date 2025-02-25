@@ -264,9 +264,6 @@ ClearLocals ==
     /\ UNCHANGED status_list
 
 
-can_retry(t) ==
-    send_info[t].status = "Sending"
-
 RetrySendAlert(t) ==
     /\ send_info[t] # nil
     /\ send_info[t].enabled \* TODO check index
@@ -459,7 +456,7 @@ AlertingMatchState ==
             t \in alerting <=> alert_cond(t)
 
         match_cond ==
-            \A t \in Type: ~is_paused(t) => cond(t)
+            \A t \in Type: cond(t)
     IN
         notifyStopCond => match_cond
 
@@ -473,7 +470,7 @@ SendCountZeroForOK ==
         cond(t) ==
             t \in alerting <=> is_non_zero(t)
     IN
-        \A t \in Type: ~is_paused(t) => cond(t)
+        \A t \in Type: cond(t)
 
 
 SendCountLimit ==
@@ -490,7 +487,7 @@ SendStatusActiveWhenAlert ==
         cond(t) ==
             t \in alerting <=> is_active(t)
     IN
-        \A t \in Type: ~is_paused(t) => cond(t)
+        \A t \in Type: cond(t)
 
 
 AlwaysEnabledGetOrRetry ==
@@ -558,14 +555,12 @@ PCInitInv ==
 
 NeedAlertEmptyWhenTerminate ==
     LET
-        pre_cond(t) == ~is_paused(t)
-
         cond(t) ==
             state_is_ok(t) <=> t \notin alerting
     IN
     notifyStopCond =>
         /\ need_alert = {}
-        /\ \A t \in Type: pre_cond(t) => cond(t)
+        /\ \A t \in Type: ~is_paused(t) => cond(t)
 
 
 enable_alerting_set ==
