@@ -45,7 +45,7 @@ new_state == [val |-> 30, status |-> "OK"]
 SendInfo == [
     enabled: BOOLEAN,
     count: 0..max_send_count,
-    status: {"Sending", "Stopped", "Retrying"}
+    status: {"Sending", "Stopped", "Retrying", "Paused"}
 ]
 
 NullSendInfo == SendInfo \union {nil}
@@ -132,12 +132,25 @@ GetChangedKey(t) ==
     LET
         new_status == IF state_is_ok(t) THEN "OK" ELSE "Failed"
 
+        new_num_alerting ==
+            IF t \notin alerting
+                THEN num_alerting + 1
+                ELSE num_alerting
+
         allow_send_fail ==
             /\ new_status = "Failed"
             /\ \/ send_info[t] = nil
                \/ send_info[t].status = "Retrying"
                \/ send_info[t].status = "Stopped"
         
+        do_send_fail ==
+            /\ allow_send_fail
+            /\ new_num_alerting <= max_alerting
+
+        pause_sending ==
+            /\ allow_send_fail
+            /\ new_num_alerting > max_alerting
+
         allow_send_success ==
             /\ new_status = "OK"
             /\ send_info[t] # nil
@@ -156,6 +169,12 @@ GetChangedKey(t) ==
                         ![t].count = @ + 1,
                         ![t].status = "Sending"]
         
+        new_paused_info == [
+            enabled |-> TRUE,
+            count |-> 0,
+            status |-> "Paused"
+        ]
+
         new_stopped_info == [
             enabled |-> TRUE,
             count |-> 0,
@@ -170,19 +189,26 @@ GetChangedKey(t) ==
     /\ local_type' = t
     /\ local_status' = new_status
     /\ local_index' = Len(status_list[t])
-    /\ IF allow_send_fail THEN
+    /\ IF do_send_fail THEN
             /\ alerting' = alerting \union {t}
+            /\ num_alerting' = new_num_alerting
             /\ set_info_sending
             /\ pc' = "PushNotify"
+        ELSE IF pause_sending THEN
+            /\ UNCHANGED alerting
+            /\ UNCHANGED num_alerting
+            /\ send_info' = [send_info EXCEPT ![t] = new_paused_info]
+            /\ pc' = "ClearLocals"
         ELSE IF allow_send_success THEN
             /\ alerting' = alerting \ {t}
+            /\ num_alerting' = num_alerting - 1
             /\ send_info' = [send_info EXCEPT ![t] = new_stopped_info]
             /\ pc' = "PushNotify"
         ELSE
             /\ UNCHANGED alerting
+            /\ UNCHANGED num_alerting
             /\ UNCHANGED send_info
             /\ pc' = "ClearLocals"
-    /\ UNCHANGED num_alerting
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
     /\ UNCHANGED status_list
@@ -252,6 +278,14 @@ RetrySendAlert(t) ==
     /\ UNCHANGED <<alert_enabled, num_disable>>
 
 
+is_paused(t) ==
+    /\ send_info[t] # nil
+    /\ send_info[t].status = "Paused"
+
+alerting_or_pause(t) ==
+    \/ t \in alerting
+    \/ is_paused(t)
+
 DisableAlert(t) ==
     /\ alert_enabled[t]
     /\ num_disable < max_disable
@@ -260,7 +294,9 @@ DisableAlert(t) ==
     /\ IF send_info[t] # nil
         THEN send_info' = [send_info EXCEPT ![t].enabled = FALSE]
         ELSE UNCHANGED send_info
-    /\ UNCHANGED num_alerting \* TODO
+    /\ IF t \in alerting
+        THEN num_alerting' = num_alerting - 1
+        ELSE UNCHANGED num_alerting
     /\ UNCHANGED state
     /\ UNCHANGED <<need_alert, alerting>>
     /\ UNCHANGED next_val
@@ -275,7 +311,9 @@ EnableAlert(t) ==
     /\ IF send_info[t] # nil
         THEN send_info' = [send_info EXCEPT ![t].enabled = TRUE]
         ELSE UNCHANGED send_info
-    /\ UNCHANGED num_alerting \* TODO
+    /\ IF t \in alerting
+        THEN num_alerting' = num_alerting + 1
+        ELSE UNCHANGED num_alerting
     /\ UNCHANGED num_disable
     /\ UNCHANGED state
     /\ UNCHANGED <<need_alert, alerting>>
@@ -343,10 +381,14 @@ NotifyListReflectState ==
         
         must_pushed(t) == \* state failed => must push to the notify list
             ~state_is_ok(t) => notify_by_type(t) # {}
-                
+
+        pre_cond(t) ==
+            /\ alert_enabled[t]
+            /\ ~is_paused(t)
+
         match_notify_list ==
             \A t \in Type:
-                alert_enabled[t] =>
+                pre_cond(t) =>
                     /\ match_cond(t)
                     /\ must_pushed(t)
     IN
@@ -391,11 +433,16 @@ SendStatusActiveWhenAlert ==
 
 
 AlwaysEnabledGetOrRetry ==
+    LET
+        pre_cond(t) ==
+            /\ ~state_is_ok(t)
+            /\ alert_enabled[t]
+    IN
     \A t \in Type:
-        ~state_is_ok(t) /\ alert_enabled[t] =>
+        pre_cond(t) =>
             \/ pc = "Init" => ENABLED GetChangedKey(t)
-            \/ send_info[t].count < max_send_count =>
-                    ENABLED RetrySendAlert(t)
+            \/ send_info[t].count < max_send_count => ENABLED RetrySendAlert(t)
+            \/ send_info[t].status = "Paused"
 
 
 CheckEnabledPushNotify ==
@@ -461,11 +508,27 @@ NeedAlertEmptyWhenTerminate ==
     notifyStopCond =>
         /\ need_alert = {}
         /\ \A t \in Type:
-            state_is_ok(t) <=> t \notin alerting
+            state_is_ok(t) <=> ~alerting_or_pause(t)
 
+
+enable_alerting_set ==
+    {t \in alerting: alert_enabled[t]}
 
 LimitNumAlerting ==
-    Cardinality(alerting) <= max_alerting
+    Cardinality(enable_alerting_set) <= max_alerting
+
+NumAlertingInv ==
+    Cardinality(enable_alerting_set) = num_alerting
+
+
+PauseListIsEmptyWhenNotReachMaxAlerting ==
+    LET
+        pause_list == {t \in Type: is_paused(t)}
+
+        pre_cond ==
+            Cardinality(enable_alerting_set) < max_alerting
+    IN
+        pre_cond => pause_list = {}
 
 
 Sym == Permutations(Type) \union Permutations(Key)
