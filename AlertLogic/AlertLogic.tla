@@ -1,19 +1,22 @@
 ------ MODULE AlertLogic ----
-EXTENDS TLC, Naturals, Sequences
+EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-CONSTANTS Type, Key, nil
+CONSTANTS Type, Key, nil, max_alerting
 
 VARIABLES alert_enabled, need_alert,
     state, alerting, num_disable,
     send_info, status_list,
     notify_list, next_val,
-    pc, local_type, local_status, local_index
+    pc, local_type, local_status, local_index,
+    num_alerting
 
 vars == <<alert_enabled, need_alert,
     state, alerting, num_disable,
     send_info, status_list,
     notify_list, next_val, pc,
-    local_type, local_status, local_index>>
+    local_type, local_status, local_index,
+    num_alerting
+>>
 
 node_vars == <<pc, local_type, local_status, local_index>>
 
@@ -63,6 +66,7 @@ TypeOK ==
     /\ local_type \in NullType
     /\ local_status \in NullStatus
     /\ local_index \in (1..100 \union {nil})
+    /\ num_alerting \in 0..Cardinality(Type)
 
 
 Init ==
@@ -79,6 +83,7 @@ Init ==
     /\ local_type = nil
     /\ local_status = nil
     /\ local_index = nil
+    /\ num_alerting = 0
 
 -----------------------------------------------------------------------------------
 
@@ -116,7 +121,7 @@ UpdateKey(t, k) ==
             ![t][k].status = status]
         /\ status_list' = [status_list EXCEPT ![t] = Append(@, new_st)]
         /\ update_changeset(status)
-    /\ UNCHANGED alerting
+    /\ UNCHANGED <<alerting, num_alerting>>
     /\ UNCHANGED send_info
     /\ UNCHANGED notify_list
     /\ UNCHANGED node_vars
@@ -125,14 +130,16 @@ UpdateKey(t, k) ==
 
 GetChangedKey(t) ==
     LET
+        new_status == IF state_is_ok(t) THEN "OK" ELSE "Failed"
+
         allow_send_fail ==
-            /\ local_status' = "Failed"
+            /\ new_status = "Failed"
             /\ \/ send_info[t] = nil
                \/ send_info[t].status = "Retrying"
                \/ send_info[t].status = "Stopped"
         
         allow_send_success ==
-            /\ local_status' = "OK"
+            /\ new_status = "OK"
             /\ send_info[t] # nil
             /\ send_info[t].status # "Stopped"
 
@@ -161,7 +168,7 @@ GetChangedKey(t) ==
     /\ need_alert' = need_alert \ {t} \* Remove from need_alert list
 
     /\ local_type' = t
-    /\ local_status' = IF state_is_ok(t) THEN "OK" ELSE "Failed"
+    /\ local_status' = new_status
     /\ local_index' = Len(status_list[t])
     /\ IF allow_send_fail THEN
             /\ alerting' = alerting \union {t}
@@ -175,6 +182,7 @@ GetChangedKey(t) ==
             /\ UNCHANGED alerting
             /\ UNCHANGED send_info
             /\ pc' = "ClearLocals"
+    /\ UNCHANGED num_alerting
     /\ UNCHANGED next_val
     /\ UNCHANGED notify_list
     /\ UNCHANGED status_list
@@ -202,6 +210,7 @@ PushNotify ==
     /\ notify_list' = Append(notify_list, new_noti)
     /\ doClearLocals
 
+    /\ UNCHANGED num_alerting
     /\ UNCHANGED alerting
     /\ UNCHANGED <<alert_enabled, num_disable>>
     /\ UNCHANGED send_info
@@ -215,7 +224,7 @@ ClearLocals ==
     /\ doClearLocals
 
     /\ UNCHANGED notify_list
-    /\ UNCHANGED alerting
+    /\ UNCHANGED <<alerting, num_alerting>>
     /\ UNCHANGED <<alert_enabled, num_disable>>
     /\ UNCHANGED send_info
     /\ UNCHANGED <<need_alert, state, next_val>>
@@ -234,6 +243,7 @@ RetrySendAlert(t) ==
     /\ need_alert' = need_alert \union {t}
     /\ send_info' = [send_info EXCEPT ![t].status = "Retrying"]
 
+    /\ UNCHANGED num_alerting
     /\ UNCHANGED alerting
     /\ UNCHANGED notify_list
     /\ UNCHANGED status_list
@@ -250,6 +260,7 @@ DisableAlert(t) ==
     /\ IF send_info[t] # nil
         THEN send_info' = [send_info EXCEPT ![t].enabled = FALSE]
         ELSE UNCHANGED send_info
+    /\ UNCHANGED num_alerting \* TODO
     /\ UNCHANGED state
     /\ UNCHANGED <<need_alert, alerting>>
     /\ UNCHANGED next_val
@@ -264,6 +275,7 @@ EnableAlert(t) ==
     /\ IF send_info[t] # nil
         THEN send_info' = [send_info EXCEPT ![t].enabled = TRUE]
         ELSE UNCHANGED send_info
+    /\ UNCHANGED num_alerting \* TODO
     /\ UNCHANGED num_disable
     /\ UNCHANGED state
     /\ UNCHANGED <<need_alert, alerting>>
@@ -450,6 +462,10 @@ NeedAlertEmptyWhenTerminate ==
         /\ need_alert = {}
         /\ \A t \in Type:
             state_is_ok(t) <=> t \notin alerting
+
+
+LimitNumAlerting ==
+    Cardinality(alerting) <= max_alerting
 
 
 Sym == Permutations(Type) \union Permutations(Key)
