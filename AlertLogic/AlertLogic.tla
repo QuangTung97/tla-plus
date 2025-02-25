@@ -17,8 +17,9 @@ vars == <<alert_enabled, need_alert,
 
 node_vars == <<pc, local_type, local_status, local_index>>
 
+-----------------------------------------------------------------------------------
 
-max_val == 34
+max_val == 33
 
 max_send_count == 2
 
@@ -46,6 +47,7 @@ SendInfo == [
 
 NullSendInfo == SendInfo \union {nil}
 
+-----------------------------------------------------------------------------------
 
 TypeOK ==
     /\ alert_enabled \in [Type -> BOOLEAN]
@@ -78,6 +80,7 @@ Init ==
     /\ local_status = nil
     /\ local_index = nil
 
+-----------------------------------------------------------------------------------
 
 state_is_ok(t) ==
     \A k \in Key: state[t][k].status = "OK"
@@ -269,6 +272,7 @@ EnableAlert(t) ==
     /\ UNCHANGED status_list
     /\ UNCHANGED node_vars
 
+-----------------------------------------------------------------------------------
 
 notifyStopCond ==
     /\ pc = "Init"
@@ -301,6 +305,8 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 FairSpec == Spec /\ WF_vars(Next)
+
+-----------------------------------------------------------------------------------
 
 AlwaysTerminate == <> TerminateCond
 
