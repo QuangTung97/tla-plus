@@ -145,7 +145,8 @@ GetChangedKey(t) ==
         allow_send_fail ==
             /\ new_status = "Failed"
             /\ \/ send_info[t] = nil
-               \/ send_info[t].status \in {"None", "Retrying", "Stopped"}
+               \/ /\ send_info[t].status \in {"None", "Retrying", "Stopped"}
+                  /\ ~send_info[t].paused
 
         do_send_fail ==
             /\ allow_send_fail
