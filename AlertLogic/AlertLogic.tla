@@ -278,7 +278,7 @@ can_retry(t) ==
 RetrySendAlert(t) ==
     /\ send_info[t] # nil
     /\ send_info[t].enabled \* TODO check index
-    /\ ~send_info[t].paused \* TODO testing
+    /\ ~send_info[t].paused
     /\ send_info[t].status = "Sending"
     /\ send_info[t].count < max_send_count
 
@@ -293,10 +293,6 @@ RetrySendAlert(t) ==
     /\ UNCHANGED node_vars
     /\ UNCHANGED <<alert_enabled, num_disable>>
 
-
-alerting_or_pause(t) ==
-    \/ t \in alerting
-    \/ is_paused(t)
 
 DisableAlert(t) ==
     LET
@@ -530,15 +526,6 @@ NotRetryWhenDisabled ==
 AlertEnabledMatchSendInfo ==
     \A t \in Type: send_info[t] # nil =>
         alert_enabled[t] <=> send_info[t].enabled
-
-
-CanRetryMatchRunning ==
-    LET
-        cond(t) ==
-            /\ send_info[t].status = "Sending"
-    IN
-    \A t \in Type: send_info[t] # nil =>
-        (can_retry(t) => cond(t))
 
 
 checkStatusList(t, list) ==
