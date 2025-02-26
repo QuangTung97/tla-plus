@@ -1,7 +1,8 @@
 ------ MODULE AlertLogic ----
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-CONSTANTS Type, Key, nil, max_alerting
+CONSTANTS Type, Key, nil,
+    max_alerting, max_val, max_send_count, max_disable
 
 VARIABLES alert_enabled, need_alert,
     state, alerting, alert_paused, num_disable,
@@ -21,12 +22,6 @@ vars == <<alert_enabled, need_alert,
 node_vars == <<pc, local_type, local_status, local_index>>
 
 -----------------------------------------------------------------------------------
-
-max_val == 33
-
-max_send_count == 2
-
-max_disable == 2
 
 Value == 30..max_val
 
@@ -123,7 +118,8 @@ UpdateKey(t, k) ==
             ![t][k].status = status]
         /\ status_list' = [status_list EXCEPT ![t] = Append(@, new_st)]
         /\ update_changeset(status)
-        /\ UNCHANGED alert_paused \* TODO
+
+    /\ UNCHANGED alert_paused
     /\ UNCHANGED <<alerting, num_alerting>>
     /\ UNCHANGED send_info
     /\ UNCHANGED notify_list
@@ -145,6 +141,7 @@ GetChangedKey(t) ==
 
         allow_send_fail ==
             /\ new_status = "Failed"
+            /\ ~is_paused(t)
             /\ \/ send_info[t] = nil
                \/ send_info[t].status \in {"Retrying", "Stopped"}
 
@@ -178,7 +175,6 @@ GetChangedKey(t) ==
     IN
     /\ pc = "Init"
     /\ t \in need_alert \* TODO check index
-    /\ ~is_paused(t) \* TODO check index
     /\ alert_enabled[t]
     /\ need_alert' = need_alert \ {t} \* Remove from need_alert list
 
@@ -306,10 +302,9 @@ DisableAlert(t) ==
 EnableAlert(t) ==
     LET
         update_send_info ==
-            IF send_info[t] # nil THEN
-                /\ send_info' = [send_info EXCEPT ![t].enabled = TRUE]
-            ELSE
-                /\ UNCHANGED send_info
+            IF send_info[t] # nil
+                THEN send_info' = [send_info EXCEPT ![t].enabled = TRUE]
+                ELSE UNCHANGED send_info
 
         ready_in_num_alerting ==
             /\ t \in alerting
@@ -320,10 +315,9 @@ EnableAlert(t) ==
             /\ num_alerting < max_alerting
 
         update_num_alerting ==
-            IF allow_inc THEN
-                num_alerting' = num_alerting + 1
-            ELSE
-                UNCHANGED num_alerting
+            IF allow_inc
+                THEN num_alerting' = num_alerting + 1
+                ELSE UNCHANGED num_alerting
 
         allow_update_paused ==
             /\ ready_in_num_alerting
@@ -380,7 +374,7 @@ UnpauseInfo(t) ==
 
 notifyStopCond ==
     /\ pc = "Init"
-    /\ need_alert \ alert_paused = {}
+    /\ need_alert = {}
 
 TerminateCond ==
     LET
@@ -455,25 +449,19 @@ NotifyListReflectState ==
     IN
         notifyStopCond => match_notify_list
 
+
 NotifyListReflectStateWhenOK ==
     LET
         match_cond(t) ==
-            notify_by_type(t) # {} =>
-                \/ last_noti(t).status = "Failed" /\ ~state_is_ok(t)
-                \/ last_noti(t).status = "OK" /\ state_is_ok(t)
-
-        must_pushed(t) == \* state failed => must push to the notify list
-            ~state_is_ok(t) => notify_by_type(t) # {}
+            \/ notify_by_type(t) = {}
+            \/ last_noti(t).status = "OK"
 
         pre_cond(t) ==
             /\ alert_enabled[t]
-            /\ ~is_paused(t)
+            /\ state_is_ok(t)
 
         match_notify_list ==
-            \A t \in Type:
-                pre_cond(t) =>
-                    /\ match_cond(t)
-                    /\ must_pushed(t)
+            \A t \in Type: pre_cond(t) => match_cond(t)
     IN
         notifyStopCond => match_notify_list
 
@@ -591,7 +579,7 @@ NeedAlertEmptyWhenTerminate ==
             state_is_ok(t) <=> t \notin alerting
     IN
     notifyStopCond =>
-        /\ need_alert \ alert_paused = {}
+        /\ need_alert = {}
         /\ \A t \in Type: ~is_paused(t) => cond(t)
 
 
