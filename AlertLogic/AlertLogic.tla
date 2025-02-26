@@ -112,7 +112,6 @@ UpdateKey(t, k) ==
             IF state_is_ok_new(t)
                 THEN "OK"
                 ELSE "Failed"
-
     IN
     /\ next_val < max_val
     /\ next_val' = next_val + 1
