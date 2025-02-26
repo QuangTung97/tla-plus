@@ -305,7 +305,6 @@ DisableAlert(t) ==
 
 EnableAlert(t) ==
     LET
-
         ready_in_num_alerting ==
             /\ t \in alerting
             /\ ~is_paused(t)
