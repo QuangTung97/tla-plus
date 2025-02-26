@@ -310,31 +310,23 @@ EnableAlert(t) ==
             /\ t \in alerting
             /\ ~is_paused(t)
 
-        allow_inc ==
-            /\ ready_in_num_alerting
-            /\ num_alerting < max_alerting
-
-        update_num_alerting ==
-            IF allow_inc
-                THEN num_alerting' = num_alerting + 1
-                ELSE UNCHANGED num_alerting
-
-        allow_update_paused ==
-            /\ ready_in_num_alerting
-            /\ num_alerting >= max_alerting
-
-        update_alert_paused ==
-            IF allow_update_paused THEN
-                alert_paused' = alert_paused \union {t}
+        do_update ==
+            IF ready_in_num_alerting THEN
+                IF num_alerting >= max_alerting THEN
+                    /\ alert_paused' = alert_paused \union {t}
+                    /\ UNCHANGED num_alerting
+                ELSE
+                    /\ num_alerting' = num_alerting + 1
+                    /\ UNCHANGED alert_paused
             ELSE
-                UNCHANGED alert_paused
+                /\ UNCHANGED num_alerting
+                /\ UNCHANGED alert_paused
     IN
     /\ ~alert_enabled[t]
     /\ alert_enabled' = [alert_enabled EXCEPT ![t] = TRUE]
 
     /\ update_send_info
-    /\ update_num_alerting
-    /\ update_alert_paused
+    /\ do_update
 
     /\ UNCHANGED num_disable
     /\ UNCHANGED state
