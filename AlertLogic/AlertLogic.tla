@@ -273,6 +273,12 @@ RetrySendAlert(t) ==
     /\ UNCHANGED <<alert_enabled, num_disable, alert_paused>>
 
 
+update_send_info_enabled(t, enabled) ==
+    IF send_info[t] # nil
+        THEN send_info' = [send_info EXCEPT ![t].enabled = enabled]
+        ELSE UNCHANGED send_info
+
+
 DisableAlert(t) ==
     LET
         dec_cond ==
@@ -284,9 +290,7 @@ DisableAlert(t) ==
     /\ num_disable' = num_disable + 1
 
     /\ alert_enabled' = [alert_enabled EXCEPT ![t] = FALSE]
-    /\ IF send_info[t] # nil
-        THEN send_info' = [send_info EXCEPT ![t].enabled = FALSE]
-        ELSE UNCHANGED send_info
+    /\ update_send_info_enabled(t, FALSE)
     /\ IF dec_cond
         THEN num_alerting' = num_alerting - 1
         ELSE UNCHANGED num_alerting
@@ -301,10 +305,6 @@ DisableAlert(t) ==
 
 EnableAlert(t) ==
     LET
-        update_send_info ==
-            IF send_info[t] # nil
-                THEN send_info' = [send_info EXCEPT ![t].enabled = TRUE]
-                ELSE UNCHANGED send_info
 
         ready_in_num_alerting ==
             /\ t \in alerting
@@ -325,7 +325,7 @@ EnableAlert(t) ==
     /\ ~alert_enabled[t]
     /\ alert_enabled' = [alert_enabled EXCEPT ![t] = TRUE]
 
-    /\ update_send_info
+    /\ update_send_info_enabled(t, TRUE)
     /\ do_update
 
     /\ UNCHANGED num_disable
