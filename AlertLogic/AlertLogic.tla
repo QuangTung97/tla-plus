@@ -90,13 +90,17 @@ state_is_ok(t) ==
 state_is_ok_new(t) ==
     \A k \in Key: state'[t][k].status = "OK"
 
+is_paused(t) ==
+    /\ t \in alert_paused
+
+
 UpdateKey(t, k) ==
     LET
         update_cond(status) ==
             /\ t \notin need_alert
             /\ IF status = "OK"
                 THEN t \in alerting
-                ELSE t \notin alerting
+                ELSE t \notin alerting /\ ~is_paused(t)
 
         update_changeset(status) ==
             IF update_cond(status) THEN
@@ -126,9 +130,6 @@ UpdateKey(t, k) ==
     /\ UNCHANGED node_vars
     /\ UNCHANGED <<alert_enabled, num_disable>>
 
-
-is_paused(t) ==
-    /\ t \in alert_paused
 
 GetChangedKey(t) ==
     LET
