@@ -174,7 +174,7 @@ GetChangedKey(t) ==
         ]
     IN
     /\ pc = "Init"
-    /\ t \in need_alert \* TODO check index
+    /\ t \in need_alert
     /\ alert_enabled[t]
     /\ need_alert' = need_alert \ {t} \* Remove from need_alert list
 
@@ -257,7 +257,7 @@ ClearLocals ==
 
 RetrySendAlert(t) ==
     /\ send_info[t] # nil
-    /\ send_info[t].enabled \* TODO check index
+    /\ send_info[t].enabled
     /\ send_info[t].status = "Sending"
     /\ send_info[t].count < max_send_count
 
