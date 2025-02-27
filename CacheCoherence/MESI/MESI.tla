@@ -17,16 +17,16 @@ Value == 20..29
 
 NullValue == Value \union {nil}
 
-CacheStatus == {"I", "S", "M"} \* Stable States
+CacheStatus == {"I", "S", "M", "E"} \* Stable States
 
 CacheTransientStatus == {
     "IS_D", "IM_AD", "IM_A", "SM_AD", "SM_A",
     "SI_A", "MI_A", "II"
 }
 
-ReadableStatus == {"S", "M", "SM_AD", "SM_A"}
+ReadableStatus == {"S", "M", "SM_AD", "SM_A", "E"}
 
-WritableStatus == {"M"}
+WritableStatus == {"M", "E"}
 
 CacheInfo == [
     status: CacheStatus \union CacheTransientStatus,
@@ -53,7 +53,7 @@ GetReq == [
 DataMResp == [
     type: {"DataM"},
     line: Line,
-    data: Value
+    data: NullValue
 ]
 
 PutMReq == [
@@ -89,7 +89,18 @@ DataRespType == [
     ack: 0..10
 ]
 
-LLCToCache == Seq(DataRespType \union FwdGetType \union InvType \union PutAckType)
+DataExclusiveResp == [
+    type: {"DataExclusive"},
+    line: Line,
+    data: Value
+]
+
+LLCToCache == Seq(
+    DataRespType
+    \union FwdGetType
+    \union InvType
+    \union PutAckType
+    \union DataExclusiveResp)
 
 
 CpuNetwork ==
@@ -184,7 +195,7 @@ llc_to_cache_existed(c, l, type) ==
     /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Tail(@)]
 
 
-CpuDataDir(c, l) ==
+CpuDataFromDir(c, l) ==
     LET
         resp == llc_to_cache[c][1]
 
@@ -249,6 +260,25 @@ CpuDataDir(c, l) ==
     /\ cpu_unchanged
 
 
+CpuDataExlusive(c, l) ==
+    LET
+        resp == llc_to_cache[c][1]
+
+        when_is_d ==
+            /\ cache[c][l].status = "IS_D"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "E",
+                    ![c][l].data = resp.data
+                ]
+            /\ UNCHANGED cpu_network
+    IN
+    /\ llc_to_cache_existed(c, l, "DataExclusive")
+    /\ \/ when_is_d
+
+    /\ UNCHANGED cache_to_llc
+    /\ cpu_unchanged
+
+
 CpuRequestStore(c, l) ==
     LET
         new_req == [
@@ -280,11 +310,21 @@ CpuRequestStore(c, l) ==
 
 
 CpuUpdate(c, l) ==
+    LET
+        when_e ==
+            cache' = [cache EXCEPT
+                    ![c][l].status = "M",
+                    ![c][l].data = @ + 1
+                ]
+
+        other ==
+            cache' = [cache EXCEPT ![c][l].data = @ + 1]
+    IN
     /\ cache[c][l].status \in WritableStatus
     /\ cache[c][l].data <= max_value
-    /\ cache' = [cache EXCEPT
-            ![c][l].data = @ + 1
-        ]
+    /\ IF cache[c][l].status = "E"
+        THEN when_e
+        ELSE other
     /\ global_data' = [global_data EXCEPT ![l] = cache'[c][l].data]
 
     /\ UNCHANGED llc_to_cache
@@ -329,10 +369,26 @@ CpuFwdGetS(c, l) ==
                 ]
             /\ push_to_llc
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
+
+        dir_data_exclusive == [
+            type |-> "DataM",
+            line |-> l,
+            data |-> nil
+        ]
+
+        when_exclusive ==
+            /\ cache[c][l].status = "E"
+            /\ cache' = [cache EXCEPT
+                    ![c][l].status = "S"
+                ]
+            /\ cache_to_llc' = [cache_to_llc
+                    EXCEPT ![c] = Append(@, dir_data_exclusive)]
+            /\ cpu_network' = cpu_network \union {data_to_req_msg}
     IN
     /\ llc_to_cache_existed(c, l, "Fwd-GetS")
     /\ \/ when_mutable
        \/ when_mi_a
+       \/ when_exclusive
 
     /\ cpu_unchanged
 
@@ -349,8 +405,8 @@ CpuFwdGetM(c, l) ==
             data |-> cache[c][l].data
         ]
 
-        when_mutable ==
-            /\ cache[c][l].status = "M"
+        when_mutable_or_exclusive ==
+            /\ cache[c][l].status \in {"M", "E"}
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "I",
                     ![c][l].data = nil
@@ -365,7 +421,7 @@ CpuFwdGetM(c, l) ==
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
     IN
     /\ llc_to_cache_existed(c, l, "Fwd-GetM")
-    /\ \/ when_mutable
+    /\ \/ when_mutable_or_exclusive
        \/ when_mi_a
 
     /\ UNCHANGED cache_to_llc
@@ -602,6 +658,12 @@ LLCGetS(c, l) ==
     LET
         req == cache_to_llc[c][1]
 
+        exclusive_data_resp == [
+            type |-> "DataExclusive",
+            line |-> l,
+            data |-> llc'[l].data
+        ]
+
         data_resp == [
             type |-> "DataResp",
             line |-> l,
@@ -612,11 +674,12 @@ LLCGetS(c, l) ==
         when_invalid ==
             /\ llc[l].status = "I"
             /\ llc' = [llc EXCEPT
-                    ![l].status = "S",
+                    ![l].status = "E",
                     ![l].data = get_from_mem(l, @),
-                    ![l].sharer = @ \union {c}
+                    ![l].owner = c
                 ]
-            /\ llc_to_cache' = [llc_to_cache EXCEPT ![c] = Append(@, data_resp)]
+            /\ llc_to_cache' = [llc_to_cache
+                    EXCEPT ![c] = Append(@, exclusive_data_resp)]
         
         when_shared ==
             /\ llc[l].status = "S"
@@ -633,8 +696,8 @@ LLCGetS(c, l) ==
             line |-> l
         ]
         
-        when_mutable ==
-            /\ llc[l].status = "M"
+        when_mutable_or_exclusive ==
+            /\ llc[l].status \in {"M", "E"}
             /\ llc' = [llc EXCEPT
                     ![l].status = "S_D",
                     ![l].sharer = {owner, c}
@@ -646,7 +709,7 @@ LLCGetS(c, l) ==
     /\ llc_req_existed(c, l, "GetS")
     /\ \/ when_invalid
        \/ when_shared
-       \/ when_mutable
+       \/ when_mutable_or_exclusive
 
     /\ llc_unchanged
 
@@ -722,11 +785,21 @@ LLCGetM(c, l) ==
             /\ llc' = [llc EXCEPT ![l].owner = c]
             /\ llc_to_cache' = [llc_to_cache EXCEPT
                     ![owner] = Append(@, fwd_getm_resp)]
+
+        handle_when_exclusive ==
+            /\ llc[l].status = "E"
+            /\ llc' = [llc EXCEPT
+                    ![l].status = "M",
+                    ![l].owner = c
+                ]
+            /\ llc_to_cache' = [llc_to_cache EXCEPT
+                    ![owner] = Append(@, fwd_getm_resp)]
     IN
     /\ llc_req_existed(c, l, "GetM")
     /\ \/ handle_when_invalid
        \/ handle_when_shared
        \/ handle_when_mutable
+       \/ handle_when_exclusive
 
     /\ llc_unchanged
 
@@ -739,7 +812,7 @@ LLCDataM(c, l) ==
             /\ llc[l].status = "S_D"
             /\ llc' = [llc EXCEPT
                     ![l].status = "S",
-                    ![l].data = req.data,
+                    ![l].data = IF req.data # nil THEN req.data ELSE @,
                     ![l].owner = nil
                 ]
     IN
@@ -811,8 +884,8 @@ LLCPutM(c, l) ==
             /\ llc_to_cache' = [llc_to_cache
                     EXCEPT ![c] = Append(@, put_ack_resp)]
 
-        when_m_owner ==
-            /\ llc[l].status = "M"
+        when_m_or_e_owner ==
+            /\ llc[l].status \in {"M", "E"}
             /\ llc[l].owner = c
             /\ llc' = [llc EXCEPT
                     ![l].status = "I",
@@ -821,8 +894,8 @@ LLCPutM(c, l) ==
                 ]
             /\ send_put_ack
 
-        when_m_non_owner ==
-            /\ llc[l].status = "M"
+        when_m_or_e_non_owner ==
+            /\ llc[l].status \in {"M", "E"}
             /\ llc[l].owner # c
             /\ UNCHANGED llc
             /\ send_put_ack
@@ -845,8 +918,8 @@ LLCPutM(c, l) ==
             /\ send_put_ack
     IN
     /\ llc_req_existed(c, l, "PutM")
-    /\ \/ when_m_owner
-       \/ when_m_non_owner
+    /\ \/ when_m_or_e_owner
+       \/ when_m_or_e_non_owner
        \/ when_sd
        \/ when_s
        \/ when_i
@@ -884,7 +957,8 @@ Terminated ==
 Next ==
     \/ \E c \in CPU, l \in Line:
         \/ CpuLoad(c, l)
-        \/ CpuDataDir(c, l)
+        \/ CpuDataFromDir(c, l)
+        \/ CpuDataExlusive(c, l)
 
         \/ CpuRequestStore(c, l)
         \/ CpuUpdate(c, l)
@@ -945,18 +1019,22 @@ LLCStateMInv ==
             /\ llc[l].owner # nil
             /\ llc[l].sharer = {}
 
-
 LLCStateSInv ==
     \A l \in Line:
         llc[l].status = "S" =>
             /\ llc[l].owner = nil
             /\ llc[l].sharer # {}
 
-
 LLCStateIInv ==
     \A l \in Line:
         llc[l].status = "I" =>
             /\ llc[l].owner = nil
+            /\ llc[l].sharer = {}
+
+LLCStateEInv ==
+    \A l \in Line:
+        llc[l].status = "E" =>
+            /\ llc[l].owner # nil
             /\ llc[l].sharer = {}
 
 
