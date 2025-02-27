@@ -3,10 +3,12 @@ EXTENDS TLC, Integers, Sequences, FiniteSets
 
 CONSTANTS Line, CPU, max_value, nil
 
-VARIABLES cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network,
+VARIABLES cache, llc, mem,
+    cache_to_llc, llc_to_cache, cpu_network, data_to_llc,
     global_data, stopped
 
-vars == <<cache, llc, mem, cache_to_llc, llc_to_cache, cpu_network,
+vars == <<cache, llc, mem,
+    cache_to_llc, llc_to_cache, cpu_network, data_to_llc,
     global_data, stopped>>
 
 ----------------------------------------------------------
@@ -50,19 +52,22 @@ GetReq == [
     line: Line
 ]
 
-DataMResp == [
-    type: {"DataM"},
-    line: Line,
-    data: Value
-]
-
 PutMReq == [
     type: {"PutM"},
     line: Line,
     data: Value
 ]
 
-CacheToLLC == Seq(GetReq \union DataMResp \union PutMReq)
+CacheToLLC == Seq(GetReq \union PutMReq)
+
+
+DataMResp == [
+    type: {"DataM"},
+    line: Line,
+    data: Value
+]
+
+DataToLLC == Seq(DataMResp)
 
 
 FwdGetType == [
@@ -120,6 +125,7 @@ TypeOK ==
     /\ cache_to_llc \in [CPU -> CacheToLLC]
     /\ llc_to_cache \in [CPU -> LLCToCache]
     /\ cpu_network \subseteq CpuNetwork
+    /\ data_to_llc \in [CPU -> DataToLLC]
     /\ global_data \in [Line -> Value]
     /\ stopped \in BOOLEAN
 
@@ -145,6 +151,7 @@ Init ==
     /\ cache_to_llc = [c \in CPU |-> <<>>]
     /\ llc_to_cache = [c \in CPU |-> <<>>]
     /\ cpu_network = {}
+    /\ data_to_llc = [c \in CPU |-> <<>>]
     /\ global_data = [l \in Line |-> 20]
     /\ stopped = FALSE
 
@@ -172,6 +179,7 @@ CpuLoad(c, l) ==
     /\ cpu_unchanged
     /\ UNCHANGED llc_to_cache
     /\ UNCHANGED cpu_network
+    /\ UNCHANGED data_to_llc
 
 
 llc_to_cache_existed(c, l, type) ==
@@ -246,6 +254,7 @@ CpuDataDir(c, l) ==
        \/ when_sm_ad_ack_non_zero
 
     /\ UNCHANGED cache_to_llc
+    /\ UNCHANGED data_to_llc
     /\ cpu_unchanged
 
 
@@ -277,6 +286,7 @@ CpuRequestStore(c, l) ==
     /\ UNCHANGED llc_to_cache
     /\ UNCHANGED cpu_network
     /\ cpu_unchanged
+    /\ UNCHANGED data_to_llc
 
 
 CpuUpdate(c, l) ==
@@ -290,6 +300,7 @@ CpuUpdate(c, l) ==
     /\ UNCHANGED llc_to_cache
     /\ UNCHANGED cpu_network
     /\ UNCHANGED cache_to_llc
+    /\ UNCHANGED data_to_llc
     /\ UNCHANGED <<llc, mem>>
     /\ UNCHANGED stopped
 
@@ -303,8 +314,8 @@ CpuFwdGetS(c, l) ==
             data |-> cache[c][l].data
         ]
 
-        push_to_llc ==
-            cache_to_llc' = [cache_to_llc EXCEPT ![c] = Append(@, dir_data)]
+        push_data_to_llc ==
+            data_to_llc' = [data_to_llc EXCEPT ![c] = Append(@, dir_data)]
 
         data_to_req_msg == [
             type |-> "DataToReq",
@@ -319,7 +330,7 @@ CpuFwdGetS(c, l) ==
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "S"
                 ]
-            /\ push_to_llc
+            /\ push_data_to_llc
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
 
         when_mi_a ==
@@ -327,7 +338,7 @@ CpuFwdGetS(c, l) ==
             /\ cache' = [cache EXCEPT
                     ![c][l].status = "SI_A"
                 ]
-            /\ push_to_llc
+            /\ push_data_to_llc
             /\ cpu_network' = cpu_network \union {data_to_req_msg}
     IN
     /\ llc_to_cache_existed(c, l, "Fwd-GetS")
@@ -335,6 +346,7 @@ CpuFwdGetS(c, l) ==
        \/ when_mi_a
 
     /\ cpu_unchanged
+    /\ UNCHANGED cache_to_llc
 
 
 CpuFwdGetM(c, l) ==
@@ -369,6 +381,7 @@ CpuFwdGetM(c, l) ==
        \/ when_mi_a
 
     /\ UNCHANGED cache_to_llc
+    /\ UNCHANGED data_to_llc
     /\ cpu_unchanged
 
 
@@ -411,6 +424,7 @@ CpuInv(c, l) ==
        \/ when_si_a
 
     /\ UNCHANGED cache_to_llc
+    /\ UNCHANGED data_to_llc
     /\ cpu_unchanged
 
 
@@ -472,6 +486,7 @@ CpuInvAck(c, l) ==
 
         /\ UNCHANGED cache_to_llc
         /\ UNCHANGED llc_to_cache
+        /\ UNCHANGED data_to_llc
         /\ cpu_unchanged
 
 
@@ -498,6 +513,7 @@ CpuDataToReq(c, l) ==
 
         /\ UNCHANGED cache_to_llc
         /\ UNCHANGED llc_to_cache
+        /\ UNCHANGED data_to_llc
         /\ cpu_unchanged
 
 
@@ -535,6 +551,7 @@ CpuReplacement(c, l) ==
     /\ cpu_unchanged
     /\ UNCHANGED llc_to_cache
     /\ UNCHANGED cpu_network
+    /\ UNCHANGED data_to_llc
 
 
 CpuPutAck(c, l) ==
@@ -570,6 +587,7 @@ CpuPutAck(c, l) ==
     /\ UNCHANGED cache_to_llc
     /\ UNCHANGED cpu_network
     /\ cpu_unchanged
+    /\ UNCHANGED data_to_llc
 
 
 ----------------------------------------------------------
@@ -649,6 +667,7 @@ LLCGetS(c, l) ==
        \/ when_mutable
 
     /\ llc_unchanged
+    /\ UNCHANGED data_to_llc
 
 
 LLCGetM(c, l) ==
@@ -729,11 +748,12 @@ LLCGetM(c, l) ==
        \/ handle_when_mutable
 
     /\ llc_unchanged
+    /\ UNCHANGED data_to_llc
 
 
 LLCDataM(c, l) ==
     LET
-        req == cache_to_llc[c][1]
+        req == data_to_llc[c][1]
 
         when_s_d ==
             /\ llc[l].status = "S_D"
@@ -743,10 +763,15 @@ LLCDataM(c, l) ==
                     ![l].owner = nil
                 ]
     IN
-    /\ llc_req_existed(c, l, "DataM")
+    /\ data_to_llc[c] # <<>>
+    /\ req.line = l
+    /\ req.type = "DataM"
+    /\ data_to_llc' = [data_to_llc EXCEPT ![c] = Tail(@)]
+
     /\ when_s_d
 
     /\ UNCHANGED llc_to_cache
+    /\ UNCHANGED cache_to_llc
     /\ llc_unchanged
 
 
@@ -796,6 +821,7 @@ LLCPutS(c, l) ==
        \/ when_i
 
     /\ llc_unchanged
+    /\ UNCHANGED data_to_llc
 
 
 LLCPutM(c, l) ==
@@ -834,9 +860,21 @@ LLCPutM(c, l) ==
                 ]
             /\ send_put_ack
 
-        when_s ==
+        when_s_last ==
             /\ llc[l].status = "S"
-            /\ UNCHANGED llc
+            /\ llc[l].sharer = {c}
+            /\ llc' = [llc EXCEPT
+                    ![l].status = "I",
+                    ![l].sharer = {}
+                ]
+            /\ send_put_ack
+
+        when_s_not_last ==
+            /\ llc[l].status = "S"
+            /\ llc[l].sharer # {c}
+            /\ llc' = [llc EXCEPT
+                    ![l].sharer = @ \ {c}
+                ]
             /\ send_put_ack
 
         when_i ==
@@ -848,10 +886,12 @@ LLCPutM(c, l) ==
     /\ \/ when_m_owner
        \/ when_m_non_owner
        \/ when_sd
-       \/ when_s
+       \/ when_s_last
+       \/ when_s_not_last
        \/ when_i
 
     /\ llc_unchanged
+    /\ UNCHANGED data_to_llc
 
 ----------------------------------------------------------
 
@@ -860,7 +900,7 @@ StopCpuAction ==
     /\ stopped' = TRUE
     /\ UNCHANGED cache
     /\ UNCHANGED llc
-    /\ UNCHANGED <<cache_to_llc, llc_to_cache, cpu_network>>
+    /\ UNCHANGED <<cache_to_llc, llc_to_cache, cpu_network, data_to_llc>>
     /\ UNCHANGED mem
     /\ UNCHANGED global_data
 
@@ -870,6 +910,7 @@ StopCond ==
     /\ \A c \in CPU:
         /\ cache_to_llc[c] = <<>>
         /\ llc_to_cache[c] = <<>>
+        /\ data_to_llc[c] = <<>>
     /\ cpu_network = {}
 
 TerminateCond ==
