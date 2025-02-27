@@ -1103,4 +1103,6 @@ NotPossibleCpuStates ==
             ~neg_cond
 
 
+Sym == Permutations(CPU) \union Permutations(Line)
+
 ====
