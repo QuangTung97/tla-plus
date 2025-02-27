@@ -1144,6 +1144,16 @@ NotPossibleCpuStates ==
             ~neg_cond
 
 
+CacheToLLCInv ==
+    \A c \in CPU:
+        Len(cache_to_llc[c]) <= Cardinality(Line)
+
+
+DataToLLCInv ==
+    \A c \in CPU:
+        Len(data_to_llc[c]) <= Cardinality(Line)
+
+
 Sym == Permutations(CPU) \union Permutations(Line)
 
 ====
