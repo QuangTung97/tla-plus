@@ -131,8 +131,15 @@ SendRequest ==
             key: Key,
             val: Value
         ]
+
+        children_req == [
+            type: {"Children"},
+            xid: Xid,
+            group: Group,
+            key: Key
+        ]
     IN
-        connect_req \union create_req
+        UNION {connect_req, create_req, children_req}
 
 RecvRequest ==
     LET
@@ -145,7 +152,7 @@ RecvRequest ==
             key: SeqKey
         ]
     IN
-        connect_resp \union create_resp
+        UNION {connect_resp, create_resp}
 
 ClientConn == [
     send: Seq(SendRequest),
@@ -167,13 +174,24 @@ ClientMainPC == {
 }
 
 
-ClientRequest == [
-    xid: Xid,
-    op: {"Create"},
-    group: Group,
-    key: Key,
-    val: Value
-]
+ClientRequest ==
+    LET
+        create_req == [
+            xid: Xid,
+            op: {"Create"},
+            group: Group,
+            key: Key,
+            val: Value
+        ]
+
+        children_req == [
+            xid: Xid,
+            op: {"Children"},
+            group: Group,
+            key: Key
+        ]
+    IN
+        UNION {create_req, children_req}
 
 HandleQueueEntry == [
     req: ClientRequest,
@@ -409,9 +427,18 @@ ClientCreate(c, g, k, v) ==
 
 
 ClientChildren(c, g, k) ==
+    LET
+        req == [
+            xid |-> next_xid'[c],
+            op |-> "Children",
+            group |-> g,
+            key |-> k
+        ]
+    IN
     /\ num_action < max_action
     /\ num_action' = num_action + 1
     /\ next_xid' = [next_xid EXCEPT ![c] = @ + 1]
+    /\ push_to_send_queue(c, req)
 
     /\ action_unchanged
 
@@ -427,19 +454,32 @@ send_thread_unchanged ==
     /\ UNCHANGED <<next_xid, num_action, handled_xid, local_xid>>
     /\ UNCHANGED num_conn_closed
 
-ClientHandleSend(c) ==
-    LET
-        conn == client_conn[c]
 
-        req == send_queue[c][1]
-
-        net_req == [
+net_req_from_req(req) ==
+    IF req.op = "Create" THEN
+        [
             type |-> "Create",
             xid |-> req.xid,
             group |-> req.group,
             key |-> req.key,
             val |-> req.val
         ]
+    ELSE IF req.op = "Children" THEN
+        [
+            type |-> "Children",
+            xid |-> req.xid,
+            group |-> req.group,
+            key |-> req.key
+        ]
+    ELSE
+        nil
+
+ClientHandleSend(c) ==
+    LET
+        conn == client_conn[c]
+
+        req == send_queue[c][1]
+        net_req == net_req_from_req(req)
 
         is_closed == global_conn[conn].closed
 
@@ -693,6 +733,13 @@ ServerHandleConnect ==
     \E conn \in DOMAIN active_conns: doHandleConnect(conn)
 
 
+server_consume_and_resp(conn, resp) ==
+    /\ global_conn[conn].send # <<>>
+    /\ global_conn' = [global_conn EXCEPT
+            ![conn].send = Tail(@),
+            ![conn].recv = Append(@, resp)
+        ]
+
 
 doHandleCreate(conn) ==
     LET
@@ -718,12 +765,8 @@ doHandleCreate(conn) ==
             key |-> req.key
         ]
     IN
-    /\ global_conn[conn].send # <<>>
-    /\ global_conn' = [global_conn EXCEPT
-            ![conn].send = Tail(@),
-            ![conn].recv = Append(@, resp)
-        ]
-
+    /\ server_consume_and_resp(conn, resp)
+    /\ req.type = "Create"
     /\ server_log' = Append(server_log, log)
     /\ server_state' = [server_state EXCEPT
             ![req.group] = mapPut(@, req.key, state_info)]
@@ -732,10 +775,42 @@ doHandleCreate(conn) ==
     /\ UNCHANGED client_vars
     /\ UNCHANGED aux_vars
 
-ServerHandleCreate ==
+doHandleChildren(conn) ==
+    LET
+        req == global_conn[conn].send[1]
+
+        log == [
+            type |-> "Put",
+            zxid |-> gen_new_zxid,
+            group |-> req.group,
+            key |-> req.key,
+            val |-> req.val
+        ]
+
+        state_info == [
+            val |-> req.val,
+            sess |-> nil
+        ]
+
+        resp == [
+            type |-> "CreateReply",
+            xid |-> req.xid,
+            zxid |-> gen_new_zxid,
+            key |-> req.key
+        ]
+    IN
+    /\ server_consume_and_resp(conn, resp)
+    /\ req.type = "Children"
+
+    /\ UNCHANGED <<active_conns, active_sessions>>
+    /\ UNCHANGED client_vars
+    /\ UNCHANGED aux_vars
+
+ServerHandleRequest ==
     \E conn \in DOMAIN active_conns:
         /\ active_conns[conn].sess # nil
-        /\ doHandleCreate(conn)
+        /\ \/ doHandleCreate(conn)
+           \/ doHandleChildren(conn)
 
 ---------------------------------------------------------------------------
 
@@ -789,8 +864,11 @@ Next ==
     \/ \E c \in Client, g \in Group, k \in Key, v \in Value:
         \/ ClientCreate(c, g, k, v)
 
+    \/ \E c \in Client, g \in Group, k \in Key:
+        \/ ClientChildren(c, g, k)
+
     \/ ServerHandleConnect
-    \/ ServerHandleCreate
+    \/ ServerHandleRequest
 
     \/ ConnectionClosed
     \/ Terminated
