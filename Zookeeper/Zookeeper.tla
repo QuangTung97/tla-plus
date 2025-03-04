@@ -58,9 +58,19 @@ mapDelete(m, k) ==
 ASSUME mapDelete(<<3, 4, 5>>, 3) = <<3, 4>>
 
 
+minOf(S) == CHOOSE x \in S: (\A y \in S: y >= x)
+
 maxOf(S) == CHOOSE x \in S: (\A y \in S: y <= x)
 
+ASSUME minOf({4, 2, 3}) = 2
 ASSUME maxOf({4, 2, 3}) = 4
+
+
+seqRange(a, b) ==
+    LET num == b - a + 1 IN
+    [i \in 1..num |-> a + i - 1]
+
+ASSUME seqRange(4, 6) = <<4, 5, 6>>
 
 ---------------------------------------------------------------------------
 
@@ -167,7 +177,7 @@ ClientRequest == [
 
 HandleQueueEntry == [
     req: ClientRequest,
-    zxid: Zxid
+    zxid: NullZxid
 ]
 
 
@@ -270,12 +280,23 @@ ClientConnect(c) ==
         ]
 
         conn == client_conn[c]
+
+        when_normal ==
+            /\ ~global_conn[conn].closed
+            /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "WaitConnect"]
+            /\ conn_send(conn, req)
+            /\ UNCHANGED client_status
+
+        when_closed ==
+            /\ global_conn[conn].closed
+            /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "Init"]
+            /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
+            /\ UNCHANGED global_conn
     IN
     /\ client_main_pc[c] = "ClientConnect"
-    /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "WaitConnect"]
-    /\ conn_send(conn, req)
+    /\ \/ when_normal
+       \/ when_closed
 
-    /\ UNCHANGED client_status
     /\ UNCHANGED <<client_conn, last_session, last_zxid>>
     /\ UNCHANGED send_recv_vars
     /\ UNCHANGED server_vars
@@ -380,14 +401,21 @@ ClientHandleSend(c) ==
             val |-> req.val
         ]
 
+        is_closed == global_conn[conn].closed
+
+        send_to_conn ==
+            /\ global_conn' = [global_conn EXCEPT
+                    ![conn].send = Append(@, net_req)]
+
         when_normal ==
             /\ client_status[c] = "HasSession"
             /\ send_queue[c] # <<>>
             /\ send_queue' = [send_queue EXCEPT ![c] = Tail(@)]
             /\ recv_map' = [recv_map EXCEPT
                     ![c] = mapPut(@, req.xid, req)]
-
-            /\ global_conn' = [global_conn EXCEPT ![conn].send = Append(@, net_req)]
+            /\ IF is_closed
+                THEN UNCHANGED global_conn
+                ELSE send_to_conn
             /\ UNCHANGED client_send_pc
 
         when_disconnected ==
@@ -432,12 +460,28 @@ ClientHandleRecv(c) ==
             /\ UNCHANGED handle_queue
             /\ UNCHANGED client_status
 
+        xid_set == DOMAIN recv_map[c]
+
+        recv_map_xid ==
+            IF xid_set = {}
+                THEN <<>>
+                ELSE seqRange(minOf(xid_set), maxOf(xid_set))
+
+        num_key == Len(recv_map_xid)
+
+        failed_hreq(i) == [
+            req |-> recv_map[c][recv_map_xid[i]],
+            zxid |-> nil
+        ]
+
+        pushed == [i \in 1..num_key |-> failed_hreq(i)]
+
         when_closed ==
             /\ global_conn[conn].closed
             /\ client_recv_pc' = [client_recv_pc EXCEPT ![c] = "Stopped"]
             /\ recv_map' = [recv_map EXCEPT ![c] = <<>>]
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
-            /\ UNCHANGED handle_queue \* TODO
+            /\ handle_queue' = [handle_queue EXCEPT ![c] = @ \o pushed]
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_zxid
             /\ UNCHANGED local_xid
@@ -696,7 +740,6 @@ GlobalConnOnlyHasMaxOneOwner ==
             Cardinality(ref_set) <= 1
 
 
-
 handleXidNextAction ==
     \E c \in Client:
         handled_xid' = [handled_xid EXCEPT ![c] = @ + 1]
@@ -708,5 +751,23 @@ HandledXidInv ==
 HandleXidOnTerminated ==
     TerminateCond =>
         (\A c \in Client: handled_xid[c] = next_xid[c])
+
+
+RecvMapKeyRangeInv ==
+    \A c \in Client:
+        LET d == DOMAIN recv_map[c] IN
+            d # {} => d = minOf(d)..maxOf(d)
+
+
+ConnClosedMustEmpty ==
+    \A conn \in DOMAIN global_conn:
+        global_conn[conn].closed =>
+            /\ global_conn[conn].send = <<>>
+            /\ global_conn[conn].recv = <<>>
+
+
+SendQueueMustEmptyWhenNotHasSession ==
+    \A c \in Client:
+        client_status[c] # "HasSession" => send_queue[c] = <<>>
 
 ====
