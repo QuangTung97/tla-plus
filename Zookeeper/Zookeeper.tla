@@ -482,8 +482,6 @@ ClientHandleRecv(c) ==
         resp == global_conn[conn].recv[1]
 
         when_normal ==
-            /\ ~global_conn[conn].closed
-            /\ global_conn[conn].recv # <<>>
             /\ client_recv_pc' = [client_recv_pc EXCEPT ![c] = "PushToHandle"]
             /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
             /\ last_zxid' = [last_zxid EXCEPT ![c] = resp.zxid]
@@ -517,7 +515,6 @@ ClientHandleRecv(c) ==
         send_queue_remain == [i \in DOMAIN send_queue[c] |-> remain_hreq(i)]
 
         when_closed ==
-            /\ global_conn[conn].closed
             /\ client_recv_pc' = [client_recv_pc EXCEPT ![c] = "Stopped"]
             /\ recv_map' = [recv_map EXCEPT ![c] = <<>>]
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
@@ -527,10 +524,17 @@ ClientHandleRecv(c) ==
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_zxid
             /\ UNCHANGED local_xid
+
+        do_handle_recv ==
+            IF global_conn[conn].closed THEN
+                when_closed
+            ELSE IF global_conn[conn].recv # <<>> THEN
+                when_normal
+            ELSE
+                FALSE
     IN
     /\ client_recv_pc[c] = "Start"
-    /\ \/ when_normal
-       \/ when_closed
+    /\ do_handle_recv
 
     /\ recv_thread_unchanged
     /\ UNCHANGED server_vars
