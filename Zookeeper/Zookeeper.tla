@@ -360,16 +360,32 @@ ClientCreate(c, g, k, v) ==
             key |-> k,
             val |-> v
         ]
+
+        when_has_sess ==
+            /\ send_queue' = [send_queue EXCEPT ![c] = Append(@, req)]
+            /\ UNCHANGED handle_queue
+
+        hreq == [
+            req |-> req,
+            zxid |-> nil
+        ]
+
+        when_not_has_sess ==
+            /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, hreq)]
+            /\ UNCHANGED send_queue
     IN
     /\ num_action < max_action
     /\ num_action' = num_action + 1
     /\ next_xid' = [next_xid EXCEPT ![c] = @ + 1]
-    /\ send_queue' = [send_queue EXCEPT ![c] = Append(@, req)]
+
+    /\ IF client_status[c] = "HasSession"
+        THEN when_has_sess
+        ELSE when_not_has_sess
 
     /\ UNCHANGED client_conn
     /\ UNCHANGED <<client_main_pc, client_send_pc, client_recv_pc>>
     /\ UNCHANGED client_status
-    /\ UNCHANGED <<global_conn, recv_map, handle_queue, handled_xid>>
+    /\ UNCHANGED <<global_conn, recv_map, handled_xid>>
     /\ UNCHANGED local_xid
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED server_vars
@@ -439,7 +455,6 @@ recv_thread_unchanged ==
     /\ UNCHANGED client_main_pc
     /\ UNCHANGED client_send_pc
     /\ UNCHANGED <<last_session>>
-    /\ UNCHANGED <<send_queue>>
     /\ UNCHANGED <<next_xid, num_action, handled_xid>>
     /\ UNCHANGED num_conn_closed
 
@@ -459,6 +474,7 @@ ClientHandleRecv(c) ==
             /\ UNCHANGED recv_map
             /\ UNCHANGED handle_queue
             /\ UNCHANGED client_status
+            /\ UNCHANGED send_queue
 
         xid_set == DOMAIN recv_map[c]
 
@@ -476,12 +492,21 @@ ClientHandleRecv(c) ==
 
         pushed == [i \in 1..num_key |-> failed_hreq(i)]
 
+        remain_hreq(i) == [
+            req |-> send_queue[c][i],
+            zxid |-> nil
+        ]
+
+        send_queue_remain == [i \in DOMAIN send_queue[c] |-> remain_hreq(i)]
+
         when_closed ==
             /\ global_conn[conn].closed
             /\ client_recv_pc' = [client_recv_pc EXCEPT ![c] = "Stopped"]
             /\ recv_map' = [recv_map EXCEPT ![c] = <<>>]
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
-            /\ handle_queue' = [handle_queue EXCEPT ![c] = @ \o pushed]
+            /\ handle_queue' = [handle_queue
+                    EXCEPT ![c] = @ \o pushed \o send_queue_remain]
+            /\ send_queue' = [send_queue EXCEPT ![c] = <<>>]
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_zxid
             /\ UNCHANGED local_xid
@@ -512,6 +537,7 @@ ClientRecvPushToHandle(c) ==
     /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, hreq)]
 
     /\ UNCHANGED client_status
+    /\ UNCHANGED send_queue
     /\ UNCHANGED <<global_conn, last_zxid>>
     /\ recv_thread_unchanged
     /\ UNCHANGED server_vars
