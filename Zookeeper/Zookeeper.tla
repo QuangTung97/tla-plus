@@ -11,7 +11,7 @@ ASSUME
 VARIABLES server_log, server_state, active_conns, active_sessions,
     global_conn,
     client_conn, client_main_pc, last_session, last_zxid,
-    client_send_pc, client_recv_pc,
+    client_send_pc, client_recv_pc, client_status,
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_xid,
     num_conn_closed
@@ -19,7 +19,7 @@ VARIABLES server_log, server_state, active_conns, active_sessions,
 server_vars == <<server_log, server_state, active_conns, active_sessions>>
 client_vars == <<
     client_conn, client_main_pc, last_session, last_zxid,
-    client_send_pc, client_recv_pc,
+    client_send_pc, client_recv_pc, client_status,
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_xid
 >>
@@ -190,6 +190,7 @@ TypeOK ==
 
     /\ client_send_pc \in [Client -> {"Stopped", "Start"}]
     /\ client_recv_pc \in [Client -> {"Stopped", "Start", "PushToHandle"}]
+    /\ client_status \in [Client -> {"Connecting", "HasSession", "Disconnected"}]
 
     /\ send_queue \in [Client -> Seq(ClientRequest)]
     /\ DOMAIN recv_map = Client
@@ -219,6 +220,8 @@ Init ==
 
     /\ client_send_pc = [c \in Client |-> "Stopped"]
     /\ client_recv_pc = [c \in Client |-> "Stopped"]
+    /\ client_status = [c \in Client |-> "Disconnected"]
+
     /\ send_queue = [c \in Client |-> <<>>]
     /\ recv_map = [c \in Client |-> <<>>]
     /\ handle_queue = [c \in Client |-> <<>>]
@@ -248,6 +251,7 @@ NewConnection(c) ==
     /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "ClientConnect"]
     /\ global_conn' = Append(global_conn, init_client_conn)
     /\ client_conn' = [client_conn EXCEPT ![c] = new_conn]
+    /\ client_status' = [client_status EXCEPT ![c] = "Connecting"]
 
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED send_recv_vars
@@ -271,6 +275,7 @@ ClientConnect(c) ==
     /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "WaitConnect"]
     /\ conn_send(conn, req)
 
+    /\ UNCHANGED client_status
     /\ UNCHANGED <<client_conn, last_session, last_zxid>>
     /\ UNCHANGED send_recv_vars
     /\ UNCHANGED server_vars
@@ -288,10 +293,12 @@ ClientConnectReply(c) ==
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "StartSendRecv"]
             /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
             /\ last_session' = [last_session EXCEPT ![c] = resp.sess]
+            /\ client_status' = [client_status EXCEPT ![c] = "HasSession"]
 
         when_closed ==
             /\ global_conn[conn].closed
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "Init"]
+            /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_session
     IN
@@ -312,6 +319,7 @@ ClientStartThreads(c) ==
     /\ client_recv_pc' = [client_recv_pc EXCEPT ![c] = "Start"]
 
     /\ UNCHANGED client_conn
+    /\ UNCHANGED client_status
     /\ UNCHANGED <<send_queue, recv_map, handle_queue>>
     /\ UNCHANGED <<num_action, next_xid, handled_xid>>
     /\ UNCHANGED local_xid
@@ -339,6 +347,7 @@ ClientCreate(c, g, k, v) ==
 
     /\ UNCHANGED client_conn
     /\ UNCHANGED <<client_main_pc, client_send_pc, client_recv_pc>>
+    /\ UNCHANGED client_status
     /\ UNCHANGED <<global_conn, recv_map, handle_queue, handled_xid>>
     /\ UNCHANGED local_xid
     /\ UNCHANGED <<last_session, last_zxid>>
@@ -350,6 +359,7 @@ ClientCreate(c, g, k, v) ==
 send_thread_unchanged ==
     /\ UNCHANGED client_conn
     /\ UNCHANGED client_main_pc
+    /\ UNCHANGED client_status
     /\ UNCHANGED client_recv_pc
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED <<handle_queue>>
@@ -369,17 +379,29 @@ ClientHandleSend(c) ==
             key |-> req.key,
             val |-> req.val
         ]
+
+        when_normal ==
+            /\ client_status[c] = "HasSession"
+            /\ send_queue[c] # <<>>
+            /\ send_queue' = [send_queue EXCEPT ![c] = Tail(@)]
+            /\ recv_map' = [recv_map EXCEPT
+                    ![c] = mapPut(@, req.xid, req)]
+
+            /\ global_conn' = [global_conn EXCEPT ![conn].send = Append(@, net_req)]
+            /\ UNCHANGED client_send_pc
+
+        when_disconnected ==
+            /\ client_status[c] # "HasSession"
+            /\ client_send_pc' = [client_send_pc EXCEPT ![c] = "Stopped"]
+            /\ UNCHANGED recv_map
+            /\ UNCHANGED global_conn
+            /\ UNCHANGED send_queue
+            /\ UNCHANGED client_status
     IN
     /\ client_send_pc[c] = "Start"
+    /\ \/ when_normal
+       \/ when_disconnected
 
-    /\ send_queue[c] # <<>>
-    /\ send_queue' = [send_queue EXCEPT ![c] = Tail(@)]
-    /\ recv_map' = [recv_map EXCEPT
-            ![c] = mapPut(@, req.xid, req)]
-
-    /\ global_conn' = [global_conn EXCEPT ![conn].send = Append(@, net_req)]
-
-    /\ UNCHANGED client_send_pc
     /\ send_thread_unchanged
     /\ UNCHANGED server_vars
 
@@ -408,11 +430,13 @@ ClientHandleRecv(c) ==
             /\ local_xid' = [local_xid EXCEPT ![c] = resp.xid]
             /\ UNCHANGED recv_map
             /\ UNCHANGED handle_queue
+            /\ UNCHANGED client_status
 
         when_closed ==
             /\ global_conn[conn].closed
             /\ client_recv_pc' = [client_recv_pc EXCEPT ![c] = "Stopped"]
             /\ recv_map' = [recv_map EXCEPT ![c] = <<>>]
+            /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
             /\ UNCHANGED handle_queue \* TODO
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_zxid
@@ -443,6 +467,7 @@ ClientRecvPushToHandle(c) ==
     /\ local_xid' = [local_xid EXCEPT ![c] = nil]
     /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, hreq)]
 
+    /\ UNCHANGED client_status
     /\ UNCHANGED <<global_conn, last_zxid>>
     /\ recv_thread_unchanged
     /\ UNCHANGED server_vars
@@ -451,6 +476,7 @@ ClientRecvPushToHandle(c) ==
 handle_thread_unchanged ==
     /\ UNCHANGED client_conn
     /\ UNCHANGED client_main_pc
+    /\ UNCHANGED client_status
     /\ UNCHANGED <<client_send_pc, client_recv_pc>>
     /\ UNCHANGED <<last_session>>
     /\ UNCHANGED <<send_queue, recv_map>>
@@ -469,6 +495,26 @@ ClientDoHandle(c) ==
 
     /\ handle_thread_unchanged
     /\ UNCHANGED server_vars
+
+
+ClientWaitConnClosed(c) ==
+    /\ client_main_pc[c] = "WaitConnClosed"
+    /\ client_send_pc[c] = "Stopped"
+    /\ client_recv_pc[c] = "Stopped"
+
+    /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "Init"]
+    /\ client_conn' = [client_conn EXCEPT ![c] = nil]
+
+    /\ UNCHANGED client_status
+    /\ UNCHANGED <<client_send_pc, client_recv_pc>>
+    /\ UNCHANGED global_conn
+    /\ UNCHANGED <<send_queue, handle_queue, recv_map>>
+    /\ UNCHANGED <<next_xid, handled_xid, local_xid>>
+    /\ UNCHANGED <<last_session, last_zxid>>
+    /\ UNCHANGED num_action
+
+    /\ UNCHANGED server_vars
+    /\ UNCHANGED aux_vars
 
 ---------------------------------------------------------------------------
 
@@ -599,6 +645,7 @@ ConnectionClosed ==
 
 TerminateCond ==
     /\ \A c \in Client:
+        /\ client_conn[c] # nil
         /\ ~global_conn[client_conn[c]].closed
         /\ client_main_pc[c] = "WaitConnClosed"
         /\ client_send_pc[c] = "Start"
@@ -625,6 +672,7 @@ Next ==
         \/ ClientHandleRecv(c)
         \/ ClientRecvPushToHandle(c)
         \/ ClientDoHandle(c)
+        \/ ClientWaitConnClosed(c)
         \/ ServerAcceptConn(c)
 
     \/ \E c \in Client, g \in Group, k \in Key, v \in Value:
