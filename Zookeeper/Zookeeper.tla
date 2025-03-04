@@ -198,7 +198,7 @@ TypeOK ==
     /\ last_session \in [Client -> NullSession]
     /\ last_zxid \in [Client -> NullZxid]
 
-    /\ client_send_pc \in [Client -> {"Stopped", "Start"}]
+    /\ client_send_pc \in [Client -> {"Stopped", "Start", "Sleep"}]
     /\ client_recv_pc \in [Client -> {"Stopped", "Start", "PushToHandle"}]
     /\ client_status \in [Client -> {"Connecting", "HasSession", "Disconnected"}]
 
@@ -351,9 +351,15 @@ ClientStartThreads(c) ==
 
 ---------------------------------------------------------------------------
 
+notify_send_thread(c) ==
+    IF client_send_pc[c] = "Sleep"
+        THEN client_send_pc' = [client_send_pc EXCEPT ![c] = "Start"]
+        ELSE UNCHANGED client_send_pc
+
+
 action_unchanged ==
     /\ UNCHANGED client_conn
-    /\ UNCHANGED <<client_main_pc, client_send_pc, client_recv_pc>>
+    /\ UNCHANGED <<client_main_pc, client_recv_pc>>
     /\ UNCHANGED client_status
     /\ UNCHANGED <<global_conn, recv_map, handled_xid>>
     /\ UNCHANGED local_xid
@@ -366,6 +372,7 @@ push_to_send_queue(c, req) ==
     LET
         when_has_sess ==
             /\ send_queue' = [send_queue EXCEPT ![c] = Append(@, req)]
+            /\ notify_send_thread(c)
             /\ UNCHANGED handle_queue
 
         hreq == [
@@ -376,6 +383,7 @@ push_to_send_queue(c, req) ==
         when_not_has_sess ==
             /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, hreq)]
             /\ UNCHANGED send_queue
+            /\ UNCHANGED client_send_pc
     IN
     IF client_status[c] = "HasSession"
         THEN when_has_sess
@@ -396,7 +404,6 @@ ClientCreate(c, g, k, v) ==
     /\ num_action' = num_action + 1
     /\ next_xid' = [next_xid EXCEPT ![c] = @ + 1]
     /\ push_to_send_queue(c, req)
-
 
     /\ action_unchanged
 
@@ -441,8 +448,6 @@ ClientHandleSend(c) ==
                     ![conn].send = Append(@, net_req)]
 
         when_normal ==
-            /\ client_status[c] = "HasSession"
-            /\ send_queue[c] # <<>>
             /\ send_queue' = [send_queue EXCEPT ![c] = Tail(@)]
             /\ recv_map' = [recv_map EXCEPT
                     ![c] = mapPut(@, req.xid, req)]
@@ -452,16 +457,29 @@ ClientHandleSend(c) ==
             /\ UNCHANGED client_send_pc
 
         when_disconnected ==
-            /\ client_status[c] # "HasSession"
             /\ client_send_pc' = [client_send_pc EXCEPT ![c] = "Stopped"]
             /\ UNCHANGED recv_map
             /\ UNCHANGED global_conn
             /\ UNCHANGED send_queue
             /\ UNCHANGED client_status
+
+        goto_sleep ==
+            /\ client_send_pc' = [client_send_pc EXCEPT ![c] = "Sleep"]
+            /\ UNCHANGED recv_map
+            /\ UNCHANGED global_conn
+            /\ UNCHANGED send_queue
+            /\ UNCHANGED client_status
+
+        do_handle_send ==
+            IF client_status[c] # "HasSession" THEN
+                when_disconnected
+            ELSE IF send_queue[c] # <<>> THEN
+                when_normal
+            ELSE
+                goto_sleep
     IN
     /\ client_send_pc[c] = "Start"
-    /\ \/ when_normal
-       \/ when_disconnected
+    /\ do_handle_send
 
     /\ send_thread_unchanged
     /\ UNCHANGED server_vars
@@ -470,7 +488,6 @@ ClientHandleSend(c) ==
 recv_thread_unchanged ==
     /\ UNCHANGED client_conn
     /\ UNCHANGED client_main_pc
-    /\ UNCHANGED client_send_pc
     /\ UNCHANGED <<last_session>>
     /\ UNCHANGED <<next_xid, num_action, handled_xid>>
     /\ UNCHANGED num_conn_closed
@@ -490,6 +507,7 @@ ClientHandleRecv(c) ==
             /\ UNCHANGED handle_queue
             /\ UNCHANGED client_status
             /\ UNCHANGED send_queue
+            /\ UNCHANGED client_send_pc
 
         xid_set == DOMAIN recv_map[c]
 
@@ -521,6 +539,7 @@ ClientHandleRecv(c) ==
             /\ handle_queue' = [handle_queue
                     EXCEPT ![c] = @ \o pushed \o send_queue_remain]
             /\ send_queue' = [send_queue EXCEPT ![c] = <<>>]
+            /\ notify_send_thread(c)
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_zxid
             /\ UNCHANGED local_xid
@@ -559,6 +578,7 @@ ClientRecvPushToHandle(c) ==
 
     /\ UNCHANGED client_status
     /\ UNCHANGED send_queue
+    /\ UNCHANGED client_send_pc
     /\ UNCHANGED <<global_conn, last_zxid>>
     /\ recv_thread_unchanged
     /\ UNCHANGED server_vars
@@ -739,7 +759,7 @@ TerminateCond ==
         /\ client_conn[c] # nil
         /\ ~global_conn[client_conn[c]].closed
         /\ client_main_pc[c] = "WaitConnClosed"
-        /\ client_send_pc[c] = "Start"
+        /\ client_send_pc[c] = "Sleep"
         /\ client_recv_pc[c] = "Start"
         /\ send_queue[c] = <<>>
         /\ handle_queue[c] = <<>>
