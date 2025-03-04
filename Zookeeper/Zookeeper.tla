@@ -116,6 +116,25 @@ ServerConnInfo == [
 
 Xid == 30..39
 
+ClientRequest ==
+    LET
+        create_req == [
+            xid: Xid,
+            type: {"Create"},
+            group: Group,
+            key: Key,
+            val: Value
+        ]
+
+        children_req == [
+            xid: Xid,
+            type: {"Children"},
+            group: Group,
+            key: Key
+        ]
+    IN
+        UNION {create_req, children_req}
+
 SendRequest ==
     LET
         connect_req == [
@@ -123,23 +142,8 @@ SendRequest ==
             sess: NullSession,
             seen_zxid: NullZxid
         ]
-
-        create_req == [
-            type: {"Create"},
-            xid: Xid,
-            group: Group,
-            key: Key,
-            val: Value
-        ]
-
-        children_req == [
-            type: {"Children"},
-            xid: Xid,
-            group: Group,
-            key: Key
-        ]
     IN
-        UNION {connect_req, create_req, children_req}
+        UNION {connect_req, ClientRequest}
 
 RecvRequest ==
     LET
@@ -181,24 +185,6 @@ ClientMainPC == {
 }
 
 
-ClientRequest ==
-    LET
-        create_req == [
-            xid: Xid,
-            op: {"Create"},
-            group: Group,
-            key: Key,
-            val: Value
-        ]
-
-        children_req == [
-            xid: Xid,
-            op: {"Children"},
-            group: Group,
-            key: Key
-        ]
-    IN
-        UNION {create_req, children_req}
 
 HandleQueueEntry == [
     req: ClientRequest,
@@ -419,7 +405,7 @@ ClientCreate(c, g, k, v) ==
     LET
         req == [
             xid |-> next_xid'[c],
-            op |-> "Create",
+            type |-> "Create",
             group |-> g,
             key |-> k,
             val |-> v
@@ -437,7 +423,7 @@ ClientChildren(c, g, k) ==
     LET
         req == [
             xid |-> next_xid'[c],
-            op |-> "Children",
+            type |-> "Children",
             group |-> g,
             key |-> k
         ]
@@ -462,37 +448,15 @@ send_thread_unchanged ==
     /\ UNCHANGED num_conn_closed
 
 
-net_req_from_req(req) ==
-    IF req.op = "Create" THEN
-        [
-            type |-> "Create",
-            xid |-> req.xid,
-            group |-> req.group,
-            key |-> req.key,
-            val |-> req.val
-        ]
-    ELSE IF req.op = "Children" THEN
-        [
-            type |-> "Children",
-            xid |-> req.xid,
-            group |-> req.group,
-            key |-> req.key
-        ]
-    ELSE
-        nil
-
 ClientHandleSend(c) ==
     LET
         conn == client_conn[c]
-
         req == send_queue[c][1]
-        net_req == net_req_from_req(req)
-
         is_closed == global_conn[conn].closed
 
         send_to_conn ==
             /\ global_conn' = [global_conn EXCEPT
-                    ![conn].send = Append(@, net_req)]
+                    ![conn].send = Append(@, req)]
 
         when_normal ==
             /\ send_queue' = [send_queue EXCEPT ![c] = Tail(@)]
