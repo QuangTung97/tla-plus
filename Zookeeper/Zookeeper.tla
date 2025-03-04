@@ -351,16 +351,19 @@ ClientStartThreads(c) ==
 
 ---------------------------------------------------------------------------
 
-ClientCreate(c, g, k, v) ==
-    LET
-        req == [
-            xid |-> next_xid'[c],
-            op |-> "Create",
-            group |-> g,
-            key |-> k,
-            val |-> v
-        ]
+action_unchanged ==
+    /\ UNCHANGED client_conn
+    /\ UNCHANGED <<client_main_pc, client_send_pc, client_recv_pc>>
+    /\ UNCHANGED client_status
+    /\ UNCHANGED <<global_conn, recv_map, handled_xid>>
+    /\ UNCHANGED local_xid
+    /\ UNCHANGED <<last_session, last_zxid>>
+    /\ UNCHANGED server_vars
+    /\ UNCHANGED num_conn_closed
 
+
+push_to_send_queue(c, req) ==
+    LET
         when_has_sess ==
             /\ send_queue' = [send_queue EXCEPT ![c] = Append(@, req)]
             /\ UNCHANGED handle_queue
@@ -374,22 +377,36 @@ ClientCreate(c, g, k, v) ==
             /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, hreq)]
             /\ UNCHANGED send_queue
     IN
+    IF client_status[c] = "HasSession"
+        THEN when_has_sess
+        ELSE when_not_has_sess
+
+
+ClientCreate(c, g, k, v) ==
+    LET
+        req == [
+            xid |-> next_xid'[c],
+            op |-> "Create",
+            group |-> g,
+            key |-> k,
+            val |-> v
+        ]
+    IN
+    /\ num_action < max_action
+    /\ num_action' = num_action + 1
+    /\ next_xid' = [next_xid EXCEPT ![c] = @ + 1]
+    /\ push_to_send_queue(c, req)
+
+
+    /\ action_unchanged
+
+
+ClientChildren(c, g, k) ==
     /\ num_action < max_action
     /\ num_action' = num_action + 1
     /\ next_xid' = [next_xid EXCEPT ![c] = @ + 1]
 
-    /\ IF client_status[c] = "HasSession"
-        THEN when_has_sess
-        ELSE when_not_has_sess
-
-    /\ UNCHANGED client_conn
-    /\ UNCHANGED <<client_main_pc, client_send_pc, client_recv_pc>>
-    /\ UNCHANGED client_status
-    /\ UNCHANGED <<global_conn, recv_map, handled_xid>>
-    /\ UNCHANGED local_xid
-    /\ UNCHANGED <<last_session, last_zxid>>
-    /\ UNCHANGED server_vars
-    /\ UNCHANGED num_conn_closed
+    /\ action_unchanged
 
 ---------------------------------------------------------------------------
 
