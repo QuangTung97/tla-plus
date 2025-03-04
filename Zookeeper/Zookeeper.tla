@@ -103,7 +103,7 @@ LogEntry ==
     sessionEntry \union putEntry
 
 
-SeqKey == Key \union (Key \X (1..20))
+SeqKey == Key \* TODO \union (Key \X (1..20))
 
 StateInfo == [
     val: Value,
@@ -151,8 +151,15 @@ RecvRequest ==
             zxid: Zxid,
             key: SeqKey
         ]
+
+        children_resp == [
+            type: {"ChildrenReply"},
+            xid: Xid,
+            zxid: Zxid,
+            children: SUBSET SeqKey
+        ]
     IN
-        UNION {connect_resp, create_resp}
+        UNION {connect_resp, create_resp, children_resp}
 
 ClientConn == [
     send: Seq(SendRequest),
@@ -793,14 +800,17 @@ doHandleChildren(conn) ==
         ]
 
         resp == [
-            type |-> "CreateReply",
+            type |-> "ChildrenReply",
             xid |-> req.xid,
             zxid |-> gen_new_zxid,
-            key |-> req.key
+            children |-> DOMAIN server_state[req.group]
         ]
     IN
     /\ server_consume_and_resp(conn, resp)
     /\ req.type = "Children"
+
+    /\ UNCHANGED server_log
+    /\ UNCHANGED server_state
 
     /\ UNCHANGED <<active_conns, active_sessions>>
     /\ UNCHANGED client_vars
