@@ -24,6 +24,7 @@ vars == <<server_vars, client_vars, aux_vars>>
 
 Session == 11..(10 + value_range)
 Zxid == 21..(20 + value_range)
+Xid == 30..(30 + value_range)
 
 NullSession == Session \union {nil}
 NullZxid == Zxid \union {nil}

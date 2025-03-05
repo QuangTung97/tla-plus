@@ -60,6 +60,7 @@ Zxid == ZK!Zxid
 NullZxid == ZK!NullZxid
 Session == ZK!Session
 NullSession == ZK!NullSession
+Xid == ZK!Xid
 
 LogEntry == ZK!LogEntry
 
@@ -69,59 +70,14 @@ ServerConnInfo == [
     sess: NullSession
 ]
 
-Xid == 30..39
 
-ClientRequest ==
-    LET
-        create_req == [
-            xid: Xid,
-            type: {"Create"},
-            group: Group,
-            key: Key,
-            val: Value
-        ]
+ClientRequest == ZK!ClientRequest
 
-        children_req == [
-            xid: Xid,
-            type: {"Children"},
-            group: Group
-        ]
-    IN
-        UNION {create_req, children_req}
-
-SendRequest ==
-    LET
-        connect_req == [
-            type: {"Connect"},
-            sess: NullSession,
-            seen_zxid: NullZxid
-        ]
-    IN
-        UNION {connect_req, ClientRequest}
-
-RecvRequest ==
-    LET
-        connect_resp == [type: {"ConnectReply"}, sess: NullSession]
-
-        create_resp == [
-            type: {"CreateReply"},
-            xid: Xid,
-            zxid: Zxid,
-            key: Key
-        ]
-
-        children_resp == [
-            type: {"ChildrenReply"},
-            xid: Xid,
-            zxid: Zxid,
-            children: SUBSET Key
-        ]
-    IN
-        UNION {connect_resp, create_resp, children_resp}
+HandleRequest == ZK!HandleRequest
 
 ClientConn == [
-    send: Seq(SendRequest),
-    recv: Seq(RecvRequest),
+    send: Seq(ClientRequest),
+    recv: Seq(HandleRequest),
     closed: BOOLEAN \* TODO add confirmed closed
 ]
 
