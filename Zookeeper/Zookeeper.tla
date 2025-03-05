@@ -14,7 +14,7 @@ VARIABLES server_log, server_state, active_conns, active_sessions,
     client_send_pc, client_recv_pc, client_status,
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_xid,
-    num_fail
+    num_fail, core_num_fail
 
 server_vars == <<server_log, server_state, active_conns, active_sessions>>
 client_vars == <<
@@ -24,17 +24,26 @@ client_vars == <<
     num_action, next_xid, handled_xid, local_xid
 >>
 
-aux_vars == <<num_fail>>
+aux_vars == <<num_fail, core_num_fail>>
 vars == <<server_vars, global_conn, client_vars, aux_vars>>
 
 ---------------------------------------------------------------------------
 
+client_connect_req == [
+    type |-> "Connect",
+    sess |-> nil,
+    seen_zxid |-> nil
+]
+
 zk_client_req ==
     LET
         conn_sending(c) ==
-            IF client_conn[c] = nil
-                THEN <<>>
-                ELSE global_conn[client_conn[c]].send
+            IF client_conn[c] = nil THEN
+                <<>>
+            ELSE IF client_status[c] = "Connecting" THEN
+                <<client_connect_req>>
+            ELSE
+                global_conn[client_conn[c]].send
     IN
     [c \in Client |-> conn_sending(c) \o send_queue[c]]
 
@@ -43,7 +52,7 @@ zk_recv_req ==
         mapped(c) ==
             IF client_conn[c] = nil
                 THEN <<>>
-                ELSE <<>>
+                ELSE global_conn[client_conn[c]].recv
     IN
     [c \in Client |-> mapped(c)]
 
@@ -54,6 +63,7 @@ ZK == INSTANCE Core WITH
     handle_req <- handle_queue,
     client_sess <- last_session,
     active_sess <- active_sessions,
+    num_fail <- core_num_fail,
     value_range <- 10 \* TODO
 
 ---------------------------------------------------------------------------
@@ -141,6 +151,8 @@ TypeOK ==
     /\ local_xid \in [Client -> Xid \union {nil}]
 
     /\ num_fail \in 0..max_fail
+    /\ core_num_fail \in 0..max_fail
+    /\ core_num_fail <= num_fail
 
 
 Init ==
@@ -168,6 +180,7 @@ Init ==
     /\ local_xid = [c \in Client |-> nil]
 
     /\ num_fail = 0
+    /\ core_num_fail = 0
 
 
 ---------------------------------------------------------------------------
@@ -176,7 +189,7 @@ send_recv_vars == <<
     client_send_pc, client_recv_pc,
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_xid,
-    num_fail
+    num_fail, core_num_fail
 >>
 
 NewConnection(c) ==
@@ -292,7 +305,7 @@ action_unchanged ==
     /\ UNCHANGED local_xid
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED server_vars
-    /\ UNCHANGED num_fail
+    /\ UNCHANGED aux_vars
 
 
 new_handle_req(req, zxid, status) == ZK!new_handle_req(req, zxid, status)
@@ -520,7 +533,7 @@ handle_thread_unchanged ==
     /\ UNCHANGED global_conn
     /\ UNCHANGED <<next_xid, num_action>>
     /\ UNCHANGED <<last_zxid, local_xid>>
-    /\ UNCHANGED num_fail
+    /\ UNCHANGED aux_vars
 
 ClientDoHandle(c) ==
     LET
@@ -585,7 +598,7 @@ doHandleConnect(conn) ==
         new_sess ==
             IF active_sessions = {}
                 THEN 11
-                ELSE maxOf(active_sessions) + 1
+                ELSE maxOf(active_sessions) + 1 \* TODO fix
 
         log == [
             type |-> "NewSession",
@@ -713,6 +726,7 @@ ConnectionClosed ==
                 ![conn].send = <<>>,
                 ![conn].recv = <<>>
             ]
+        /\ UNCHANGED core_num_fail
         /\ UNCHANGED server_vars
         /\ UNCHANGED client_vars
 
