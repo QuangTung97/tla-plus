@@ -30,6 +30,30 @@ vars == <<server_vars, global_conn, client_vars, aux_vars>>
 
 ---------------------------------------------------------------------------
 
+new_handle_req(req, zxid, status) == [
+    req |-> req,
+    zxid |-> zxid,
+    resp |-> nil,
+    status |-> status
+]
+
+failed_hreq_from_recv_map(c) ==
+    LET
+        xid_set == DOMAIN recv_map[c]
+
+        recv_map_xid ==
+            IF xid_set = {}
+                THEN <<>>
+                ELSE seqRange(minOf(xid_set), maxOf(xid_set))
+
+        num_key == Len(recv_map_xid)
+
+        failed_hreq(i) == new_handle_req(
+            recv_map[c][recv_map_xid[i]], nil, "NetErr"
+        )
+    IN
+    [i \in 1..num_key |-> failed_hreq(i)]
+
 client_connect_req == [
     type |-> "Connect",
     sess |-> nil,
@@ -50,13 +74,23 @@ zk_client_req ==
 
 zk_recv_req ==
     LET
+        send_list(c) == global_conn[client_conn[c]].send \o send_queue[c]
+
+        pending_xid(c) == {req.xid: req \in Range(send_list(c))}
+
+        filtered(c) ==
+            LET
+                filter_cond(hreq) == hreq.req.xid \notin pending_xid(c)
+            IN
+            SelectSeq(failed_hreq_from_recv_map(c), filter_cond)
+
         mapped(c) ==
             IF client_conn[c] = nil THEN
                 <<>>
             ELSE IF client_status[c] = "Connecting" THEN
                 expect_recv[c]
             ELSE
-                global_conn[client_conn[c]].recv
+                filtered(c) \o global_conn[client_conn[c]].recv
     IN
     [c \in Client |-> mapped(c)]
 
@@ -321,7 +355,6 @@ action_unchanged ==
     /\ UNCHANGED aux_vars
 
 
-new_handle_req(req, zxid, status) == ZK!new_handle_req(req, zxid, status)
 
 
 push_to_send_queue(c, req) ==
@@ -444,6 +477,7 @@ recv_thread_unchanged ==
     /\ UNCHANGED <<next_xid, num_action, handled_xid>>
     /\ UNCHANGED <<num_fail, expect_send, expect_recv>>
 
+
 ClientHandleRecv(c) ==
     LET
         conn == client_conn[c]
@@ -461,21 +495,7 @@ ClientHandleRecv(c) ==
             /\ UNCHANGED send_queue
             /\ UNCHANGED client_send_pc
 
-        xid_set == DOMAIN recv_map[c]
-
-        recv_map_xid ==
-            IF xid_set = {}
-                THEN <<>>
-                ELSE seqRange(minOf(xid_set), maxOf(xid_set))
-
-        num_key == Len(recv_map_xid)
-
-        failed_hreq(i) == [
-            req |-> recv_map[c][recv_map_xid[i]],
-            zxid |-> nil
-        ]
-
-        pushed == [i \in 1..num_key |-> failed_hreq(i)]
+        pushed == failed_hreq_from_recv_map(c)
 
         remain_hreq(i) == [
             req |-> send_queue[c][i],
@@ -699,6 +719,7 @@ doHandleCreate(conn) ==
 doHandleChildren(conn) ==
     LET
         req == global_conn[conn].send[1]
+        g == req.group
 
         log == [
             type |-> "Put",
@@ -708,19 +729,13 @@ doHandleChildren(conn) ==
             val |-> req.val
         ]
 
-        state_info == [
-            val |-> req.val,
-            sess |-> nil
+        children == [
+            children |-> DOMAIN server_state[g]
         ]
 
-        resp == [
-            type |-> "ChildrenReply",
-            xid |-> req.xid,
-            zxid |-> gen_new_zxid,
-            children |-> DOMAIN server_state[req.group]
-        ]
+        hreq == ZK!new_handle_with_resp(req, gen_new_zxid, children, "OK")
     IN
-    /\ server_consume_and_resp(conn, resp)
+    /\ server_consume_and_resp(conn, hreq)
     /\ req.type = "Children"
 
     /\ UNCHANGED server_log
