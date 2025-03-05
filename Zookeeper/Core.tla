@@ -7,13 +7,13 @@ CONSTANTS Group, Key, Value, Client, nil,
 ASSUME IsFiniteSet(Group)
 
 VARIABLES server_log, server_state, active_sess,
-    client_status, client_sess, client_req,
+    client_status, client_sess, next_xid, client_req,
     recv_req, handle_req, num_action,
     num_fail
 
 server_vars == <<server_log, server_state, active_sess>>
 client_vars == <<
-    client_status, client_sess, client_req,
+    client_status, client_sess, next_xid, client_req,
     recv_req, handle_req, num_action
 >>
 aux_vars == <<num_fail>>
@@ -68,11 +68,13 @@ ClientRequest ==
     LET
         connect_req == [
             type: {"Connect"},
-            sess: NullSession
+            sess: NullSession,
+            seen_zxid: NullZxid
         ]
 
         create_req == [
             type: {"Create"},
+            xid: Xid,
             group: Group,
             key: Key,
             val: NullValue
@@ -80,6 +82,7 @@ ClientRequest ==
 
         children_req == [
             type: {"Children"},
+            xid: Xid,
             group: Group
         ]
     IN
@@ -137,6 +140,7 @@ TypeOK ==
 
     /\ client_status \in [Client -> {"Disconnected", "Connecting", "HasSession"}]
     /\ client_sess \in [Client -> NullSession]
+    /\ next_xid \in [Client -> Xid]
     /\ client_req \in [Client -> Seq(ClientRequest)]
     /\ recv_req \in [Client -> Seq(HandleRequest)]
     /\ handle_req \in [Client -> Seq(HandleRequest)]
@@ -151,6 +155,7 @@ Init ==
 
     /\ client_status = [c \in Client |-> "Disconnected"]
     /\ client_sess = [c \in Client |-> nil]
+    /\ next_xid = [c \in Client |-> 30]
     /\ client_req = [c \in Client |-> <<>>]
     /\ recv_req = [c \in Client |-> <<>>]
     /\ handle_req = [c \in Client |-> <<>>]
@@ -164,13 +169,15 @@ ClientConnect(c) ==
     LET
         req == [
             type |-> "Connect",
-            sess |-> nil
+            sess |-> nil,
+            seen_zxid |-> nil \* TODO
         ]
     IN
     /\ client_status[c] = "Disconnected"
     /\ client_status' = [client_status EXCEPT ![c] = "Connecting"]
     /\ client_req' = [client_req EXCEPT ![c] = Append(@, req)]
 
+    /\ UNCHANGED next_xid
     /\ UNCHANGED client_sess
     /\ UNCHANGED <<recv_req, handle_req>>
     /\ UNCHANGED num_action
@@ -190,6 +197,7 @@ ClientRecvConnect(c) ==
     /\ client_sess' = [client_sess EXCEPT ![c] = req.sess]
 
     /\ UNCHANGED client_req
+    /\ UNCHANGED next_xid
     /\ UNCHANGED num_action
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
@@ -206,7 +214,7 @@ ClientRecvToHandle(c) ==
 
     /\ UNCHANGED client_status
     /\ UNCHANGED client_sess
-    /\ UNCHANGED client_req
+    /\ UNCHANGED <<client_req, next_xid>>
     /\ UNCHANGED num_action
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
@@ -226,9 +234,12 @@ submit_client_req(c, req) ==
     IN
     /\ num_action < max_action
     /\ num_action' = num_action + 1
+    /\ next_xid' = [next_xid EXCEPT ![c] = @ + 1]
+
     /\ IF client_status[c] = "HasSession"
         THEN when_has_sess
         ELSE when_not_has_sess
+
     /\ UNCHANGED recv_req
     /\ UNCHANGED client_status
     /\ UNCHANGED client_sess
@@ -240,6 +251,7 @@ ClientCreate(c, g, k, val) ==
     LET
         req == [
             type |-> "Create",
+            xid |-> next_xid'[c],
             group |-> g,
             key |-> k,
             val |-> val
@@ -252,6 +264,7 @@ ClientChildren(c, g) ==
     LET
         req == [
             type |-> "Children",
+            xid |-> next_xid'[c],
             group |-> g
         ]
     IN
@@ -263,7 +276,7 @@ ClientHandleReq(c) ==
     /\ handle_req' = [handle_req EXCEPT ![c] = Tail(@)]
 
     /\ UNCHANGED num_action
-    /\ UNCHANGED <<client_req, recv_req>>
+    /\ UNCHANGED <<client_req, next_xid, recv_req>>
     /\ UNCHANGED client_status
     /\ UNCHANGED client_sess
     /\ UNCHANGED server_vars
@@ -304,6 +317,7 @@ ClientDisconnect(c) ==
             ![c] = @ \o failed_recv_req \o failed_hreq]
 
     /\ UNCHANGED num_action
+    /\ UNCHANGED next_xid
     /\ UNCHANGED client_sess
     /\ UNCHANGED server_vars
 
@@ -315,6 +329,7 @@ new_zxid ==
         ELSE server_log[Len(server_log)].zxid + 1
 
 server_handle_unchanged ==
+    /\ UNCHANGED next_xid
     /\ UNCHANGED active_sess
     /\ UNCHANGED handle_req
     /\ UNCHANGED client_status
@@ -368,7 +383,7 @@ ServerHandleConnect(c) ==
     /\ UNCHANGED server_state
     /\ UNCHANGED client_sess
     /\ UNCHANGED handle_req
-    /\ UNCHANGED client_status
+    /\ UNCHANGED <<client_status, next_xid>>
     /\ UNCHANGED num_action
     /\ UNCHANGED aux_vars
 
@@ -390,7 +405,7 @@ ServerLoseSession ==
 
         /\ UNCHANGED server_state
         /\ UNCHANGED client_sess
-        /\ UNCHANGED client_req
+        /\ UNCHANGED <<client_req, next_xid>>
         /\ UNCHANGED recv_req
         /\ UNCHANGED handle_req
         /\ UNCHANGED client_status
