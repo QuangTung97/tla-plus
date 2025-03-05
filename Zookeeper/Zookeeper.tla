@@ -29,10 +29,27 @@ vars == <<server_vars, global_conn, client_vars, aux_vars>>
 
 ---------------------------------------------------------------------------
 
+zk_recv_req ==
+    LET
+        mapped(c) ==
+            IF client_conn[c] = nil
+                THEN <<>>
+                ELSE <<>>
+    IN
+    [c \in Client |-> mapped(c)]
+
+zk_map_client_req(req) == funcDeleteKey(req, "xid")
+
+zk_handle_req ==
+    LET
+        map_fn(hreq) == [hreq EXCEPT !.req = zk_map_client_req(@)]
+    IN
+    [c \in Client |-> seqMap(handle_queue[c], map_fn)]
+
 ZK == INSTANCE Core WITH
     client_req <- send_queue, \* TODO
-    recv_req <- nil, \* TODO
-    handle_req <- handle_queue,
+    recv_req <- zk_recv_req,
+    handle_req <- zk_handle_req,
     client_sess <- last_session,
     active_sess <- active_sessions,
     value_range <- 10 \* TODO
@@ -67,8 +84,7 @@ ClientRequest ==
         children_req == [
             xid: Xid,
             type: {"Children"},
-            group: Group,
-            key: Key
+            group: Group
         ]
     IN
         UNION {create_req, children_req}
@@ -123,10 +139,11 @@ ClientMainPC == {
 }
 
 
-
 HandleQueueEntry == [
     req: ClientRequest,
-    zxid: NullZxid
+    zxid: NullZxid,
+    resp: {nil},
+    status: {"OK", "NetErr"}
 ]
 
 
@@ -210,8 +227,8 @@ NewConnection(c) ==
     /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "ClientConnect"]
     /\ global_conn' = Append(global_conn, init_client_conn)
     /\ client_conn' = [client_conn EXCEPT ![c] = new_conn]
-    /\ client_status' = [client_status EXCEPT ![c] = "Connecting"]
 
+    /\ UNCHANGED client_status
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED send_recv_vars
     /\ UNCHANGED server_vars
@@ -326,7 +343,9 @@ push_to_send_queue(c, req) ==
 
         hreq == [
             req |-> req,
-            zxid |-> nil
+            zxid |-> nil,
+            resp |-> nil,
+            status |-> "NetErr"
         ]
 
         when_not_has_sess ==
@@ -357,13 +376,12 @@ ClientCreate(c, g, k, v) ==
     /\ action_unchanged
 
 
-ClientChildren(c, g, k) ==
+ClientChildren(c, g) ==
     LET
         req == [
             xid |-> next_xid'[c],
             type |-> "Children",
-            group |-> g,
-            key |-> k
+            group |-> g
         ]
     IN
     /\ num_action < max_action
@@ -777,7 +795,7 @@ Next ==
         \/ ClientCreate(c, g, k, v)
 
     \/ \E c \in Client, g \in Group, k \in Key:
-        \/ ClientChildren(c, g, k)
+        \/ ClientChildren(c, g)
 
     \/ ServerHandleConnect
     \/ ServerHandleRequest
@@ -788,6 +806,8 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 ---------------------------------------------------------------------------
+
+CoreInv == ZK!Spec
 
 GlobalConnOnlyHasMaxOneOwner ==
     \A i \in DOMAIN global_conn:

@@ -56,4 +56,14 @@ test_map_fn(x) == x * 2
 
 ASSUME seqMap(<<2, 3, 4>>, test_map_fn) = <<4, 6, 8>>
 
+----------------------------------------------------------
+
+funcDeleteKey(f, k) ==
+    LET
+        new_domain == DOMAIN f \ {k}
+    IN
+        [x \in new_domain |-> f[x]]
+
+ASSUME funcDeleteKey(<<4, 5, 6>>, 3) = <<4, 5>>
+
 ====
