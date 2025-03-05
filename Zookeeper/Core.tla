@@ -39,14 +39,19 @@ LogEntry ==
             zxid: Zxid,
             group: Group,
             key: Key,
-            val: Value
+            val: NullValue
         ]
     IN
         UNION {new_sess, put_entry}
 
 StateInfo == [
-    val: Value,
-    sess: NullSession \* For Ephemeral ZNodes
+    val: NullValue,
+    sess: NullSession \* NULL = Ephemeral ZNode
+]
+
+new_state_info(val) == [
+    val |-> val,
+    sess |-> nil
 ]
 
 ClientRequest ==
@@ -77,7 +82,7 @@ HandleRequest ==
         normal == [
             req: ClientRequest,
             zxid: NullZxid,
-            status: {"OK", "NetErr"}
+            status: {"OK", "NetErr", "Existed"}
         ]
     IN
         UNION {new_sess, normal}
@@ -90,6 +95,9 @@ new_handle_req(req, zxid, status) == [
 
 
 ---------------------------------------------------------------------------
+
+CheckTypeOK ==
+    /\ server_log \in Seq(LogEntry)
 
 TypeOK ==
     /\ server_log \in Seq(LogEntry)
@@ -237,6 +245,10 @@ ServerHandleConnect(c) ==
     /\ server_handle_unchanged
 
 
+push_to_recv(c, hreq) ==
+    /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq)]
+
+
 ServerHandleCreate(c) ==
     LET
         req == client_req[c][1]
@@ -248,19 +260,30 @@ ServerHandleCreate(c) ==
 
         log_entry == [
             type |-> "Put",
-            zxid |-> new_zxid
-        ]
-
-        state == [
+            zxid |-> new_zxid,
+            group |-> g,
+            key |-> k,
             val |-> val
         ]
+
+        state == new_state_info(val)
+
+        when_not_existed ==
+            /\ push_to_recv(c, hreq)
+            /\ server_log' = Append(server_log, log_entry)
+            /\ server_state' = [server_state EXCEPT ![g] = mapPut(@, k, state)]
+
+        err_hreq == new_handle_req(req, nil, "Existed")
+
+        when_existed ==
+            /\ push_to_recv(c, err_hreq)
+            /\ UNCHANGED server_log
+            /\ UNCHANGED server_state
     IN
     /\ client_with_req(c, "Create")
-
-    /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq)]
-    /\ server_log' = Append(server_log, log_entry)
-    /\ server_state' = [server_state EXCEPT ![g] = mapPut(@, k, state)]
-
+    /\ IF k \in DOMAIN server_state[g]
+        THEN when_existed
+        ELSE when_not_existed
     /\ server_handle_unchanged
 
 ---------------------------------------------------------------------------
