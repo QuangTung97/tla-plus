@@ -322,7 +322,7 @@ ClientDisconnect(c) ==
     /\ \/ when_has_sess
        \/ when_has_sess_but_server_lost
        \/ when_connecting
-       \/ when_already_disconnected
+       \* \/ when_already_disconnected TODO check
 
     /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
     /\ client_req' = [client_req EXCEPT ![c] = <<>>]

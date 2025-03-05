@@ -37,10 +37,14 @@ client_connect_req == [
 
 zk_client_req ==
     LET
+        is_sending(c) ==
+            /\ client_status[c] = "Connecting"
+            /\ global_conn[client_conn[c]].recv = <<>>
+
         conn_sending(c) ==
             IF client_conn[c] = nil THEN
                 <<>>
-            ELSE IF client_status[c] = "Connecting" THEN
+            ELSE IF is_sending(c) THEN
                 <<client_connect_req>>
             ELSE
                 global_conn[client_conn[c]].send
@@ -59,7 +63,7 @@ zk_recv_req ==
 
 ZK == INSTANCE Core WITH
     client_req <- zk_client_req,
-    recv_req <- zk_recv_req, \* TODO
+    recv_req <- zk_recv_req,
     handle_req <- handle_queue,
     client_sess <- last_session,
     active_sess <- active_sessions,
@@ -106,19 +110,10 @@ ClientMainPC == {
     "WaitConnect", "StartSendRecv", "WaitConnClosed"
 }
 
-
-HandleQueueEntry == [
-    req: ClientRequest,
-    zxid: NullZxid,
-    resp: {nil},
-    status: {"OK", "NetErr"}
-]
-
-
 ---------------------------------------------------------------------------
 
-CheckCoreType ==
-    /\ handle_queue \in [Client -> Seq(HandleRequest)]
+CheckTypeOK ==
+    /\ handle_queue \in [Client -> Seq(ZK!HandleRequest)]
 
 TypeOK ==
     /\ server_log \in Seq(LogEntry)
@@ -144,7 +139,7 @@ TypeOK ==
     /\ \A c \in Client:
         IsMapOf(recv_map[c], Xid, ClientRequest)
 
-    /\ handle_queue \in [Client -> Seq(HandleQueueEntry)]
+    /\ handle_queue \in [Client -> Seq(HandleRequest)]
     /\ num_action \in 0..max_action
     /\ next_xid \in [Client -> Xid]
     /\ handled_xid \in [Client -> Xid]
@@ -187,9 +182,9 @@ Init ==
 
 send_recv_vars == <<
     client_send_pc, client_recv_pc,
-    send_queue, recv_map, handle_queue,
+    send_queue, recv_map,
     num_action, next_xid, handled_xid, local_xid,
-    num_fail, core_num_fail
+    num_fail
 >>
 
 NewConnection(c) ==
@@ -205,6 +200,8 @@ NewConnection(c) ==
     /\ UNCHANGED client_status
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED send_recv_vars
+    /\ UNCHANGED core_num_fail
+    /\ UNCHANGED handle_queue
     /\ UNCHANGED server_vars
 
 
@@ -226,18 +223,21 @@ ClientConnect(c) ==
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "WaitConnect"]
             /\ conn_send(conn, req)
             /\ client_status' = [client_status EXCEPT ![c] = "Connecting"]
+            /\ UNCHANGED core_num_fail
 
         when_closed ==
             /\ global_conn[conn].closed
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "Init"]
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
             /\ UNCHANGED global_conn
+            /\ UNCHANGED core_num_fail
     IN
     /\ client_main_pc[c] = "ClientConnect"
     /\ \/ when_normal
        \/ when_closed
 
     /\ UNCHANGED <<client_conn, last_session, last_zxid>>
+    /\ UNCHANGED handle_queue
     /\ UNCHANGED send_recv_vars
     /\ UNCHANGED server_vars
 
@@ -255,11 +255,15 @@ ClientConnectReply(c) ==
             /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
             /\ last_session' = [last_session EXCEPT ![c] = resp.sess]
             /\ client_status' = [client_status EXCEPT ![c] = "HasSession"]
+            /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, resp)]
+            /\ UNCHANGED core_num_fail
 
         when_closed ==
             /\ global_conn[conn].closed
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "Init"]
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
+            /\ core_num_fail' = core_num_fail + 1
+            /\ UNCHANGED handle_queue
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_session
     IN
