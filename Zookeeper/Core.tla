@@ -291,30 +291,42 @@ ClientDisconnect(c) ==
         recv_req_to_failed(hreq) == new_handle_req(hreq.req, nil, "NetErr")
         failed_recv_req == seqMap(recv_req[c], recv_req_to_failed)
 
+        update_when_has_sess ==
+            /\ handle_req' = [handle_req EXCEPT
+                    ![c] = @ \o failed_recv_req \o failed_hreq]
+
         when_has_sess ==
             /\ num_fail < max_fail
             /\ num_fail' = num_fail + 1
             /\ client_status[c] = "HasSession"
+            /\ update_when_has_sess
 
         when_has_sess_but_server_lost ==
             /\ client_status[c] = "HasSession"
             /\ client_sess[c] \notin active_sess
+            /\ update_when_has_sess
             /\ UNCHANGED num_fail
+
+        when_connecting ==
+            /\ num_fail < max_fail
+            /\ num_fail' = num_fail + 1
+            /\ client_status[c] = "Connecting"
+            /\ UNCHANGED handle_req
 
         when_already_disconnected ==
             /\ num_fail < max_fail
             /\ num_fail' = num_fail + 1
             /\ client_status[c] = "Disconnected"
+            /\ UNCHANGED handle_req
     IN
     /\ \/ when_has_sess
        \/ when_has_sess_but_server_lost
+       \/ when_connecting
        \/ when_already_disconnected
 
     /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
     /\ client_req' = [client_req EXCEPT ![c] = <<>>]
     /\ recv_req' = [recv_req EXCEPT ![c] = <<>>]
-    /\ handle_req' = [handle_req EXCEPT
-            ![c] = @ \o failed_recv_req \o failed_hreq]
 
     /\ UNCHANGED num_action
     /\ UNCHANGED next_xid
