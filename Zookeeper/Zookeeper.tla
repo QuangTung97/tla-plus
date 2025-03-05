@@ -1,8 +1,8 @@
 ------ MODULE Zookeeper ----
-EXTENDS TLC, Sequences, Naturals, FiniteSets
+EXTENDS TLC, Sequences, Naturals, FiniteSets, Common
 
 CONSTANTS Group, Ephemeral, Key, Value,
-    Client, nil, max_action, max_conn_closed
+    Client, nil, max_action, max_fail
 
 ASSUME
     /\ Ephemeral \subseteq Group
@@ -14,7 +14,7 @@ VARIABLES server_log, server_state, active_conns, active_sessions,
     client_send_pc, client_recv_pc, client_status,
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_xid,
-    num_conn_closed
+    num_fail
 
 server_vars == <<server_log, server_state, active_conns, active_sessions>>
 client_vars == <<
@@ -24,91 +24,29 @@ client_vars == <<
     num_action, next_xid, handled_xid, local_xid
 >>
 
-aux_vars == <<num_conn_closed>>
+aux_vars == <<num_fail>>
 vars == <<server_vars, global_conn, client_vars, aux_vars>>
 
 ---------------------------------------------------------------------------
 
-Range(f) == {f[x]: x \in DOMAIN f}
-
-IsMapOf(m, D, R) ==
-    /\ DOMAIN m \subseteq D
-    /\ Range(m) \subseteq R
-
-mapPut(m, k, v) ==
-    LET
-        new_domain == (DOMAIN m) \union {k}
-
-        updated(x) ==
-            IF x = k
-                THEN v
-                ELSE m[x]
-    IN
-    [x \in new_domain |-> updated(x)]
-
-ASSUME mapPut(<<3, 4>>, 1, 4) = <<4, 4>>
-ASSUME mapPut(<<3, 4>>, 3, 5) = <<3, 4, 5>>
-
-mapDelete(m, k) ==
-    LET
-        new_domain == (DOMAIN m) \ {k}
-    IN
-    [x \in new_domain |-> m[x]]
-
-ASSUME mapDelete(<<3, 4, 5>>, 3) = <<3, 4>>
-
-
-minOf(S) == CHOOSE x \in S: (\A y \in S: y >= x)
-
-maxOf(S) == CHOOSE x \in S: (\A y \in S: y <= x)
-
-ASSUME minOf({4, 2, 3}) = 2
-ASSUME maxOf({4, 2, 3}) = 4
-
-
-seqRange(a, b) ==
-    LET num == b - a + 1 IN
-    [i \in 1..num |-> a + i - 1]
-
-ASSUME seqRange(4, 6) = <<4, 5, 6>>
+ZK == INSTANCE Core WITH
+    client_req <- send_queue, \* TODO
+    recv_req <- nil, \* TODO
+    handle_req <- handle_queue,
+    client_sess <- last_session,
+    active_sess <- active_sessions,
+    value_range <- 10 \* TODO
 
 ---------------------------------------------------------------------------
 
-Zxid == 21..29
+Zxid == ZK!Zxid
+NullZxid == ZK!NullZxid
+Session == ZK!Session
+NullSession == ZK!NullSession
 
-NullZxid == Zxid \union {nil}
+LogEntry == ZK!LogEntry
 
-
-Session == 11..19
-
-NullSession == Session \union {nil}
-
-
-LogEntry ==
-    LET
-        sessionEntry == [
-            type: {"NewSession"},
-            zxid: Zxid,
-            sess: Session
-        ]
-
-        putEntry == [
-            type: {"Put"},
-            zxid: Zxid,
-            group: Group,
-            key: Key,
-            val: Value
-        ]
-    IN
-    sessionEntry \union putEntry
-
-
-SeqKey == Key \* TODO \union (Key \X (1..20))
-
-StateInfo == [
-    val: Value,
-    sess: NullSession \* For Ephemeral ZNodes
-]
+StateInfo == ZK!StateInfo
 
 ServerConnInfo == [
     sess: NullSession
@@ -153,14 +91,14 @@ RecvRequest ==
             type: {"CreateReply"},
             xid: Xid,
             zxid: Zxid,
-            key: SeqKey
+            key: Key
         ]
 
         children_resp == [
             type: {"ChildrenReply"},
             xid: Xid,
             zxid: Zxid,
-            children: SUBSET SeqKey
+            children: SUBSET Key
         ]
     IN
         UNION {connect_resp, create_resp, children_resp}
@@ -198,7 +136,7 @@ TypeOK ==
     /\ server_log \in Seq(LogEntry)
 
     /\ DOMAIN server_state = Group
-    /\ \A g \in Group: IsMapOf(server_state[g], SeqKey, StateInfo)
+    /\ \A g \in Group: IsMapOf(server_state[g], Key, StateInfo)
 
     /\ IsMapOf(active_conns, DOMAIN global_conn, ServerConnInfo)
     /\ active_sessions \subseteq Session
@@ -224,7 +162,7 @@ TypeOK ==
     /\ handled_xid \in [Client -> Xid]
     /\ local_xid \in [Client -> Xid \union {nil}]
 
-    /\ num_conn_closed \in 0..max_conn_closed
+    /\ num_fail \in 0..max_fail
 
 
 Init ==
@@ -251,7 +189,7 @@ Init ==
     /\ handled_xid = [c \in Client |-> 30]
     /\ local_xid = [c \in Client |-> nil]
 
-    /\ num_conn_closed = 0
+    /\ num_fail = 0
 
 
 ---------------------------------------------------------------------------
@@ -260,7 +198,7 @@ send_recv_vars == <<
     client_send_pc, client_recv_pc,
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_xid,
-    num_conn_closed
+    num_fail
 >>
 
 NewConnection(c) ==
@@ -358,7 +296,7 @@ ClientStartThreads(c) ==
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED global_conn
     /\ UNCHANGED server_vars
-    /\ UNCHANGED num_conn_closed
+    /\ UNCHANGED num_fail
 
 ---------------------------------------------------------------------------
 
@@ -376,7 +314,7 @@ action_unchanged ==
     /\ UNCHANGED local_xid
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED server_vars
-    /\ UNCHANGED num_conn_closed
+    /\ UNCHANGED num_fail
 
 
 push_to_send_queue(c, req) ==
@@ -445,7 +383,7 @@ send_thread_unchanged ==
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED <<handle_queue>>
     /\ UNCHANGED <<next_xid, num_action, handled_xid, local_xid>>
-    /\ UNCHANGED num_conn_closed
+    /\ UNCHANGED num_fail
 
 
 ClientHandleSend(c) ==
@@ -501,7 +439,7 @@ recv_thread_unchanged ==
     /\ UNCHANGED client_main_pc
     /\ UNCHANGED <<last_session>>
     /\ UNCHANGED <<next_xid, num_action, handled_xid>>
-    /\ UNCHANGED num_conn_closed
+    /\ UNCHANGED num_fail
 
 ClientHandleRecv(c) ==
     LET
@@ -605,7 +543,7 @@ handle_thread_unchanged ==
     /\ UNCHANGED global_conn
     /\ UNCHANGED <<next_xid, num_action>>
     /\ UNCHANGED <<last_zxid, local_xid>>
-    /\ UNCHANGED num_conn_closed
+    /\ UNCHANGED num_fail
 
 ClientDoHandle(c) ==
     LET
@@ -791,8 +729,8 @@ ServerHandleRequest ==
 ConnectionClosed ==
     \E conn \in DOMAIN global_conn:
         /\ ~global_conn[conn].closed
-        /\ num_conn_closed < max_conn_closed
-        /\ num_conn_closed' = num_conn_closed + 1
+        /\ num_fail < max_fail
+        /\ num_fail' = num_fail + 1
         /\ global_conn' = [global_conn EXCEPT
                 ![conn].closed = TRUE,
                 ![conn].send = <<>>,

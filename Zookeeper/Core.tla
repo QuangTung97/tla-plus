@@ -498,6 +498,8 @@ Spec == Init /\ [][Next]_vars
 
 FairSpec == Spec /\ WF_vars(Next)
 
+RequiredSpec == Init /\ [][RequiredNext]_vars
+
 ---------------------------------------------------------------------------
 
 AlwaysTerminate == <> TerminateCond
