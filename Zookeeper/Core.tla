@@ -6,11 +6,11 @@ CONSTANTS Group, Key, Value, Client, nil,
 
 ASSUME IsFiniteSet(Group)
 
-VARIABLES server_log, server_state,
+VARIABLES server_log, server_state, active_sess,
     client_status, client_req,
     recv_req, handle_req, num_action
 
-server_vars == <<server_log, server_state>>
+server_vars == <<server_log, server_state, active_sess>>
 client_vars == <<
     client_status, client_req,
     recv_req, handle_req, num_action
@@ -123,6 +123,7 @@ TypeOK ==
     /\ server_log \in Seq(LogEntry)
     /\ DOMAIN server_state = Group
     /\ \A g \in Group: IsMapOf(server_state[g], Key, StateInfo)
+    /\ active_sess  \in [Client -> NullSession]
 
     /\ client_status \in [Client -> {"Disconnected", "Connecting", "HasSession"}]
     /\ client_req \in [Client -> Seq(ClientRequest)]
@@ -133,6 +134,7 @@ TypeOK ==
 Init ==
     /\ server_log = <<>>
     /\ server_state = [g \in Group |-> <<>>]
+    /\ active_sess = [c \in Client |-> nil]
 
     /\ client_status = [c \in Client |-> "Disconnected"]
     /\ client_req = [c \in Client |-> <<>>]
@@ -249,6 +251,7 @@ new_zxid ==
         ELSE server_log[Len(server_log)].zxid + 1
 
 server_handle_unchanged ==
+    /\ UNCHANGED active_sess
     /\ UNCHANGED handle_req
     /\ UNCHANGED client_status
     /\ UNCHANGED num_action
@@ -257,6 +260,7 @@ client_with_req(c, type) ==
     LET
         req == client_req[c][1]
     IN
+    /\ active_sess[c] # nil
     /\ client_req[c] # <<>>
     /\ req.type = type
     /\ client_req' = [client_req EXCEPT ![c] = Tail(@)]
@@ -286,13 +290,19 @@ ServerHandleConnect(c) ==
             sess |-> new_sess
         ]
     IN
-    /\ client_with_req(c, "Connect")
+    /\ active_sess[c] = nil
+    /\ client_req[c] # <<>>
+    /\ req.type = "Connect"
+    /\ client_req' = [client_req EXCEPT ![c] = Tail(@)]
 
+    /\ active_sess' = [active_sess EXCEPT ![c] = new_sess]
     /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq)]
     /\ server_log' = Append(server_log, log_entry)
 
     /\ UNCHANGED server_state
-    /\ server_handle_unchanged
+    /\ UNCHANGED handle_req
+    /\ UNCHANGED client_status
+    /\ UNCHANGED num_action
 
 
 push_to_recv(c, hreq) ==
