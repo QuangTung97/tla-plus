@@ -15,7 +15,8 @@ VARIABLES server_log, server_state, active_conns, active_sessions,
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_xid,
     num_fail,
-    core_num_fail, expect_send, expect_recv
+    core_num_fail, expect_send, expect_recv,
+    test_zk_client_req, test_zk_recv_req
 
 server_vars == <<server_log, server_state, active_conns, active_sessions>>
 client_vars == <<
@@ -26,7 +27,8 @@ client_vars == <<
 >>
 
 aux_vars == <<num_fail, core_num_fail, expect_send, expect_recv>>
-vars == <<server_vars, global_conn, client_vars, aux_vars>>
+match_vars == <<test_zk_client_req, test_zk_recv_req>>
+vars == <<server_vars, global_conn, client_vars, aux_vars, match_vars>>
 
 ---------------------------------------------------------------------------
 
@@ -192,6 +194,9 @@ TypeOK ==
     /\ expect_send \in [Client -> Seq(ClientRequest)]
     /\ expect_recv \in [Client -> Seq(HandleRequest)]
 
+    /\ test_zk_client_req \in [Client -> Seq(ClientRequest)]
+    /\ test_zk_recv_req \in [Client -> Seq(HandleRequest)]
+
 
 Init ==
     /\ server_log = <<>>
@@ -222,8 +227,15 @@ Init ==
     /\ expect_send = [c \in Client |-> <<>>]
     /\ expect_recv = [c \in Client |-> <<>>]
 
+    /\ test_zk_client_req = zk_client_req
+    /\ test_zk_recv_req = zk_recv_req
+
 
 ---------------------------------------------------------------------------
+
+auto_update ==
+    /\ test_zk_client_req' = zk_client_req
+    /\ test_zk_recv_req' = zk_recv_req
 
 send_recv_vars == <<
     client_send_pc, client_recv_pc,
@@ -248,6 +260,7 @@ NewConnection(c) ==
     /\ UNCHANGED <<core_num_fail, expect_send, expect_recv>>
     /\ UNCHANGED handle_queue
     /\ UNCHANGED server_vars
+    /\ auto_update
 
 
 conn_send(conn, req) ==
@@ -287,6 +300,7 @@ ClientConnect(c) ==
     /\ UNCHANGED handle_queue
     /\ UNCHANGED send_recv_vars
     /\ UNCHANGED server_vars
+    /\ auto_update
 
 
 ClientConnectReply(c) ==
@@ -325,6 +339,7 @@ ClientConnectReply(c) ==
     /\ UNCHANGED client_conn
     /\ UNCHANGED send_recv_vars
     /\ UNCHANGED server_vars
+    /\ auto_update
 
 
 ClientStartThreads(c) ==
@@ -342,6 +357,7 @@ ClientStartThreads(c) ==
     /\ UNCHANGED global_conn
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
+    /\ auto_update
 
 ---------------------------------------------------------------------------
 
@@ -360,6 +376,7 @@ action_unchanged ==
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
+    /\ auto_update
 
 
 push_to_send_queue(c, req) ==
@@ -425,6 +442,7 @@ send_thread_unchanged ==
     /\ UNCHANGED <<handle_queue>>
     /\ UNCHANGED <<next_xid, num_action, handled_xid, local_xid>>
     /\ UNCHANGED aux_vars
+    /\ auto_update
 
 
 ClientHandleSend(c) ==
@@ -481,6 +499,7 @@ recv_thread_unchanged ==
     /\ UNCHANGED <<last_session>>
     /\ UNCHANGED <<next_xid, num_action, handled_xid>>
     /\ UNCHANGED <<num_fail, expect_send, expect_recv>>
+    /\ auto_update
 
 
 ClientHandleRecv(c) ==
@@ -574,6 +593,7 @@ handle_thread_unchanged ==
     /\ UNCHANGED <<next_xid, num_action>>
     /\ UNCHANGED <<last_zxid, local_xid>>
     /\ UNCHANGED aux_vars
+    /\ auto_update
 
 ClientDoHandle(c) ==
     LET
@@ -628,6 +648,7 @@ ServerAcceptConn(c) ==
 
     /\ UNCHANGED client_vars
     /\ UNCHANGED aux_vars
+    /\ auto_update
 
 
 gen_new_zxid ==
@@ -679,6 +700,7 @@ doHandleConnect(conn) ==
     /\ UNCHANGED server_state
     /\ UNCHANGED client_vars
     /\ UNCHANGED <<num_fail, core_num_fail>>
+    /\ auto_update
 
 ServerHandleConnect ==
     \E conn \in DOMAIN active_conns: doHandleConnect(conn)
@@ -755,6 +777,7 @@ ServerHandleRequest ==
         /\ active_conns[conn].sess # nil
         /\ \/ doHandleCreate(conn)
            \/ doHandleChildren(conn)
+        /\ auto_update
 
 ---------------------------------------------------------------------------
 
@@ -771,6 +794,7 @@ ConnectionClosed ==
         /\ UNCHANGED <<core_num_fail, expect_send, expect_recv>>
         /\ UNCHANGED server_vars
         /\ UNCHANGED client_vars
+        /\ auto_update
 
 ---------------------------------------------------------------------------
 
