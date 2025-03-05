@@ -271,8 +271,11 @@ ClientHandleReq(c) ==
 
 ClientDisconnect(c) ==
     LET
-        new_inserted_hreq(req) == new_handle_req(req, nil, "NetErr")
-        inserted_hreq == seqMap(client_req[c], new_inserted_hreq)
+        new_failed_hreq(req) == new_handle_req(req, nil, "NetErr")
+        failed_hreq == seqMap(client_req[c], new_failed_hreq)
+
+        recv_req_to_failed(hreq) == new_handle_req(hreq.req, nil, "NetErr")
+        failed_recv_req == seqMap(recv_req[c], recv_req_to_failed)
 
         when_has_sess ==
             /\ num_fail < max_fail
@@ -291,7 +294,7 @@ ClientDisconnect(c) ==
     /\ client_req' = [client_req EXCEPT ![c] = <<>>]
     /\ recv_req' = [recv_req EXCEPT ![c] = <<>>]
     /\ handle_req' = [handle_req EXCEPT
-            ![c] = @ \o recv_req[c] \o inserted_hreq]
+            ![c] = @ \o failed_recv_req \o failed_hreq]
 
     /\ UNCHANGED num_action
     /\ UNCHANGED client_sess
