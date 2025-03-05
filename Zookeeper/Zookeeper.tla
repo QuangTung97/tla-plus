@@ -62,11 +62,16 @@ client_connect_req == [
 
 zk_client_req ==
     LET
+        hreq_to_req(hreq) == hreq.req
+        from_recv_map(c) == seqMap(failed_hreq_from_recv_map(c), hreq_to_req)
+
         conn_sending(c) ==
             IF client_conn[c] = nil THEN
                 <<>>
             ELSE IF client_status[c] = "Connecting" THEN
                 expect_send[c]
+            ELSE IF global_conn[client_conn[c]].closed THEN
+                from_recv_map(c)
             ELSE
                 global_conn[client_conn[c]].send
     IN
@@ -74,13 +79,19 @@ zk_client_req ==
 
 zk_recv_req ==
     LET
-        send_list(c) == global_conn[client_conn[c]].send \o send_queue[c]
+        conn(c) == global_conn[client_conn[c]]
+
+        send_list(c) == conn(c).send \o send_queue[c]
 
         pending_xid(c) == {req.xid: req \in Range(send_list(c))}
 
+        conn_recv_xid(c) == {hreq.req.xid: hreq \in Range(conn(c).recv)}
+
         filtered(c) ==
             LET
-                filter_cond(hreq) == hreq.req.xid \notin pending_xid(c)
+                filter_cond(hreq) ==
+                    /\ hreq.req.xid \notin pending_xid(c)
+                    /\ hreq.req.xid \notin conn_recv_xid(c)
             IN
             SelectSeq(failed_hreq_from_recv_map(c), filter_cond)
 
@@ -90,7 +101,7 @@ zk_recv_req ==
             ELSE IF client_status[c] = "Connecting" THEN
                 expect_recv[c]
             ELSE
-                filtered(c) \o global_conn[client_conn[c]].recv
+                filtered(c) \o conn(c).recv
     IN
     [c \in Client |-> mapped(c)]
 
@@ -145,6 +156,8 @@ ClientMainPC == {
 }
 
 ---------------------------------------------------------------------------
+
+CoreTypeOK == ZK!TypeOK
 
 CheckTypeOK ==
     /\ handle_queue \in [Client -> Seq(ZK!HandleRequest)]
@@ -353,8 +366,6 @@ action_unchanged ==
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
-
-
 
 
 push_to_send_queue(c, req) ==
