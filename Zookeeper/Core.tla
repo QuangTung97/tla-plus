@@ -2,20 +2,23 @@
 EXTENDS TLC, FiniteSets, Sequences, Naturals, Common
 
 CONSTANTS Group, Key, Value, Client, nil,
-    value_range, max_action
+    value_range, max_action, max_fail
 
 ASSUME IsFiniteSet(Group)
 
 VARIABLES server_log, server_state, active_sess,
-    client_status, client_req,
-    recv_req, handle_req, num_action
+    client_status, client_sess, client_req,
+    recv_req, handle_req, num_action,
+    num_fail
 
 server_vars == <<server_log, server_state, active_sess>>
 client_vars == <<
-    client_status, client_req,
+    client_status, client_sess, client_req,
     recv_req, handle_req, num_action
 >>
-vars == <<server_vars, client_vars>>
+aux_vars == <<num_fail>>
+
+vars == <<server_vars, client_vars, aux_vars>>
 
 ---------------------------------------------------------------------------
 
@@ -34,6 +37,12 @@ LogEntry ==
             sess: Session
         ]
 
+        del_sess == [
+            type: {"DeleteSession"},
+            zxid: Zxid,
+            sess: Session
+        ]
+
         put_entry == [
             type: {"Put"},
             zxid: Zxid,
@@ -42,7 +51,7 @@ LogEntry ==
             val: NullValue
         ]
     IN
-        UNION {new_sess, put_entry}
+        UNION {new_sess, del_sess, put_entry}
 
 StateInfo == [
     val: NullValue,
@@ -123,24 +132,30 @@ TypeOK ==
     /\ server_log \in Seq(LogEntry)
     /\ DOMAIN server_state = Group
     /\ \A g \in Group: IsMapOf(server_state[g], Key, StateInfo)
-    /\ active_sess  \in [Client -> NullSession]
+    /\ active_sess \subseteq Session
 
     /\ client_status \in [Client -> {"Disconnected", "Connecting", "HasSession"}]
+    /\ client_sess \in [Client -> NullSession]
     /\ client_req \in [Client -> Seq(ClientRequest)]
     /\ recv_req \in [Client -> Seq(HandleRequest)]
     /\ handle_req \in [Client -> Seq(HandleRequest)]
     /\ num_action \in 0..max_action
 
+    /\ num_fail \in 0..max_fail
+
 Init ==
     /\ server_log = <<>>
     /\ server_state = [g \in Group |-> <<>>]
-    /\ active_sess = [c \in Client |-> nil]
+    /\ active_sess = {}
 
     /\ client_status = [c \in Client |-> "Disconnected"]
+    /\ client_sess = [c \in Client |-> nil]
     /\ client_req = [c \in Client |-> <<>>]
     /\ recv_req = [c \in Client |-> <<>>]
     /\ handle_req = [c \in Client |-> <<>>]
     /\ num_action = 0
+
+    /\ num_fail = 0
 
 ---------------------------------------------------------------------------
 
@@ -155,9 +170,11 @@ ClientConnect(c) ==
     /\ client_status' = [client_status EXCEPT ![c] = "Connecting"]
     /\ client_req' = [client_req EXCEPT ![c] = Append(@, req)]
 
+    /\ UNCHANGED client_sess
     /\ UNCHANGED <<recv_req, handle_req>>
     /\ UNCHANGED num_action
     /\ UNCHANGED server_vars
+    /\ UNCHANGED aux_vars
 
 
 ClientRecvConnect(c) ==
@@ -169,10 +186,12 @@ ClientRecvConnect(c) ==
     /\ recv_req' = [recv_req EXCEPT ![c] = Tail(@)]
     /\ handle_req' = [handle_req EXCEPT ![c] = Append(@, req)]
     /\ client_status' = [client_status EXCEPT ![c] = "HasSession"]
+    /\ client_sess' = [client_sess EXCEPT ![c] = req.sess]
 
     /\ UNCHANGED client_req
     /\ UNCHANGED num_action
     /\ UNCHANGED server_vars
+    /\ UNCHANGED aux_vars
 
 
 ClientRecvToHandle(c) ==
@@ -185,9 +204,11 @@ ClientRecvToHandle(c) ==
     /\ handle_req' = [handle_req EXCEPT ![c] = Append(@, req)]
 
     /\ UNCHANGED client_status
+    /\ UNCHANGED client_sess
     /\ UNCHANGED client_req
     /\ UNCHANGED num_action
     /\ UNCHANGED server_vars
+    /\ UNCHANGED aux_vars
 
 
 submit_client_req(c, req) ==
@@ -209,7 +230,9 @@ submit_client_req(c, req) ==
         ELSE when_not_has_sess
     /\ UNCHANGED recv_req
     /\ UNCHANGED client_status
+    /\ UNCHANGED client_sess
     /\ UNCHANGED server_vars
+    /\ UNCHANGED aux_vars
 
 
 ClientCreate(c, g, k, val) ==
@@ -241,6 +264,37 @@ ClientHandleReq(c) ==
     /\ UNCHANGED num_action
     /\ UNCHANGED <<client_req, recv_req>>
     /\ UNCHANGED client_status
+    /\ UNCHANGED client_sess
+    /\ UNCHANGED server_vars
+    /\ UNCHANGED aux_vars
+
+
+ClientDisconnect(c) ==
+    LET
+        new_inserted_hreq(req) == new_handle_req(req, nil, "NetErr")
+        inserted_hreq == seqMap(client_req[c], new_inserted_hreq)
+
+        when_has_sess ==
+            /\ num_fail < max_fail
+            /\ num_fail' = num_fail + 1
+            /\ client_status[c] = "HasSession"
+
+        when_has_sess_but_server_lost ==
+            /\ client_status[c] = "HasSession"
+            /\ client_sess[c] \notin active_sess
+            /\ UNCHANGED num_fail
+    IN
+    /\ \/ when_has_sess
+       \/ when_has_sess_but_server_lost
+
+    /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
+    /\ client_req' = [client_req EXCEPT ![c] = <<>>]
+    /\ recv_req' = [recv_req EXCEPT ![c] = <<>>]
+    /\ handle_req' = [handle_req EXCEPT
+            ![c] = @ \o recv_req[c] \o inserted_hreq]
+
+    /\ UNCHANGED num_action
+    /\ UNCHANGED client_sess
     /\ UNCHANGED server_vars
 
 ---------------------------------------------------------------------------
@@ -254,13 +308,15 @@ server_handle_unchanged ==
     /\ UNCHANGED active_sess
     /\ UNCHANGED handle_req
     /\ UNCHANGED client_status
+    /\ UNCHANGED client_sess
     /\ UNCHANGED num_action
+    /\ UNCHANGED aux_vars
 
 client_with_req(c, type) ==
     LET
         req == client_req[c][1]
     IN
-    /\ active_sess[c] # nil
+    /\ client_sess[c] \in active_sess
     /\ client_req[c] # <<>>
     /\ req.type = type
     /\ client_req' = [client_req EXCEPT ![c] = Tail(@)]
@@ -290,19 +346,45 @@ ServerHandleConnect(c) ==
             sess |-> new_sess
         ]
     IN
-    /\ active_sess[c] = nil
     /\ client_req[c] # <<>>
     /\ req.type = "Connect"
     /\ client_req' = [client_req EXCEPT ![c] = Tail(@)]
 
-    /\ active_sess' = [active_sess EXCEPT ![c] = new_sess]
+    \* TODO reuse session
+    /\ active_sess' = active_sess \union {new_sess}
     /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq)]
     /\ server_log' = Append(server_log, log_entry)
 
     /\ UNCHANGED server_state
+    /\ UNCHANGED client_sess
     /\ UNCHANGED handle_req
     /\ UNCHANGED client_status
     /\ UNCHANGED num_action
+    /\ UNCHANGED aux_vars
+
+
+ServerLoseSession ==
+    \E sess \in active_sess:
+        LET
+            log_entry == [
+                type |-> "DeleteSession",
+                zxid |-> new_zxid,
+                sess |-> sess
+            ]
+        IN
+        /\ num_fail < max_fail
+        /\ num_fail' = num_fail + 1
+
+        /\ active_sess' = active_sess \ {sess}
+        /\ server_log' = Append(server_log, log_entry)
+
+        /\ UNCHANGED server_state
+        /\ UNCHANGED client_sess
+        /\ UNCHANGED client_req
+        /\ UNCHANGED recv_req
+        /\ UNCHANGED handle_req
+        /\ UNCHANGED client_status
+        /\ UNCHANGED num_action
 
 
 push_to_recv(c, hreq) ==
@@ -375,6 +457,8 @@ StopCond ==
 
 TerminateCond ==
     /\ StopCond
+    /\ num_action = max_action
+    /\ num_fail = max_fail
 
 Terminated ==
     /\ TerminateCond
@@ -387,6 +471,7 @@ RequiredNext ==
         \/ ClientConnect(c)
         \/ ClientRecvConnect(c)
         \/ ClientRecvToHandle(c)
+        \/ ClientDisconnect(c)
 
     \/ \E c \in Client:
         \/ ServerHandleConnect(c)
@@ -399,6 +484,8 @@ RequiredNext ==
     \/ \E c \in Client, g \in Group:
         \/ ClientChildren(c, g)
 
+    \/ ServerLoseSession
+
 Next ==
     \/ RequiredNext
     \/ \E c \in Client: ClientHandleReq(c)
@@ -406,7 +493,12 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ---------------------------------------------------------------------------
+
+AlwaysTerminate == <> TerminateCond
+
 
 ServerLogZxidInv ==
     LET
@@ -414,6 +506,11 @@ ServerLogZxidInv ==
     IN
     \A i \in 1..n:
         server_log[i].zxid + 1 = server_log[i + 1].zxid
+
+
+AtMostOneConnectReq ==
+    \A c \in Client:
+        client_status[c] = "Connecting" => Len(client_req[c]) <= 1
 
 
 ReverseInvForChildren ==

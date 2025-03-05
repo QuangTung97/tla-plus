@@ -47,4 +47,13 @@ seqRange(a, b) ==
 
 ASSUME seqRange(4, 6) = <<4, 5, 6>>
 
+----------------------------------------------------------
+
+seqMap(s, fn(_)) ==
+    [i \in DOMAIN s |-> fn(s[i])]
+
+test_map_fn(x) == x * 2
+
+ASSUME seqMap(<<2, 3, 4>>, test_map_fn) = <<4, 6, 8>>
+
 ====
