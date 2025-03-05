@@ -54,12 +54,6 @@ failed_hreq_from_recv_map(c) ==
     IN
     [i \in 1..num_key |-> failed_hreq(i)]
 
-client_connect_req == [
-    type |-> "Connect",
-    sess |-> nil,
-    seen_zxid |-> nil
-]
-
 zk_client_req ==
     LET
         hreq_to_req(hreq) == hreq.req
