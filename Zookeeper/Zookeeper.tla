@@ -38,18 +38,11 @@ zk_recv_req ==
     IN
     [c \in Client |-> mapped(c)]
 
-zk_map_client_req(req) == funcDeleteKey(req, "xid")
-
-zk_handle_req ==
-    LET
-        map_fn(hreq) == [hreq EXCEPT !.req = zk_map_client_req(@)]
-    IN
-    [c \in Client |-> seqMap(handle_queue[c], map_fn)]
 
 ZK == INSTANCE Core WITH
     client_req <- send_queue, \* TODO
-    recv_req <- zk_recv_req,
-    handle_req <- zk_handle_req,
+    recv_req <- zk_recv_req, \* TODO
+    handle_req <- handle_queue,
     client_sess <- last_session,
     active_sess <- active_sessions,
     value_range <- 10 \* TODO
@@ -104,6 +97,9 @@ HandleQueueEntry == [
 
 
 ---------------------------------------------------------------------------
+
+CheckCoreType ==
+    /\ handle_queue \in [Client -> Seq(HandleRequest)]
 
 TypeOK ==
     /\ server_log \in Seq(LogEntry)
@@ -290,6 +286,9 @@ action_unchanged ==
     /\ UNCHANGED num_fail
 
 
+new_handle_req(req, zxid, status) == ZK!new_handle_req(req, zxid, status)
+
+
 push_to_send_queue(c, req) ==
     LET
         when_has_sess ==
@@ -297,12 +296,7 @@ push_to_send_queue(c, req) ==
             /\ notify_send_thread(c)
             /\ UNCHANGED handle_queue
 
-        hreq == [
-            req |-> req,
-            zxid |-> nil,
-            resp |-> nil,
-            status |-> "NetErr"
-        ]
+        hreq == new_handle_req(req, nil, "NetErr")
 
         when_not_has_sess ==
             /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, hreq)]
