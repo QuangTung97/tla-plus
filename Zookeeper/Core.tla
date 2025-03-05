@@ -1,15 +1,15 @@
 ------ MODULE Core ----
 EXTENDS TLC, FiniteSets, Sequences, Naturals, Common
 
-CONSTANTS Group, Key, Value, Client, nil, max_action
+CONSTANTS Group, Key, Value, Client, nil, max_pending
 
 ASSUME IsFiniteSet(Group)
 
 VARIABLES server_log, server_state,
-    client_status, client_request, num_action
+    client_status, client_request
 
 server_vars == <<server_log, server_state>>
-client_vars == <<client_status, client_request, num_action>>
+client_vars == <<client_status, client_request>>
 vars == <<server_vars, client_vars>>
 
 ---------------------------------------------------------------------------
@@ -69,7 +69,6 @@ TypeOK ==
 
     /\ client_status \in [Client -> {"Init", "HasSession"}]
     /\ client_request \in [Client -> Seq(ClientRequest)]
-    /\ num_action \in 0..max_action
 
 Init ==
     /\ server_log = <<>>
@@ -77,19 +76,19 @@ Init ==
 
     /\ client_status = [c \in Client |-> "Init"]
     /\ client_request = [c \in Client |-> <<>>]
-    /\ num_action = 0
 
 ---------------------------------------------------------------------------
 
-ClientCreate(c) ==
+ClientCreate(c, g, k, val) ==
     LET
         req == [
-            type |-> "Create"
+            type |-> "Create",
+            group |-> g,
+            key |-> k,
+            val |-> val
         ]
     IN
-    /\ num_action < max_action
-    /\ num_action' = num_action + 1
-
+    /\ Len(client_request[c]) < max_pending
     /\ client_request' = [client_request EXCEPT ![c] = Append(@, req)]
 
     /\ UNCHANGED client_status
@@ -97,8 +96,11 @@ ClientCreate(c) ==
 
 ---------------------------------------------------------------------------
 
+StopCond ==
+    /\ \A c \in Client: client_request[c] = <<>>
+
 TerminateCond ==
-    /\ TRUE
+    /\ StopCond
 
 Terminated ==
     /\ TerminateCond
@@ -106,12 +108,15 @@ Terminated ==
 
 
 Next ==
-    \/ \E c \in Client:
-        \/ ClientCreate(c)
+    \/ \E c \in Client, g \in Group, k \in Key, val \in NullValue:
+        \/ ClientCreate(c, g, k, val)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
 
 ---------------------------------------------------------------------------
+
+ClientRequestLimit ==
+    \A c \in Client: Len(client_request[c]) <= max_pending
 
 ====
