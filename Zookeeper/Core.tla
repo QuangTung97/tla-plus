@@ -67,10 +67,21 @@ ClientRequest ==
             key: Key,
             val: NullValue
         ]
-    IN
-        UNION {connect_req, create_req}
 
-ClientResponse == {}
+        children_req == [
+            type: {"Children"},
+            group: Group
+        ]
+    IN
+        UNION {connect_req, create_req, children_req}
+
+HandleResponse ==
+    LET
+        children == [
+            children: SUBSET Key
+        ]
+    IN
+    UNION {children}
 
 HandleRequest ==
     LET
@@ -82,6 +93,7 @@ HandleRequest ==
         normal == [
             req: ClientRequest,
             zxid: NullZxid,
+            resp: HandleResponse \union {nil},
             status: {"OK", "NetErr", "Existed"}
         ]
     IN
@@ -90,6 +102,14 @@ HandleRequest ==
 new_handle_req(req, zxid, status) == [
     req |-> req,
     zxid |-> zxid,
+    resp |-> nil,
+    status |-> status
+]
+
+new_handle_with_resp(req, zxid, resp, status) == [
+    req |-> req,
+    zxid |-> zxid,
+    resp |-> resp,
     status |-> status
 ]
 
@@ -153,15 +173,23 @@ ClientRecvConnect(c) ==
     /\ UNCHANGED server_vars
 
 
-ClientCreate(c, g, k, val) ==
+ClientRecvToHandle(c) ==
     LET
-        req == [
-            type |-> "Create",
-            group |-> g,
-            key |-> k,
-            val |-> val
-        ]
+        req == recv_req[c][1]
+    IN
+    /\ client_status[c] = "HasSession"
+    /\ recv_req[c] # <<>>
+    /\ recv_req' = [recv_req EXCEPT ![c] = Tail(@)]
+    /\ handle_req' = [handle_req EXCEPT ![c] = Append(@, req)]
 
+    /\ UNCHANGED client_status
+    /\ UNCHANGED client_req
+    /\ UNCHANGED num_action
+    /\ UNCHANGED server_vars
+
+
+submit_client_req(c, req) ==
+    LET
         when_has_sess ==
             /\ client_req' = [client_req EXCEPT ![c] = Append(@, req)]
             /\ UNCHANGED handle_req
@@ -180,6 +208,28 @@ ClientCreate(c, g, k, val) ==
     /\ UNCHANGED recv_req
     /\ UNCHANGED client_status
     /\ UNCHANGED server_vars
+
+
+ClientCreate(c, g, k, val) ==
+    LET
+        req == [
+            type |-> "Create",
+            group |-> g,
+            key |-> k,
+            val |-> val
+        ]
+    IN
+    /\ submit_client_req(c, req)
+
+
+ClientChildren(c, g) ==
+    LET
+        req == [
+            type |-> "Children",
+            group |-> g
+        ]
+    IN
+    /\ submit_client_req(c, req)
 
 
 ClientHandleReq(c) ==
@@ -286,11 +336,31 @@ ServerHandleCreate(c) ==
         ELSE when_not_existed
     /\ server_handle_unchanged
 
+
+ServerHandleChildren(c) ==
+    LET
+        req == client_req[c][1]
+        g == req.group
+
+        children == [
+            children |-> DOMAIN server_state[g]
+        ]
+
+        hreq == new_handle_with_resp(req, new_zxid, children, "OK")
+    IN
+    /\ client_with_req(c, "Children")
+    /\ push_to_recv(c, hreq)
+
+    /\ UNCHANGED server_log
+    /\ UNCHANGED server_state
+    /\ server_handle_unchanged
+
 ---------------------------------------------------------------------------
 
 StopCond ==
     /\ \A c \in Client:
         /\ client_req[c] = <<>>
+        /\ recv_req[c] = <<>>
         /\ handle_req[c] = <<>>
 
 TerminateCond ==
@@ -306,13 +376,18 @@ RequiredNext ==
     \/ \E c \in Client:
         \/ ClientConnect(c)
         \/ ClientRecvConnect(c)
+        \/ ClientRecvToHandle(c)
 
     \/ \E c \in Client:
         \/ ServerHandleConnect(c)
         \/ ServerHandleCreate(c)
+        \/ ServerHandleChildren(c)
 
     \/ \E c \in Client, g \in Group, k \in Key, val \in NullValue:
         \/ ClientCreate(c, g, k, val)
+
+    \/ \E c \in Client, g \in Group:
+        \/ ClientChildren(c, g)
 
 Next ==
     \/ RequiredNext
@@ -329,5 +404,24 @@ ServerLogZxidInv ==
     IN
     \A i \in 1..n:
         server_log[i].zxid + 1 = server_log[i + 1].zxid
+
+
+ReverseInvForChildren ==
+    LET
+        pre_cond(req) ==
+            /\ "resp" \in DOMAIN req
+            /\ req.resp # nil
+            /\ "children" \in DOMAIN req.resp
+
+        cond(req) ==
+            /\ req.resp.children = {}
+    IN
+    \A c \in Client: \A i \in DOMAIN handle_req[c]:
+        LET req == handle_req[c][i] IN
+            pre_cond(req) => cond(req)
+
+
+ReverseInv ==
+    /\ TRUE
 
 ====
