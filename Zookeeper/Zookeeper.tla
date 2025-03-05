@@ -29,6 +29,15 @@ vars == <<server_vars, global_conn, client_vars, aux_vars>>
 
 ---------------------------------------------------------------------------
 
+zk_client_req ==
+    LET
+        conn_sending(c) ==
+            IF client_conn[c] = nil
+                THEN <<>>
+                ELSE global_conn[client_conn[c]].send
+    IN
+    [c \in Client |-> conn_sending(c) \o send_queue[c]]
+
 zk_recv_req ==
     LET
         mapped(c) ==
@@ -40,7 +49,7 @@ zk_recv_req ==
 
 
 ZK == INSTANCE Core WITH
-    client_req <- send_queue, \* TODO
+    client_req <- zk_client_req,
     recv_req <- zk_recv_req, \* TODO
     handle_req <- handle_queue,
     client_sess <- last_session,
@@ -203,7 +212,7 @@ ClientConnect(c) ==
             /\ ~global_conn[conn].closed
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "WaitConnect"]
             /\ conn_send(conn, req)
-            /\ UNCHANGED client_status
+            /\ client_status' = [client_status EXCEPT ![c] = "Connecting"]
 
         when_closed ==
             /\ global_conn[conn].closed
