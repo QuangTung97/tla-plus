@@ -290,11 +290,26 @@ ClientConnectReply(c) ==
         when_normal ==
             /\ ~global_conn[conn].closed
             /\ global_conn[conn].recv # <<>>
+            /\ resp.sess # nil
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "StartSendRecv"]
             /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
             /\ last_session' = [last_session EXCEPT ![c] = resp.sess]
             /\ client_status' = [client_status EXCEPT ![c] = "HasSession"]
             /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, resp)]
+            /\ UNCHANGED core_num_fail
+
+        when_sess_expired ==
+            /\ ~global_conn[conn].closed
+            /\ global_conn[conn].recv # <<>>
+            /\ resp.sess = nil
+            /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "Init"]
+            /\ global_conn' = [global_conn EXCEPT
+                    ![conn].recv = Tail(@),
+                    ![conn].closed = TRUE
+                ]
+            /\ last_session' = [last_session EXCEPT ![c] = nil]
+            /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
+            /\ UNCHANGED handle_queue
             /\ UNCHANGED core_num_fail
 
         when_closed ==
@@ -308,6 +323,7 @@ ClientConnectReply(c) ==
     IN
     /\ client_main_pc[c] = "WaitConnect"
     /\ \/ when_normal
+       \/ when_sess_expired
        \/ when_closed
 
     /\ expect_recv' = [expect_recv EXCEPT ![c] = <<>>]
@@ -665,8 +681,6 @@ doHandleConnect(conn) ==
             sess |-> sess_val
         ]
 
-        curr_client == current_client(conn)
-
         req == global_conn[conn].send[1]
 
         when_req_no_sess ==
@@ -970,5 +984,13 @@ SendQueueMustEmptyWhenNotHasSession ==
     \A c \in Client:
         client_status[c] # "HasSession" => send_queue[c] = <<>>
 
+
+ConnNotInAnyClientMustClosed ==
+    \A conn \in DOMAIN global_conn:
+        LET
+            exist_client ==
+                \E c \in Client: client_conn[c] = conn
+        IN
+            ~exist_client => global_conn[conn].closed
 
 ====
