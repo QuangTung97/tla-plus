@@ -359,18 +359,19 @@ client_with_req(c, type) ==
     /\ client_req' = [client_req EXCEPT ![c] = Tail(@)]
 
 
-ServerHandleConnect(c) ==
+new_sess ==
     LET
-        req == client_req[c][1]
-
         is_new_sess(entry) == entry.type = "NewSession"
 
         new_sess_log == SelectSeq(server_log, is_new_sess)
+    IN
+    IF server_log = <<>>
+        THEN 11
+        ELSE new_sess_log[Len(new_sess_log)].sess + 1
 
-        new_sess ==
-            IF server_log = <<>>
-                THEN 11
-                ELSE new_sess_log[Len(new_sess_log)].sess + 1
+ServerHandleConnect(c) == \* TODO reuse session
+    LET
+        req == client_req[c][1]
 
         hreq == [
             type |-> "ConnectReply",

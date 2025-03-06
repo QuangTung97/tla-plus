@@ -649,12 +649,10 @@ current_client(conn) ==
         THEN nil
         ELSE (CHOOSE c \in client_with_conn: TRUE)
 
+
 doHandleConnect(conn) ==
     LET
-        new_sess ==
-            IF active_sessions = {}
-                THEN 11
-                ELSE maxOf(active_sessions) + 1 \* TODO fix
+        new_sess == ZK!new_sess
 
         log == [
             type |-> "NewSession",
@@ -786,7 +784,47 @@ ServerRemoveActiveConn ==
     \E conn \in DOMAIN active_conns:
         /\ active_conns[conn].sess # nil
         /\ global_conn[conn].closed
+        /\ active_conns' = mapDelete(active_conns, conn)
+
+        /\ UNCHANGED global_conn
+        /\ UNCHANGED <<server_log, server_state>>
+        /\ UNCHANGED active_sessions
+        /\ UNCHANGED client_vars
+        /\ UNCHANGED aux_vars
         /\ auto_update
+
+
+ServerLoseSession ==
+    \E sess \in active_sessions:
+        LET
+            has_active_conn ==
+                \E conn \in DOMAIN global_conn:
+                    conn \in DOMAIN active_conns
+
+            no_active_conn == ~has_active_conn
+
+            log_entry == [
+                type |-> "DeleteSession",
+                zxid |-> gen_new_zxid,
+                sess |-> sess
+            ]
+        IN
+        /\ no_active_conn
+        /\ num_fail < max_fail
+        /\ num_fail' = num_fail + 1
+        /\ core_num_fail' = core_num_fail + 1
+
+        /\ active_sessions' = active_sessions \ {sess}
+        /\ server_log' = Append(server_log, log_entry)
+        /\ UNCHANGED server_state
+
+        /\ UNCHANGED active_conns
+        /\ UNCHANGED global_conn
+        /\ UNCHANGED client_vars
+        /\ UNCHANGED <<expect_send, expect_recv>>
+        /\ auto_update
+
+
 
 ---------------------------------------------------------------------------
 
@@ -856,6 +894,7 @@ Next ==
     \/ ServerHandleConnect
     \/ ServerHandleRequest
     \/ ServerRemoveActiveConn
+    \/ ServerLoseSession
 
     \/ ConnectionClosed
     \/ Terminated
