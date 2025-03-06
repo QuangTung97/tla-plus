@@ -6,12 +6,17 @@ CONSTANTS Group, Key, Value, Client, nil,
 
 ASSUME IsFiniteSet(Group)
 
-VARIABLES server_log, server_state, active_sess,
+VARIABLES
+    server_log, server_state, active_sess,
+    server_children_watch,
     client_status, client_sess, next_xid, client_req,
     recv_req, handle_req, num_action,
     num_fail
 
-server_vars == <<server_log, server_state, active_sess>>
+server_vars == <<
+    server_log, server_state, active_sess,
+    server_children_watch
+>>
 client_vars == <<
     client_status, client_sess, next_xid, client_req,
     recv_req, handle_req, num_action
@@ -137,6 +142,7 @@ TypeOK ==
     /\ DOMAIN server_state = Group
     /\ \A g \in Group: IsMapOf(server_state[g], Key, StateInfo)
     /\ active_sess \subseteq Session
+    /\ IsMapOf(server_children_watch, Session, SUBSET Group)
 
     /\ client_status \in [Client -> {"Disconnected", "Connecting", "HasSession"}]
     /\ client_sess \in [Client -> NullSession]
@@ -152,6 +158,7 @@ Init ==
     /\ server_log = <<>>
     /\ server_state = [g \in Group |-> <<>>]
     /\ active_sess = {}
+    /\ server_children_watch = <<>>
 
     /\ client_status = [c \in Client |-> "Disconnected"]
     /\ client_sess = [c \in Client |-> nil]
@@ -424,6 +431,7 @@ ServerHandleConnect(c) ==
             when_req_has_sess_deleted
 
     /\ UNCHANGED server_state
+    /\ UNCHANGED server_children_watch
     /\ UNCHANGED client_sess
     /\ UNCHANGED handle_req
     /\ UNCHANGED <<client_status, next_xid>>
@@ -447,6 +455,7 @@ ServerLoseSession ==
         /\ server_log' = Append(server_log, log_entry)
 
         /\ UNCHANGED server_state
+        /\ UNCHANGED server_children_watch
         /\ UNCHANGED client_sess
         /\ UNCHANGED <<client_req, next_xid>>
         /\ UNCHANGED recv_req
@@ -494,6 +503,7 @@ ServerHandleCreate(c) ==
     /\ IF k \in DOMAIN server_state[g]
         THEN when_existed
         ELSE when_not_existed
+    /\ UNCHANGED server_children_watch
     /\ server_handle_unchanged
 
 
@@ -513,6 +523,7 @@ ServerHandleChildren(c) ==
 
     /\ UNCHANGED server_log
     /\ UNCHANGED server_state
+    /\ UNCHANGED server_children_watch
     /\ server_handle_unchanged
 
 ---------------------------------------------------------------------------
