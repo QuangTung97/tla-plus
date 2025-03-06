@@ -470,9 +470,9 @@ ServerLoseSession ==
 
         /\ active_sess' = active_sess \ {sess}
         /\ server_log' = Append(server_log, log_entry)
+        /\ server_children_watch' = mapDelete(server_children_watch, sess)
 
         /\ UNCHANGED server_state
-        /\ UNCHANGED server_children_watch
         /\ UNCHANGED client_sess
         /\ UNCHANGED <<client_req, next_xid>>
         /\ UNCHANGED recv_req
