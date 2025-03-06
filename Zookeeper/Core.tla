@@ -169,7 +169,7 @@ ClientConnect(c) ==
     LET
         req == [
             type |-> "Connect",
-            sess |-> nil,
+            sess |-> client_sess[c],
             seen_zxid |-> nil \* TODO
         ]
     IN
@@ -188,13 +188,23 @@ ClientConnect(c) ==
 ClientRecvConnect(c) ==
     LET
         req == recv_req[c][1]
+
+        when_normal ==
+            /\ handle_req' = [handle_req EXCEPT ![c] = Append(@, req)]
+            /\ client_status' = [client_status EXCEPT ![c] = "HasSession"]
+            /\ client_sess' = [client_sess EXCEPT ![c] = req.sess]
+
+        when_lose_sess ==
+            /\ UNCHANGED handle_req
+            /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
+            /\ client_sess' = [client_sess EXCEPT ![c] = nil]
     IN
     /\ client_status[c] = "Connecting"
     /\ recv_req[c] # <<>>
     /\ recv_req' = [recv_req EXCEPT ![c] = Tail(@)]
-    /\ handle_req' = [handle_req EXCEPT ![c] = Append(@, req)]
-    /\ client_status' = [client_status EXCEPT ![c] = "HasSession"]
-    /\ client_sess' = [client_sess EXCEPT ![c] = req.sess]
+    /\ IF req.sess # nil
+        THEN when_normal
+        ELSE when_lose_sess
 
     /\ UNCHANGED client_req
     /\ UNCHANGED next_xid
@@ -362,7 +372,7 @@ new_sess ==
         THEN 11
         ELSE new_sess_log[Len(new_sess_log)].sess + 1
 
-ServerHandleConnect(c) == \* TODO reuse session
+ServerHandleConnect(c) ==
     LET
         req == client_req[c][1]
 
@@ -376,15 +386,42 @@ ServerHandleConnect(c) == \* TODO reuse session
             zxid |-> new_zxid,
             sess |-> new_sess
         ]
+
+        when_req_no_sess ==
+            /\ active_sess' = active_sess \union {new_sess}
+            /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq)]
+            /\ server_log' = Append(server_log, log_entry)
+
+        hreq_exist_sess == [
+            type |-> "ConnectReply",
+            sess |-> req.sess
+        ]
+
+        when_req_has_sess_active ==
+            /\ UNCHANGED active_sess
+            /\ UNCHANGED server_log
+            /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq_exist_sess)]
+
+        hreq_no_sess == [
+            type |-> "ConnectReply",
+            sess |-> nil
+        ]
+
+        when_req_has_sess_deleted ==
+            /\ UNCHANGED active_sess
+            /\ UNCHANGED server_log
+            /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq_no_sess)]
     IN
     /\ client_req[c] # <<>>
     /\ req.type = "Connect"
     /\ client_req' = [client_req EXCEPT ![c] = Tail(@)]
 
-    \* TODO reuse session
-    /\ active_sess' = active_sess \union {new_sess}
-    /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq)]
-    /\ server_log' = Append(server_log, log_entry)
+    /\ IF req.sess = nil THEN
+            when_req_no_sess
+        ELSE IF req.sess \in active_sess THEN
+            when_req_has_sess_active
+        ELSE
+            when_req_has_sess_deleted
 
     /\ UNCHANGED server_state
     /\ UNCHANGED client_sess
@@ -544,6 +581,11 @@ ServerLogZxidInv ==
 AtMostOneConnectReq ==
     \A c \in Client:
         client_status[c] = "Connecting" => Len(client_req[c]) <= 1
+
+
+ClientHasSessInv ==
+    \A c \in Client:
+        client_status[c] = "HasSession" => client_sess[c] # nil
 
 
 ReverseInvForChildren ==
