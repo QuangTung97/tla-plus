@@ -312,17 +312,10 @@ ClientDisconnect(c) ==
             /\ num_fail' = num_fail + 1
             /\ client_status[c] = "Connecting"
             /\ UNCHANGED handle_req
-
-        when_already_disconnected ==
-            /\ num_fail < max_fail
-            /\ num_fail' = num_fail + 1
-            /\ client_status[c] = "Disconnected"
-            /\ UNCHANGED handle_req
     IN
     /\ \/ when_has_sess
        \/ when_has_sess_but_server_lost
        \/ when_connecting
-       \* \/ when_already_disconnected TODO check
 
     /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
     /\ client_req' = [client_req EXCEPT ![c] = <<>>]
