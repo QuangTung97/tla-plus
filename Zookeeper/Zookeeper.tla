@@ -993,4 +993,7 @@ ConnNotInAnyClientMustClosed ==
         IN
             ~exist_client => global_conn[conn].closed
 
+
+\* TODO Check Server Active Connections on single Session
+
 ====

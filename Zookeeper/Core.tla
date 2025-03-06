@@ -108,6 +108,12 @@ HandleRequest ==
             sess: NullSession
         ]
 
+        watch_ev == [
+            type: {"WatchEvent"},
+            event: {"Children", "DataChange", "Deleted"},
+            group: Group
+        ]
+
         normal == [
             req: ClientRequest,
             zxid: NullZxid,
@@ -115,7 +121,11 @@ HandleRequest ==
             status: {"OK", "NetErr", "Existed"}
         ]
     IN
-        UNION {new_sess, normal}
+        UNION {new_sess, normal, watch_ev}
+
+is_watch_event(hreq) ==
+    /\ "type" \in DOMAIN hreq
+    /\ hreq.type = "WatchEvent"
 
 new_handle_req(req, zxid, status) == [
     req |-> req,
@@ -300,13 +310,20 @@ ClientHandleReq(c) ==
     /\ UNCHANGED aux_vars
 
 
+recv_req_filter_watch(c) ==
+    LET
+        filter_fn(hreq) == ~is_watch_event(hreq)
+    IN
+    SelectSeq(recv_req[c], filter_fn)
+
+
 ClientDisconnect(c) ==
     LET
         new_failed_hreq(req) == new_handle_req(req, nil, "NetErr")
         failed_hreq == seqMap(client_req[c], new_failed_hreq)
 
         recv_req_to_failed(hreq) == new_handle_req(hreq.req, nil, "NetErr")
-        failed_recv_req == seqMap(recv_req[c], recv_req_to_failed)
+        failed_recv_req == seqMap(recv_req_filter_watch(c), recv_req_to_failed)
 
         update_when_has_sess ==
             /\ handle_req' = [handle_req EXCEPT
@@ -467,6 +484,15 @@ ServerLoseSession ==
 push_to_recv(c, hreq) ==
     /\ recv_req' = [recv_req EXCEPT ![c] = Append(@, hreq)]
 
+push_to_recv_multi(c, hreqs) ==
+    /\ recv_req' = [recv_req EXCEPT ![c] = @ \o hreqs]
+
+remove_children_watch(sess, g) ==
+    IF server_children_watch[sess] = {g} THEN
+        server_children_watch' = mapDelete(server_children_watch, sess)
+    ELSE
+        server_children_watch' = [server_children_watch EXCEPT ![sess] = @ \ {g}]
+
 
 ServerHandleCreate(c) ==
     LET
@@ -487,8 +513,25 @@ ServerHandleCreate(c) ==
 
         state == new_state_info(val)
 
+        sess == client_sess[c]
+        old_watch == mapGet(server_children_watch, sess, {})
+
+        watch_event == [
+            type |-> "WatchEvent",
+            event |-> "Children",
+            group |-> g
+        ]
+
+        push_to_recv_with_watch_event ==
+            IF g \in old_watch THEN
+                /\ push_to_recv_multi(c, <<watch_event, hreq>>)
+                /\ remove_children_watch(sess, g)
+            ELSE
+                /\ push_to_recv(c, hreq)
+                /\ UNCHANGED server_children_watch
+
         when_not_existed ==
-            /\ push_to_recv(c, hreq)
+            /\ push_to_recv_with_watch_event
             /\ server_log' = Append(server_log, log_entry)
             /\ server_state' = [server_state EXCEPT ![g] = mapPut(@, k, state)]
 
@@ -498,12 +541,12 @@ ServerHandleCreate(c) ==
             /\ push_to_recv(c, err_hreq)
             /\ UNCHANGED server_log
             /\ UNCHANGED server_state
+            /\ UNCHANGED server_children_watch
     IN
     /\ client_with_req(c, "Create")
     /\ IF k \in DOMAIN server_state[g]
         THEN when_existed
         ELSE when_not_existed
-    /\ UNCHANGED server_children_watch
     /\ server_handle_unchanged
 
 
@@ -517,13 +560,18 @@ ServerHandleChildren(c) ==
         ]
 
         hreq == new_handle_with_resp(req, new_zxid, children, "OK")
+
+        sess == client_sess[c]
+        old_watch == mapGet(server_children_watch, sess, {})
+        new_watch == old_watch \union {g}
     IN
     /\ client_with_req(c, "Children")
     /\ push_to_recv(c, hreq)
+    /\ server_children_watch' = mapPut(
+            server_children_watch, sess, new_watch)
 
     /\ UNCHANGED server_log
     /\ UNCHANGED server_state
-    /\ UNCHANGED server_children_watch
     /\ server_handle_unchanged
 
 ---------------------------------------------------------------------------
@@ -597,6 +645,12 @@ AtMostOneConnectReq ==
 ClientHasSessInv ==
     \A c \in Client:
         client_status[c] = "HasSession" => client_sess[c] # nil
+
+
+WatchListOnlyForActiveSess ==
+    \A sess \in DOMAIN server_children_watch:
+        /\ server_children_watch[sess] # {}
+        /\ sess \in active_sess
 
 
 ReverseInvForChildren ==

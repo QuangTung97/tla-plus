@@ -30,6 +30,13 @@ mapDelete(m, k) ==
 
 ASSUME mapDelete(<<3, 4, 5>>, 3) = <<3, 4>>
 
+mapGet(m, k, default) ==
+    IF k \in DOMAIN m
+        THEN m[k]
+        ELSE default
+
+ASSUME mapGet(<<>>, 2, "A") = "A"
+
 ----------------------------------------------------------
 
 minOf(S) == CHOOSE x \in S: (\A y \in S: y >= x)
