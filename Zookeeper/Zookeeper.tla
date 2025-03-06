@@ -18,7 +18,7 @@ VARIABLES
     num_action, next_xid, handled_xid, local_resp,
     num_fail,
     core_num_fail, expect_send, expect_recv,
-    test_zk_client_req, test_zk_recv_req
+    test_zk_client_req, test_zk_recv_req, test_zk_children
 
 server_vars == <<
     server_log, server_state, active_conns,
@@ -32,7 +32,7 @@ client_vars == <<
 >>
 
 aux_vars == <<num_fail, core_num_fail, expect_send, expect_recv>>
-match_vars == <<test_zk_client_req, test_zk_recv_req>>
+match_vars == <<test_zk_client_req, test_zk_recv_req, test_zk_children>>
 vars == <<server_vars, global_conn, client_vars, aux_vars, match_vars>>
 
 ---------------------------------------------------------------------------
@@ -200,6 +200,7 @@ TypeOK ==
 
     /\ test_zk_client_req \in [Client -> Seq(ClientRequest)]
     /\ test_zk_recv_req \in [Client -> Seq(HandleRequest)]
+    /\ IsMapOf(test_zk_children, active_sessions, SUBSET Group)
 
 
 Init ==
@@ -234,6 +235,7 @@ Init ==
 
     /\ test_zk_client_req = zk_client_req
     /\ test_zk_recv_req = zk_recv_req
+    /\ test_zk_children = zk_server_children_watch
 
 
 ---------------------------------------------------------------------------
@@ -241,6 +243,7 @@ Init ==
 auto_update ==
     \* /\ test_zk_client_req' = zk_client_req'
     \* /\ test_zk_recv_req' = zk_recv_req'
+    /\ test_zk_children' = zk_server_children_watch'
     /\ UNCHANGED test_zk_client_req
     /\ UNCHANGED test_zk_recv_req
 
@@ -515,8 +518,8 @@ ClientHandleSend(c) ==
     /\ client_send_pc[c] = "Start"
     /\ do_handle_send
 
-    /\ send_thread_unchanged
     /\ UNCHANGED server_vars
+    /\ send_thread_unchanged
 
 
 recv_thread_unchanged ==
@@ -582,8 +585,8 @@ ClientHandleRecv(c) ==
     /\ client_recv_pc[c] = "Start"
     /\ do_handle_recv
 
-    /\ recv_thread_unchanged
     /\ UNCHANGED server_vars
+    /\ recv_thread_unchanged
 
 
 ClientRecvPushToHandle(c) ==
@@ -604,8 +607,8 @@ ClientRecvPushToHandle(c) ==
     /\ UNCHANGED send_queue
     /\ UNCHANGED client_send_pc
     /\ UNCHANGED <<global_conn, last_zxid>>
-    /\ recv_thread_unchanged
     /\ UNCHANGED server_vars
+    /\ recv_thread_unchanged
 
 
 handle_thread_unchanged ==
@@ -631,8 +634,8 @@ ClientDoHandle(c) ==
         THEN handled_xid' = [handled_xid EXCEPT ![c] = hreq.req.xid]
         ELSE UNCHANGED handled_xid
 
-    /\ handle_thread_unchanged
     /\ UNCHANGED server_vars
+    /\ handle_thread_unchanged
 
 
 ClientWaitConnClosed(c) ==

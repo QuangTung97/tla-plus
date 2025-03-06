@@ -152,7 +152,7 @@ TypeOK ==
     /\ DOMAIN server_state = Group
     /\ \A g \in Group: IsMapOf(server_state[g], Key, StateInfo)
     /\ active_sess \subseteq Session
-    /\ IsMapOf(server_children_watch, Session, SUBSET Group)
+    /\ IsMapOf(server_children_watch, active_sess, SUBSET Group)
 
     /\ client_status \in [Client -> {"Disconnected", "Connecting", "HasSession"}]
     /\ client_sess \in [Client -> NullSession]
