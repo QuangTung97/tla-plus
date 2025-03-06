@@ -700,12 +700,14 @@ server_consume_and_resp(conn, resp) ==
 doHandleCreate(conn) ==
     LET
         req == global_conn[conn].send[1]
+        g == req.group
+        k == req.key
 
         log == [
             type |-> "Put",
             zxid |-> gen_new_zxid,
-            group |-> req.group,
-            key |-> req.key,
+            group |-> g,
+            key |-> k,
             val |-> req.val
         ]
 
@@ -715,12 +717,27 @@ doHandleCreate(conn) ==
         ]
 
         hreq == new_handle_req(req, gen_new_zxid, "OK")
+        failed_hreq == new_handle_req(req, nil, "Existed")
+
+        is_existed ==
+            /\ k \in DOMAIN server_state[g]
+
+        when_existed ==
+            /\ server_consume_and_resp(conn, failed_hreq)
+            /\ UNCHANGED server_log
+            /\ UNCHANGED server_state
+
+        when_not_existed ==
+            /\ server_consume_and_resp(conn, hreq)
+            /\ server_log' = Append(server_log, log)
+            /\ server_state' = [server_state EXCEPT
+                    ![g] = mapPut(@, k, state_info)]
     IN
-    /\ server_consume_and_resp(conn, hreq)
+    /\ global_conn[conn].send # <<>>
     /\ req.type = "Create"
-    /\ server_log' = Append(server_log, log)
-    /\ server_state' = [server_state EXCEPT
-            ![req.group] = mapPut(@, req.key, state_info)]
+    /\ IF is_existed
+        THEN when_existed
+        ELSE when_not_existed
 
     /\ UNCHANGED <<active_conns, active_sessions>>
     /\ UNCHANGED client_vars
