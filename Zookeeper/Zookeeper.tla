@@ -788,6 +788,13 @@ server_consume_and_resp(conn, resp) ==
             ![conn].recv = Append(@, resp)
         ]
 
+server_consume_and_resp_multi(conn, resp_list) ==
+    /\ global_conn[conn].send # <<>>
+    /\ global_conn' = [global_conn EXCEPT
+            ![conn].send = Tail(@),
+            ![conn].recv = @ \o resp_list
+        ]
+
 
 doHandleCreate(conn) ==
     LET
@@ -820,12 +827,21 @@ doHandleCreate(conn) ==
             /\ UNCHANGED server_state
             /\ UNCHANGED server_children
 
+        old_watch == mapGet(server_children, conn, {})
+
+        push_to_conn_with_watch ==
+            IF g \in old_watch THEN
+                /\ server_consume_and_resp_multi(conn, <<hreq>>)
+                /\ server_children' = mapDelete(server_children, conn)
+            ELSE
+                /\ server_consume_and_resp(conn, hreq)
+                /\ UNCHANGED server_children
+
         when_not_existed ==
-            /\ server_consume_and_resp(conn, hreq)
+            /\ push_to_conn_with_watch
             /\ server_log' = Append(server_log, log)
             /\ server_state' = [server_state EXCEPT
                     ![g] = mapPut(@, k, state_info)]
-            /\ UNCHANGED server_children
     IN
     /\ global_conn[conn].send # <<>>
     /\ req.type = "Create"

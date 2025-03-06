@@ -152,7 +152,7 @@ TypeOK ==
     /\ DOMAIN server_state = Group
     /\ \A g \in Group: IsMapOf(server_state[g], Key, StateInfo)
     /\ active_sess \subseteq Session
-    /\ IsMapOf(server_children_watch, active_sess, SUBSET Group)
+    /\ server_children_watch \in [Group -> SUBSET active_sess]
 
     /\ client_status \in [Client -> {"Disconnected", "Connecting", "HasSession"}]
     /\ client_sess \in [Client -> NullSession]
@@ -168,7 +168,7 @@ Init ==
     /\ server_log = <<>>
     /\ server_state = [g \in Group |-> <<>>]
     /\ active_sess = {}
-    /\ server_children_watch = <<>>
+    /\ server_children_watch = [g \in Group |-> {}]
 
     /\ client_status = [c \in Client |-> "Disconnected"]
     /\ client_sess = [c \in Client |-> nil]
@@ -470,7 +470,9 @@ ServerLoseSession ==
 
         /\ active_sess' = active_sess \ {sess}
         /\ server_log' = Append(server_log, log_entry)
-        /\ server_children_watch' = mapDelete(server_children_watch, sess)
+        /\ server_children_watch' = [
+                g \in Group |-> server_children_watch[g] \ {sess}
+            ]
 
         /\ UNCHANGED server_state
         /\ UNCHANGED client_sess
@@ -486,13 +488,6 @@ push_to_recv(c, hreq) ==
 
 push_to_recv_multi(c, hreqs) ==
     /\ recv_req' = [recv_req EXCEPT ![c] = @ \o hreqs]
-
-remove_children_watch(sess, g) ==
-    IF server_children_watch[sess] = {g} THEN
-        server_children_watch' = mapDelete(server_children_watch, sess)
-    ELSE
-        server_children_watch' = [server_children_watch EXCEPT ![sess] = @ \ {g}]
-
 
 ServerHandleCreate(c) ==
     LET
@@ -514,7 +509,7 @@ ServerHandleCreate(c) ==
         state == new_state_info(val)
 
         sess == client_sess[c]
-        old_watch == mapGet(server_children_watch, sess, {})
+        old_watch == server_children_watch[g]
 
         watch_event == [
             type |-> "WatchEvent",
@@ -523,9 +518,8 @@ ServerHandleCreate(c) ==
         ]
 
         push_to_recv_with_watch_event ==
-            IF g \in old_watch THEN
-                /\ push_to_recv_multi(c, <<watch_event, hreq>>)
-                /\ remove_children_watch(sess, g)
+            IF sess \in old_watch THEN
+                /\ TRUE
             ELSE
                 /\ push_to_recv(c, hreq)
                 /\ UNCHANGED server_children_watch
@@ -562,13 +556,11 @@ ServerHandleChildren(c) ==
         hreq == new_handle_with_resp(req, new_zxid, children, "OK")
 
         sess == client_sess[c]
-        old_watch == mapGet(server_children_watch, sess, {})
-        new_watch == old_watch \union {g}
     IN
     /\ client_with_req(c, "Children")
     /\ push_to_recv(c, hreq)
-    /\ server_children_watch' = mapPut(
-            server_children_watch, sess, new_watch)
+    /\ server_children_watch' = [server_children_watch
+            EXCEPT ![g] = @ \union {sess}]
 
     /\ UNCHANGED server_log
     /\ UNCHANGED server_state
@@ -645,12 +637,6 @@ AtMostOneConnectReq ==
 ClientHasSessInv ==
     \A c \in Client:
         client_status[c] = "HasSession" => client_sess[c] # nil
-
-
-WatchListOnlyForActiveSess ==
-    \A sess \in DOMAIN server_children_watch:
-        /\ server_children_watch[sess] # {}
-        /\ sess \in active_sess
 
 
 ReverseInvForChildren ==
