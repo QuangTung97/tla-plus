@@ -251,8 +251,8 @@ ClientConnect(c) ==
     LET
         req == [
             type |-> "Connect",
-            sess |-> nil,
-            seen_zxid |-> nil
+            sess |-> last_session[c],
+            seen_zxid |-> nil \* TODO
         ]
 
         conn == client_conn[c]
@@ -660,25 +660,52 @@ doHandleConnect(conn) ==
             sess |-> new_sess
         ]
 
-        resp == [
+        new_resp(sess_val) == [
             type |-> "ConnectReply",
-            sess |-> new_sess
+            sess |-> sess_val
         ]
 
         curr_client == current_client(conn)
+
+        req == global_conn[conn].send[1]
+
+        when_req_no_sess ==
+            /\ global_conn' = [global_conn EXCEPT
+                    ![conn].send = Tail(@),
+                    ![conn].recv = Append(@, new_resp(new_sess))
+                ]
+            /\ active_sessions' = active_sessions \union {new_sess}
+            /\ active_conns' = [active_conns EXCEPT ![conn].sess = new_sess]
+            /\ server_log' = Append(server_log, log)
+
+        when_req_has_sess_active ==
+            /\ global_conn' = [global_conn EXCEPT
+                    ![conn].send = Tail(@),
+                    ![conn].recv = Append(@, new_resp(req.sess))
+                ]
+            /\ active_conns' = [active_conns EXCEPT ![conn].sess = req.sess]
+            /\ UNCHANGED active_sessions
+            /\ UNCHANGED server_log
+
+        when_req_has_sess_deleted ==
+            /\ global_conn' = [global_conn EXCEPT
+                    ![conn].send = Tail(@),
+                    ![conn].recv = Append(@, new_resp(nil))
+                ]
+            /\ UNCHANGED active_conns
+            /\ UNCHANGED active_sessions
+            /\ UNCHANGED server_log
     IN
     /\ ~global_conn[conn].closed
     /\ global_conn[conn].send # <<>>
     /\ active_conns[conn].sess = nil
 
-    /\ global_conn' = [global_conn EXCEPT
-            ![conn].send = Tail(@),
-            ![conn].recv = Append(@, resp)
-        ]
-
-    /\ active_sessions' = active_sessions \union {new_sess}
-    /\ active_conns' = [active_conns EXCEPT ![conn].sess = new_sess]
-    /\ server_log' = Append(server_log, log)
+    /\ IF req.sess = nil THEN
+            when_req_no_sess
+        ELSE IF req.sess \in active_sessions THEN
+            when_req_has_sess_active
+        ELSE
+            when_req_has_sess_deleted
 
     /\ UNCHANGED server_state
     /\ UNCHANGED client_vars
@@ -942,5 +969,6 @@ ConnClosedMustEmpty ==
 SendQueueMustEmptyWhenNotHasSession ==
     \A c \in Client:
         client_status[c] # "HasSession" => send_queue[c] = <<>>
+
 
 ====
