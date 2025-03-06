@@ -213,8 +213,10 @@ Init ==
 ---------------------------------------------------------------------------
 
 auto_update ==
-    /\ test_zk_client_req' = zk_client_req'
-    /\ test_zk_recv_req' = zk_recv_req'
+    \* /\ test_zk_client_req' = zk_client_req'
+    \* /\ test_zk_recv_req' = zk_recv_req'
+    /\ UNCHANGED test_zk_client_req
+    /\ UNCHANGED test_zk_recv_req
 
 send_recv_vars == <<
     client_send_pc, client_recv_pc,
@@ -779,6 +781,13 @@ ServerHandleRequest ==
            \/ doHandleChildren(conn)
         /\ auto_update
 
+
+ServerRemoveActiveConn ==
+    \E conn \in DOMAIN active_conns:
+        /\ active_conns[conn].sess # nil
+        /\ global_conn[conn].closed
+        /\ auto_update
+
 ---------------------------------------------------------------------------
 
 ConnectionClosed ==
@@ -846,6 +855,7 @@ Next ==
 
     \/ ServerHandleConnect
     \/ ServerHandleRequest
+    \/ ServerRemoveActiveConn
 
     \/ ConnectionClosed
     \/ Terminated
