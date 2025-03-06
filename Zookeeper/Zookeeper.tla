@@ -13,7 +13,7 @@ VARIABLES server_log, server_state, active_conns, active_sessions,
     client_conn, client_main_pc, last_session, last_zxid,
     client_send_pc, client_recv_pc, client_status,
     send_queue, recv_map, handle_queue,
-    num_action, next_xid, handled_xid, local_xid,
+    num_action, next_xid, handled_xid, local_resp,
     num_fail,
     core_num_fail, expect_send, expect_recv,
     test_zk_client_req, test_zk_recv_req
@@ -23,7 +23,7 @@ client_vars == <<
     client_conn, client_main_pc, last_session, last_zxid,
     client_send_pc, client_recv_pc, client_status,
     send_queue, recv_map, handle_queue,
-    num_action, next_xid, handled_xid, local_xid
+    num_action, next_xid, handled_xid, local_resp
 >>
 
 aux_vars == <<num_fail, core_num_fail, expect_send, expect_recv>>
@@ -58,15 +58,13 @@ failed_hreq_from_recv_map(c) ==
 
 zk_client_req ==
     LET
+        conn(c) == global_conn[client_conn[c]]
+
         conn_sending(c) ==
             IF client_conn[c] = nil THEN
                 <<>>
-            ELSE IF client_status[c] = "Connecting" THEN
-                expect_send[c]
-            ELSE IF global_conn[client_conn[c]].closed THEN
-                expect_send[c]
             ELSE
-                global_conn[client_conn[c]].send
+                expect_send[c] \o conn(c).send
     IN
     [c \in Client |-> conn_sending(c) \o send_queue[c]]
 
@@ -74,27 +72,11 @@ zk_recv_req ==
     LET
         conn(c) == global_conn[client_conn[c]]
 
-        send_list(c) == conn(c).send \o send_queue[c]
-
-        pending_xid(c) == {req.xid: req \in Range(send_list(c))}
-
-        conn_recv_xid(c) == {hreq.req.xid: hreq \in Range(conn(c).recv)}
-
-        filtered(c) == \* TODO remove
-            LET
-                filter_cond(hreq) ==
-                    /\ hreq.req.xid \notin pending_xid(c)
-                    /\ hreq.req.xid \notin conn_recv_xid(c)
-            IN
-            SelectSeq(failed_hreq_from_recv_map(c), filter_cond)
-
         mapped(c) ==
             IF client_conn[c] = nil THEN
                 <<>>
-            ELSE IF client_status[c] = "Connecting" THEN
-                expect_recv[c]
             ELSE
-                conn(c).recv
+                expect_recv[c] \o conn(c).recv
     IN
     [c \in Client |-> mapped(c)]
 
@@ -183,7 +165,7 @@ TypeOK ==
     /\ num_action \in 0..max_action
     /\ next_xid \in [Client -> Xid]
     /\ handled_xid \in [Client -> Xid]
-    /\ local_xid \in [Client -> Xid \union {nil}]
+    /\ local_resp \in [Client -> HandleRequest \union {nil}]
 
     /\ num_fail \in 0..max_fail
     /\ core_num_fail \in 0..max_fail
@@ -217,7 +199,7 @@ Init ==
     /\ num_action = 0
     /\ next_xid = [c \in Client |-> 30]
     /\ handled_xid = [c \in Client |-> 30]
-    /\ local_xid = [c \in Client |-> nil]
+    /\ local_resp = [c \in Client |-> nil]
 
     /\ num_fail = 0
     /\ core_num_fail = 0
@@ -237,7 +219,7 @@ auto_update ==
 send_recv_vars == <<
     client_send_pc, client_recv_pc,
     send_queue, recv_map,
-    num_action, next_xid, handled_xid, local_xid,
+    num_action, next_xid, handled_xid, local_resp,
     num_fail
 >>
 
@@ -278,16 +260,12 @@ ClientConnect(c) ==
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "WaitConnect"]
             /\ conn_send(conn, req)
             /\ client_status' = [client_status EXCEPT ![c] = "Connecting"]
-            /\ expect_send' = [expect_send EXCEPT ![c] = Append(@, req)]
-            /\ UNCHANGED core_num_fail
-            /\ UNCHANGED expect_recv
 
         when_closed ==
             /\ global_conn[conn].closed
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "Init"]
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
             /\ UNCHANGED global_conn
-            /\ UNCHANGED <<core_num_fail, expect_send, expect_recv>>
     IN
     /\ client_main_pc[c] = "ClientConnect"
     /\ \/ when_normal
@@ -297,6 +275,7 @@ ClientConnect(c) ==
     /\ UNCHANGED handle_queue
     /\ UNCHANGED send_recv_vars
     /\ UNCHANGED server_vars
+    /\ UNCHANGED <<core_num_fail, expect_send, expect_recv>>
     /\ auto_update
 
 
@@ -349,7 +328,7 @@ ClientStartThreads(c) ==
     /\ UNCHANGED client_status
     /\ UNCHANGED <<send_queue, recv_map, handle_queue>>
     /\ UNCHANGED <<num_action, next_xid, handled_xid>>
-    /\ UNCHANGED local_xid
+    /\ UNCHANGED local_resp
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED global_conn
     /\ UNCHANGED server_vars
@@ -369,7 +348,7 @@ action_unchanged ==
     /\ UNCHANGED <<client_main_pc, client_recv_pc>>
     /\ UNCHANGED client_status
     /\ UNCHANGED <<global_conn, recv_map, handled_xid>>
-    /\ UNCHANGED local_xid
+    /\ UNCHANGED local_resp
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
@@ -437,7 +416,7 @@ send_thread_unchanged ==
     /\ UNCHANGED client_recv_pc
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED <<handle_queue>>
-    /\ UNCHANGED <<next_xid, num_action, handled_xid, local_xid>>
+    /\ UNCHANGED <<next_xid, num_action, handled_xid, local_resp>>
     /\ UNCHANGED <<num_fail, core_num_fail, expect_recv>>
     /\ auto_update
 
@@ -501,7 +480,7 @@ recv_thread_unchanged ==
     /\ UNCHANGED client_main_pc
     /\ UNCHANGED <<last_session>>
     /\ UNCHANGED <<next_xid, num_action, handled_xid>>
-    /\ UNCHANGED <<num_fail, expect_send, expect_recv>>
+    /\ UNCHANGED <<num_fail>>
     /\ auto_update
 
 
@@ -515,7 +494,9 @@ ClientHandleRecv(c) ==
             /\ client_recv_pc' = [client_recv_pc EXCEPT ![c] = "PushToHandle"]
             /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
             /\ last_zxid' = [last_zxid EXCEPT ![c] = resp.zxid]
-            /\ local_xid' = [local_xid EXCEPT ![c] = resp.req.xid]
+            /\ local_resp' = [local_resp EXCEPT ![c] = resp]
+            /\ expect_recv' = [expect_recv EXCEPT ![c] = Append(@, resp)]
+            /\ UNCHANGED expect_send
             /\ UNCHANGED core_num_fail
             /\ UNCHANGED recv_map
             /\ UNCHANGED handle_queue
@@ -537,11 +518,14 @@ ClientHandleRecv(c) ==
                     EXCEPT ![c] = @ \o pushed \o send_queue_remain]
             /\ send_queue' = [send_queue EXCEPT ![c] = <<>>]
             /\ notify_send_thread(c)
+
             /\ core_num_fail' = core_num_fail + 1
+            /\ expect_send' = [expect_send EXCEPT ![c] = <<>>]
+            /\ expect_recv' = [expect_recv EXCEPT ![c] = <<>>]
 
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_zxid
-            /\ UNCHANGED local_xid
+            /\ UNCHANGED local_resp
 
         do_handle_recv ==
             IF global_conn[conn].closed THEN
@@ -560,21 +544,18 @@ ClientHandleRecv(c) ==
 
 ClientRecvPushToHandle(c) ==
     LET
-        xid == local_xid[c]
-        req == recv_map[c][xid]
-
-        hreq == [
-            req |-> req,
-            zxid |-> last_zxid[c]
-        ]
+        hreq == local_resp[c]
+        xid == hreq.req.xid
     IN
     /\ client_recv_pc[c] = "PushToHandle"
     /\ client_recv_pc' = [client_recv_pc EXCEPT ![c] = "Start"]
 
     /\ recv_map' = [recv_map EXCEPT ![c] = mapDelete(@, xid)]
-    /\ local_xid' = [local_xid EXCEPT ![c] = nil]
+    /\ local_resp' = [local_resp EXCEPT ![c] = nil]
     /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, hreq)]
+    /\ expect_recv' = [expect_recv EXCEPT ![c] = Tail(@)]
 
+    /\ UNCHANGED <<expect_send, core_num_fail>>
     /\ UNCHANGED client_status
     /\ UNCHANGED send_queue
     /\ UNCHANGED client_send_pc
@@ -592,7 +573,7 @@ handle_thread_unchanged ==
     /\ UNCHANGED <<send_queue, recv_map>>
     /\ UNCHANGED global_conn
     /\ UNCHANGED <<next_xid, num_action>>
-    /\ UNCHANGED <<last_zxid, local_xid>>
+    /\ UNCHANGED <<last_zxid, local_resp>>
     /\ UNCHANGED aux_vars
     /\ auto_update
 
@@ -622,12 +603,13 @@ ClientWaitConnClosed(c) ==
     /\ UNCHANGED <<client_send_pc, client_recv_pc>>
     /\ UNCHANGED global_conn
     /\ UNCHANGED <<send_queue, handle_queue, recv_map>>
-    /\ UNCHANGED <<next_xid, handled_xid, local_xid>>
+    /\ UNCHANGED <<next_xid, handled_xid, local_resp>>
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED num_action
 
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
+    /\ auto_update
 
 ---------------------------------------------------------------------------
 
@@ -694,16 +676,13 @@ doHandleConnect(conn) ==
             ![conn].recv = Append(@, resp)
         ]
 
-    /\ expect_send' = [expect_send EXCEPT ![curr_client] = <<>>]
-    /\ expect_recv' = [expect_recv EXCEPT ![curr_client] = <<resp>>]
-
     /\ active_sessions' = active_sessions \union {new_sess}
     /\ active_conns' = [active_conns EXCEPT ![conn].sess = new_sess]
     /\ server_log' = Append(server_log, log)
 
     /\ UNCHANGED server_state
     /\ UNCHANGED client_vars
-    /\ UNCHANGED <<num_fail, core_num_fail>>
+    /\ UNCHANGED <<num_fail, core_num_fail, expect_send, expect_recv>>
     /\ auto_update
 
 ServerHandleConnect ==
@@ -789,18 +768,21 @@ ConnectionClosed ==
     \E conn \in DOMAIN global_conn:
         LET
             curr == current_client(conn)
+            conn_val == global_conn[conn]
         IN
         /\ ~global_conn[conn].closed
         /\ num_fail < max_fail
         /\ num_fail' = num_fail + 1
 
-        /\ expect_send' = [expect_send EXCEPT ![curr] = global_conn[conn].send]
+        /\ expect_send' = [expect_send EXCEPT ![curr] = @ \o conn_val.send]
+        /\ expect_recv' = [expect_recv EXCEPT ![curr] = @ \o conn_val.recv]
+
         /\ global_conn' = [global_conn EXCEPT
                 ![conn].closed = TRUE,
                 ![conn].send = <<>>,
                 ![conn].recv = <<>>
             ]
-        /\ UNCHANGED <<core_num_fail, expect_recv>>
+        /\ UNCHANGED <<core_num_fail>>
         /\ UNCHANGED server_vars
         /\ UNCHANGED client_vars
         /\ auto_update
