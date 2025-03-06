@@ -8,7 +8,9 @@ ASSUME
     /\ Ephemeral \subseteq Group
     /\ IsFiniteSet(Group)
 
-VARIABLES server_log, server_state, active_conns, active_sessions,
+VARIABLES
+    server_log, server_state, active_conns,
+    active_sessions, server_children, \* children watch
     global_conn,
     client_conn, client_main_pc, last_session, last_zxid,
     client_send_pc, client_recv_pc, client_status,
@@ -18,7 +20,10 @@ VARIABLES server_log, server_state, active_conns, active_sessions,
     core_num_fail, expect_send, expect_recv,
     test_zk_client_req, test_zk_recv_req
 
-server_vars == <<server_log, server_state, active_conns, active_sessions>>
+server_vars == <<
+    server_log, server_state, active_conns,
+    active_sessions, server_children
+>>
 client_vars == <<
     client_conn, client_main_pc, last_session, last_zxid,
     client_send_pc, client_recv_pc, client_status,
@@ -80,6 +85,24 @@ zk_recv_req ==
     IN
     [c \in Client |-> mapped(c)]
 
+zk_server_children_watch ==
+    LET
+        conn_set(sess) ==
+            {conn \in DOMAIN active_conns: active_conns[conn].sess = sess}
+
+        conn_of_sess(sess) ==
+            IF conn_set(sess) = {}
+                THEN nil
+                ELSE CHOOSE conn \in conn_set(sess): TRUE
+
+        children_watch_of(sess) ==
+            mapGet(server_children, conn_of_sess(sess), {})
+
+        sess_with_non_null_watch ==
+            {sess \in active_sessions: children_watch_of(sess) # {}}
+    IN
+        [sess \in sess_with_non_null_watch |-> children_watch_of(sess)]
+
 
 ZK == INSTANCE Core WITH
     client_req <- zk_client_req,
@@ -87,6 +110,7 @@ ZK == INSTANCE Core WITH
     handle_req <- handle_queue,
     client_sess <- last_session,
     active_sess <- active_sessions,
+    server_children_watch <- zk_server_children_watch,
     num_fail <- core_num_fail,
     value_range <- 10
 
@@ -145,6 +169,7 @@ TypeOK ==
 
     /\ IsMapOf(active_conns, DOMAIN global_conn, ServerConnInfo)
     /\ active_sessions \subseteq Session
+    /\ IsMapOf(server_children, DOMAIN global_conn, SUBSET Group)
 
     /\ global_conn \in Seq(ClientConn)
     /\ client_conn \in [Client -> NullConn]
@@ -182,6 +207,7 @@ Init ==
     /\ server_state = [g \in Group |-> <<>>]
     /\ active_conns = <<>>
     /\ active_sessions = {}
+    /\ server_children = <<>>
 
     /\ global_conn = <<>>
     /\ client_conn = [c \in Client |-> nil]
@@ -645,7 +671,7 @@ ServerAcceptConn(c) ==
 
     /\ UNCHANGED global_conn
     /\ UNCHANGED active_sessions
-    /\ UNCHANGED <<server_log, server_state>>
+    /\ UNCHANGED <<server_log, server_state, server_children>>
 
     /\ UNCHANGED client_vars
     /\ UNCHANGED aux_vars
@@ -722,6 +748,7 @@ doHandleConnect(conn) ==
             when_req_has_sess_deleted
 
     /\ UNCHANGED server_state
+    /\ UNCHANGED server_children
     /\ UNCHANGED client_vars
     /\ UNCHANGED <<num_fail, core_num_fail, expect_send, expect_recv>>
     /\ auto_update
@@ -767,12 +794,14 @@ doHandleCreate(conn) ==
             /\ server_consume_and_resp(conn, failed_hreq)
             /\ UNCHANGED server_log
             /\ UNCHANGED server_state
+            /\ UNCHANGED server_children
 
         when_not_existed ==
             /\ server_consume_and_resp(conn, hreq)
             /\ server_log' = Append(server_log, log)
             /\ server_state' = [server_state EXCEPT
                     ![g] = mapPut(@, k, state_info)]
+            /\ UNCHANGED server_children
     IN
     /\ global_conn[conn].send # <<>>
     /\ req.type = "Create"
@@ -802,9 +831,14 @@ doHandleChildren(conn) ==
         ]
 
         hreq == ZK!new_handle_with_resp(req, gen_new_zxid, children, "OK")
+
+        old_watch == mapGet(server_children, conn, {})
+        new_watch == old_watch \union {g}
     IN
     /\ server_consume_and_resp(conn, hreq)
     /\ req.type = "Children"
+
+    /\ server_children' = mapPut(server_children, conn, new_watch)
 
     /\ UNCHANGED server_log
     /\ UNCHANGED server_state
@@ -828,6 +862,7 @@ ServerRemoveActiveConn ==
         /\ active_conns' = mapDelete(active_conns, conn)
 
         /\ UNCHANGED global_conn
+        /\ UNCHANGED server_children \* TODO check invariant
         /\ UNCHANGED <<server_log, server_state>>
         /\ UNCHANGED active_sessions
         /\ UNCHANGED client_vars
@@ -858,6 +893,7 @@ ServerLoseSession ==
         /\ active_sessions' = active_sessions \ {sess}
         /\ server_log' = Append(server_log, log_entry)
         /\ UNCHANGED server_state
+        /\ UNCHANGED server_children
 
         /\ UNCHANGED active_conns
         /\ UNCHANGED global_conn
