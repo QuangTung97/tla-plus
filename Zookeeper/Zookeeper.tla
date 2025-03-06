@@ -14,6 +14,7 @@ VARIABLES
     global_conn,
     client_conn, client_main_pc, last_session, last_zxid,
     client_send_pc, client_recv_pc, client_status,
+    client_children, \* children watch
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_resp,
     num_fail,
@@ -27,6 +28,7 @@ server_vars == <<
 client_vars == <<
     client_conn, client_main_pc, last_session, last_zxid,
     client_send_pc, client_recv_pc, client_status,
+    client_children,
     send_queue, recv_map, handle_queue,
     num_action, next_xid, handled_xid, local_resp
 >>
@@ -87,13 +89,17 @@ zk_recv_req ==
 
 zk_server_children_watch ==
     LET
-        conn_set(sess) ==
-            {conn \in DOMAIN active_conns: active_conns[conn].sess = sess}
+        client_of_sess_set(sess) == {c \in Client: last_session[c] = sess}
+
+        client_of_sess(sess) ==
+            IF client_of_sess_set(sess) = {}
+                THEN nil
+                ELSE CHOOSE c \in client_of_sess_set(sess): TRUE
 
         conn_of_sess(sess) ==
-            IF conn_set(sess) = {}
+            IF client_of_sess(sess) = nil
                 THEN nil
-                ELSE CHOOSE conn \in conn_set(sess): TRUE
+                ELSE client_conn[client_of_sess(sess)]
 
         children_watch_of(sess) ==
             mapGet(server_children, conn_of_sess(sess), {})
@@ -180,6 +186,7 @@ TypeOK ==
     /\ client_send_pc \in [Client -> {"Stopped", "Start", "Sleep"}]
     /\ client_recv_pc \in [Client -> {"Stopped", "Start", "PushToHandle"}]
     /\ client_status \in [Client -> {"Connecting", "HasSession", "Disconnected"}]
+    /\ client_children \in [Client -> SUBSET Group]
 
     /\ send_queue \in [Client -> Seq(ClientRequest)]
     /\ DOMAIN recv_map = Client
@@ -219,6 +226,7 @@ Init ==
     /\ client_send_pc = [c \in Client |-> "Stopped"]
     /\ client_recv_pc = [c \in Client |-> "Stopped"]
     /\ client_status = [c \in Client |-> "Disconnected"]
+    /\ client_children = [c \in Client |-> {}]
 
     /\ send_queue = [c \in Client |-> <<>>]
     /\ recv_map = [c \in Client |-> <<>>]
@@ -265,6 +273,7 @@ NewConnection(c) ==
     /\ client_conn' = [client_conn EXCEPT ![c] = new_conn]
 
     /\ UNCHANGED client_status
+    /\ UNCHANGED client_children
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED send_recv_vars
     /\ UNCHANGED <<core_num_fail, expect_send, expect_recv>>
@@ -302,6 +311,7 @@ ClientConnect(c) ==
     /\ \/ when_normal
        \/ when_closed
 
+    /\ UNCHANGED client_children
     /\ UNCHANGED <<client_conn, last_session, last_zxid>>
     /\ UNCHANGED handle_queue
     /\ UNCHANGED send_recv_vars
@@ -325,6 +335,7 @@ ClientConnectReply(c) ==
             /\ last_session' = [last_session EXCEPT ![c] = resp.sess]
             /\ client_status' = [client_status EXCEPT ![c] = "HasSession"]
             /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, resp)]
+            /\ UNCHANGED client_children \* TODO
             /\ UNCHANGED core_num_fail
 
         when_sess_expired ==
@@ -338,6 +349,7 @@ ClientConnectReply(c) ==
                 ]
             /\ last_session' = [last_session EXCEPT ![c] = nil]
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
+            /\ UNCHANGED client_children
             /\ UNCHANGED handle_queue
             /\ UNCHANGED core_num_fail
 
@@ -346,6 +358,7 @@ ClientConnectReply(c) ==
             /\ client_main_pc' = [client_main_pc EXCEPT ![c] = "Init"]
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
             /\ core_num_fail' = core_num_fail + 1
+            /\ UNCHANGED client_children
             /\ UNCHANGED handle_queue
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_session
@@ -373,6 +386,7 @@ ClientStartThreads(c) ==
 
     /\ UNCHANGED client_conn
     /\ UNCHANGED client_status
+    /\ UNCHANGED client_children
     /\ UNCHANGED <<send_queue, recv_map, handle_queue>>
     /\ UNCHANGED <<num_action, next_xid, handled_xid>>
     /\ UNCHANGED local_resp
@@ -399,6 +413,7 @@ action_unchanged ==
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
+    /\ UNCHANGED client_children
     /\ auto_update
 
 
@@ -460,6 +475,7 @@ send_thread_unchanged ==
     /\ UNCHANGED client_conn
     /\ UNCHANGED client_main_pc
     /\ UNCHANGED client_status
+    /\ UNCHANGED client_children
     /\ UNCHANGED client_recv_pc
     /\ UNCHANGED <<last_session, last_zxid>>
     /\ UNCHANGED <<handle_queue>>
@@ -543,6 +559,7 @@ ClientHandleRecv(c) ==
             /\ last_zxid' = [last_zxid EXCEPT ![c] = resp.zxid]
             /\ local_resp' = [local_resp EXCEPT ![c] = resp]
             /\ expect_recv' = [expect_recv EXCEPT ![c] = Append(@, resp)]
+            /\ UNCHANGED client_children
             /\ UNCHANGED expect_send
             /\ UNCHANGED core_num_fail
             /\ UNCHANGED recv_map
@@ -570,6 +587,7 @@ ClientHandleRecv(c) ==
             /\ expect_send' = [expect_send EXCEPT ![c] = <<>>]
             /\ expect_recv' = [expect_recv EXCEPT ![c] = <<>>]
 
+            /\ UNCHANGED client_children
             /\ UNCHANGED global_conn
             /\ UNCHANGED last_zxid
             /\ UNCHANGED local_resp
@@ -602,6 +620,7 @@ ClientRecvPushToHandle(c) ==
     /\ handle_queue' = [handle_queue EXCEPT ![c] = Append(@, hreq)]
     /\ expect_recv' = [expect_recv EXCEPT ![c] = Tail(@)]
 
+    /\ UNCHANGED client_children \* TODO
     /\ UNCHANGED <<expect_send, core_num_fail>>
     /\ UNCHANGED client_status
     /\ UNCHANGED send_queue
@@ -622,6 +641,7 @@ handle_thread_unchanged ==
     /\ UNCHANGED <<next_xid, num_action>>
     /\ UNCHANGED <<last_zxid, local_resp>>
     /\ UNCHANGED aux_vars
+    /\ UNCHANGED client_children
     /\ auto_update
 
 ClientDoHandle(c) ==
@@ -647,6 +667,7 @@ ClientWaitConnClosed(c) ==
     /\ client_conn' = [client_conn EXCEPT ![c] = nil]
 
     /\ UNCHANGED client_status
+    /\ UNCHANGED client_children
     /\ UNCHANGED <<client_send_pc, client_recv_pc>>
     /\ UNCHANGED global_conn
     /\ UNCHANGED <<send_queue, handle_queue, recv_map>>
