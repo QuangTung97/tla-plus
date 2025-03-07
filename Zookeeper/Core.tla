@@ -9,7 +9,8 @@ ASSUME IsFiniteSet(Group)
 VARIABLES
     server_log, server_state, active_sess,
     server_children_watch,
-    client_status, client_sess, next_xid, client_req,
+    client_status, client_sess, client_zxid,
+    next_xid, client_req,
     recv_req, handle_req, num_action,
     num_fail, client_children_watch
 
@@ -18,7 +19,8 @@ server_vars == <<
     server_children_watch
 >>
 client_vars == <<
-    client_status, client_sess, next_xid, client_req,
+    client_status, client_sess, client_zxid,
+    next_xid, client_req,
     recv_req, handle_req, num_action,
     client_children_watch
 >>
@@ -50,15 +52,15 @@ LogEntry ==
             sess: Session
         ]
 
-        put_entry == [
-            type: {"Put"},
+        create_entry == [
+            type: {"Create"},
             zxid: Zxid,
             group: Group,
             key: Key,
             val: NullValue
         ]
     IN
-        UNION {new_sess, del_sess, put_entry}
+        UNION {new_sess, del_sess, create_entry}
 
 StateInfo == [
     val: NullValue,
@@ -74,8 +76,7 @@ ClientRequest ==
     LET
         connect_req == [
             type: {"Connect"},
-            sess: NullSession,
-            seen_zxid: NullZxid
+            sess: NullSession
         ]
 
         create_req == [
@@ -94,6 +95,7 @@ ClientRequest ==
 
         reapply_watch == [
             type: {"ReapplyWatch"},
+            last_zxid: NullZxid,
             children: SUBSET Group
         ]
     IN
@@ -166,6 +168,7 @@ TypeOK ==
 
     /\ client_status \in [Client -> {"Disconnected", "Connecting", "HasSession"}]
     /\ client_sess \in [Client -> NullSession]
+    /\ client_zxid \in [Client -> NullZxid]
     /\ next_xid \in [Client -> Xid]
     /\ client_req \in [Client -> Seq(ClientRequest)]
     /\ recv_req \in [Client -> Seq(HandleRequest)]
@@ -183,6 +186,7 @@ Init ==
 
     /\ client_status = [c \in Client |-> "Disconnected"]
     /\ client_sess = [c \in Client |-> nil]
+    /\ client_zxid = [c \in Client |-> nil]
     /\ next_xid = [c \in Client |-> 30]
     /\ client_req = [c \in Client |-> <<>>]
     /\ recv_req = [c \in Client |-> <<>>]
@@ -198,8 +202,7 @@ ClientConnect(c) ==
     LET
         req == [
             type |-> "Connect",
-            sess |-> client_sess[c],
-            seen_zxid |-> nil \* TODO
+            sess |-> client_sess[c]
         ]
     IN
     /\ client_status[c] = "Disconnected"
@@ -208,6 +211,7 @@ ClientConnect(c) ==
 
     /\ UNCHANGED next_xid
     /\ UNCHANGED client_sess
+    /\ UNCHANGED client_zxid
     /\ UNCHANGED client_children_watch
     /\ UNCHANGED <<recv_req, handle_req>>
     /\ UNCHANGED num_action
@@ -221,6 +225,7 @@ ClientRecvConnect(c) ==
 
         reapply_req == [
             type |-> "ReapplyWatch",
+            last_zxid |-> client_zxid[c],
             children |-> client_children_watch[c]
         ]
 
@@ -230,12 +235,14 @@ ClientRecvConnect(c) ==
             /\ client_sess' = [client_sess EXCEPT ![c] = hreq.sess]
             /\ client_req' = [client_req EXCEPT ![c] = Append(@, reapply_req)]
             /\ UNCHANGED client_children_watch
+            /\ UNCHANGED client_zxid
 
         when_lose_sess ==
             /\ UNCHANGED handle_req
             /\ client_status' = [client_status EXCEPT ![c] = "Disconnected"]
             /\ client_sess' = [client_sess EXCEPT ![c] = nil]
             /\ client_children_watch' = [client_children_watch EXCEPT ![c] = {}]
+            /\ client_zxid' = [client_zxid EXCEPT ![c] = nil]
             /\ UNCHANGED client_req
     IN
     /\ client_status[c] = "Connecting"
@@ -261,12 +268,18 @@ ClientRecvToHandle(c) ==
                     EXCEPT ![c] = @ \union {hreq.req.group}]
             ELSE
                 /\ UNCHANGED client_children_watch
+
+        update_zxid ==
+            IF "zxid" \in DOMAIN hreq
+                THEN client_zxid' = [client_zxid EXCEPT ![c] = hreq.zxid]
+                ELSE UNCHANGED client_zxid
     IN
     /\ client_status[c] = "HasSession"
     /\ recv_req[c] # <<>>
     /\ recv_req' = [recv_req EXCEPT ![c] = Tail(@)]
     /\ handle_req' = [handle_req EXCEPT ![c] = Append(@, hreq)]
     /\ update_watch_map
+    /\ update_zxid
 
     /\ UNCHANGED client_status
     /\ UNCHANGED client_sess
@@ -299,6 +312,7 @@ submit_client_req(c, req) ==
     /\ UNCHANGED recv_req
     /\ UNCHANGED client_status
     /\ UNCHANGED client_sess
+    /\ UNCHANGED client_zxid
     /\ UNCHANGED client_children_watch
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
@@ -337,6 +351,7 @@ ClientHandleReq(c) ==
     /\ UNCHANGED client_children_watch
     /\ UNCHANGED client_status
     /\ UNCHANGED client_sess
+    /\ UNCHANGED client_zxid
     /\ UNCHANGED server_vars
     /\ UNCHANGED aux_vars
 
@@ -387,6 +402,7 @@ ClientDisconnect(c) ==
     /\ recv_req' = [recv_req EXCEPT ![c] = <<>>]
 
     /\ UNCHANGED client_children_watch
+    /\ UNCHANGED client_zxid
     /\ UNCHANGED num_action
     /\ UNCHANGED next_xid
     /\ UNCHANGED client_sess
@@ -406,6 +422,7 @@ server_handle_unchanged ==
     /\ UNCHANGED client_status
     /\ UNCHANGED client_sess
     /\ UNCHANGED client_children_watch
+    /\ UNCHANGED client_zxid
     /\ UNCHANGED num_action
     /\ UNCHANGED aux_vars
 
@@ -483,6 +500,7 @@ ServerHandleConnect(c) ==
     /\ UNCHANGED server_state
     /\ UNCHANGED server_children_watch
     /\ UNCHANGED client_sess
+    /\ UNCHANGED client_zxid
     /\ UNCHANGED handle_req
     /\ UNCHANGED <<client_status, next_xid>>
     /\ UNCHANGED client_children_watch
@@ -508,6 +526,7 @@ ServerLoseSession ==
         /\ UNCHANGED server_children_watch
         /\ UNCHANGED server_state
         /\ UNCHANGED client_sess
+        /\ UNCHANGED client_zxid
         /\ UNCHANGED <<client_req, next_xid>>
         /\ UNCHANGED recv_req
         /\ UNCHANGED handle_req
@@ -522,6 +541,13 @@ push_to_recv(c, hreq) ==
 push_to_recv_multi(c, hreqs) ==
     /\ recv_req' = [recv_req EXCEPT ![c] = @ \o hreqs]
 
+watch_event(g) == [
+    type |-> "WatchEvent",
+    event |-> "Children",
+    group |-> g
+]
+
+
 ServerHandleCreate(c) ==
     LET
         req == client_req[c][1]
@@ -535,7 +561,7 @@ ServerHandleCreate(c) ==
             [old EXCEPT ![c] = Append(@, hreq)]
 
         log_entry == [
-            type |-> "Put",
+            type |-> "Create",
             zxid |-> new_zxid,
             group |-> g,
             key |-> k,
@@ -546,19 +572,13 @@ ServerHandleCreate(c) ==
 
         sess == client_sess[c]
 
-        watch_event == [
-            type |-> "WatchEvent",
-            event |-> "Children",
-            group |-> g
-        ]
-
         push_watch_cond(x) ==
             /\ x \in server_children_watch[g]
             /\ client_status[x] = "HasSession"
 
         push_watch_event_to_client(old, x) ==
             IF push_watch_cond(x) THEN
-                Append(old, watch_event)
+                Append(old, watch_event(g))
             ELSE
                 old
 
@@ -602,13 +622,49 @@ ServerHandleChildren(c) ==
         ]
 
         hreq == new_handle_with_resp(req, new_zxid, children, "OK")
-
-        sess == client_sess[c]
     IN
     /\ client_with_req(c, "Children")
     /\ push_to_recv(c, hreq)
     /\ server_children_watch' = [server_children_watch
             EXCEPT ![g] = @ \union {c}]
+
+    /\ UNCHANGED server_log
+    /\ UNCHANGED server_state
+    /\ server_handle_unchanged
+
+
+ServerHandleReapplyWatch(c) ==
+    LET
+        req == client_req[c][1]
+
+        append_to_watch(old, g) ==
+            IF g \in req.children
+                THEN old \union {c}
+                ELSE old
+
+        from_index ==
+            IF req.last_zxid = nil
+                THEN 1
+                ELSE req.last_zxid - 20
+
+        filter_fn(entry) ==
+            /\ entry.type = "Create"
+            /\ entry.group \in req.children
+
+        create_list == SelectSeq(server_log, filter_fn)
+
+        map_fn(entry) == watch_event(entry.group)
+
+        watch_events == seqMap(create_list, map_fn)
+
+        push_watch_to_client(old) ==
+            old \o watch_events
+    IN
+    /\ client_with_req(c, "ReapplyWatch")
+    /\ server_children_watch' = [
+            g \in Group |-> append_to_watch(server_children_watch[g], g)
+        ]
+    /\ recv_req' = [recv_req EXCEPT ![c] = push_watch_to_client(@)]
 
     /\ UNCHANGED server_log
     /\ UNCHANGED server_state
@@ -644,6 +700,7 @@ RequiredNext ==
         \/ ServerHandleConnect(c)
         \/ ServerHandleCreate(c)
         \/ ServerHandleChildren(c)
+        \/ ServerHandleReapplyWatch(c)
 
     \/ \E c \in Client, g \in Group, k \in Key, val \in NullValue:
         \/ ClientCreate(c, g, k, val)
@@ -674,7 +731,7 @@ ServerLogZxidInv ==
         n == Len(server_log) - 1
     IN
     \A i \in 1..n:
-        server_log[i].zxid + 1 = server_log[i + 1].zxid
+        server_log[i].zxid = 20 + i
 
 
 AtMostOneConnectReq ==
