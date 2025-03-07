@@ -152,7 +152,7 @@ TypeOK ==
     /\ DOMAIN server_state = Group
     /\ \A g \in Group: IsMapOf(server_state[g], Key, StateInfo)
     /\ active_sess \subseteq Session
-    /\ server_children_watch \in [Group -> SUBSET active_sess]
+    /\ server_children_watch \in [Group -> SUBSET Client]
 
     /\ client_status \in [Client -> {"Disconnected", "Connecting", "HasSession"}]
     /\ client_sess \in [Client -> NullSession]
@@ -470,10 +470,8 @@ ServerLoseSession ==
 
         /\ active_sess' = active_sess \ {sess}
         /\ server_log' = Append(server_log, log_entry)
-        /\ server_children_watch' = [
-                g \in Group |-> server_children_watch[g] \ {sess}
-            ]
 
+        /\ UNCHANGED server_children_watch
         /\ UNCHANGED server_state
         /\ UNCHANGED client_sess
         /\ UNCHANGED <<client_req, next_xid>>
@@ -498,6 +496,9 @@ ServerHandleCreate(c) ==
 
         hreq == new_handle_req(req, new_zxid, "OK")
 
+        push_watch_resp(old) ==
+            [old EXCEPT ![c] = Append(@, hreq)]
+
         log_entry == [
             type |-> "Put",
             zxid |-> new_zxid,
@@ -509,7 +510,6 @@ ServerHandleCreate(c) ==
         state == new_state_info(val)
 
         sess == client_sess[c]
-        old_watch == server_children_watch[g]
 
         watch_event == [
             type |-> "WatchEvent",
@@ -517,12 +517,25 @@ ServerHandleCreate(c) ==
             group |-> g
         ]
 
-        push_to_recv_with_watch_event ==
-            IF sess \in old_watch THEN
-                /\ TRUE
+        push_watch_cond(x) ==
+            /\ x \in server_children_watch[g]
+            /\ client_status[x] = "HasSession"
+
+        push_watch_event_to_client(old, x) ==
+            IF push_watch_cond(x) THEN
+                Append(old, watch_event)
             ELSE
-                /\ push_to_recv(c, hreq)
-                /\ UNCHANGED server_children_watch
+                old
+
+        push_watch_event(old_recv) ==
+            [x \in Client |-> push_watch_event_to_client(old_recv[x], x)]
+
+        push_to_recv_with_watch_event ==
+            /\ recv_req' = push_watch_resp(
+                    push_watch_event(recv_req)
+                )
+            /\ server_children_watch' = [server_children_watch
+                    EXCEPT ![g] = {}]
 
         when_not_existed ==
             /\ push_to_recv_with_watch_event
@@ -560,7 +573,7 @@ ServerHandleChildren(c) ==
     /\ client_with_req(c, "Children")
     /\ push_to_recv(c, hreq)
     /\ server_children_watch' = [server_children_watch
-            EXCEPT ![g] = @ \union {sess}]
+            EXCEPT ![g] = @ \union {c}]
 
     /\ UNCHANGED server_log
     /\ UNCHANGED server_state
@@ -637,6 +650,12 @@ AtMostOneConnectReq ==
 ClientHasSessInv ==
     \A c \in Client:
         client_status[c] = "HasSession" => client_sess[c] # nil
+
+ClientDisconnectedInv ==
+    \A c \in Client:
+        client_status[c] = "Disconnected" =>
+            /\ client_req[c] = <<>>
+            /\ recv_req[c] = <<>>
 
 
 ReverseInvForChildren ==
