@@ -1,22 +1,21 @@
 ------ MODULE DistributedSync ----
 EXTENDS TLC, Naturals, Sequences
 
-CONSTANTS Dataset, Node, Storage, nil
+CONSTANTS Dataset, Node, Storage, nil, max_close_conn
 
 VARIABLES
     config, active_conns, server_node_info,
     data, global_conn,
-    node_conn, node_config, main_pc
+    node_conn, node_config, main_pc,
+    num_close_conn
 
 core_vars == <<
     config, active_conns, server_node_info
 >>
 
-node_vars == <<
-    node_conn, node_config, main_pc
->>
-
-vars == <<core_vars, data, global_conn, node_vars>>
+node_vars == <<node_conn, node_config, main_pc>>
+aux_vars == <<num_close_conn>>
+vars == <<core_vars, data, global_conn, node_vars, aux_vars>>
 
 -------------------------------------------------------------------------------
 
@@ -118,6 +117,7 @@ TypeOK ==
     /\ node_conn \in [Node -> NullConn]
     /\ node_config \in [Node -> [Dataset -> NullConfig]]
     /\ main_pc \in [Node -> {"Init"}]
+    /\ num_close_conn \in 0..max_close_conn
 
 Init ==
     /\ config = [d \in Dataset |-> nil]
@@ -128,6 +128,7 @@ Init ==
     /\ node_conn = [n \in Node |-> nil]
     /\ node_config = [n \in Node |-> [d \in Dataset |-> nil]]
     /\ main_pc = [n \in Node |-> "Init"]
+    /\ num_close_conn = 0
 
 -------------------------------------------------------------------------------
 
@@ -171,6 +172,7 @@ SetupPrimaryConfig(d, n, s) ==
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
     /\ UNCHANGED global_conn
+    /\ UNCHANGED aux_vars
 
 
 AcceptConn ==
@@ -188,6 +190,7 @@ AcceptConn ==
         /\ UNCHANGED config
         /\ UNCHANGED data
         /\ UNCHANGED node_vars
+        /\ UNCHANGED aux_vars
 
 
 doHandleConnect(conn) ==
@@ -223,6 +226,7 @@ doHandleConnect(conn) ==
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
+    /\ UNCHANGED aux_vars
 
 HandleConnect ==
     \E conn \in ConnAddr: doHandleConnect(conn)
@@ -263,6 +267,7 @@ ConsumeChan(n) ==
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
+    /\ UNCHANGED aux_vars
 
 -------------------------------------------------------------------------------
 
@@ -288,6 +293,7 @@ NewConn(n) ==
     /\ UNCHANGED core_vars
     /\ UNCHANGED data
     /\ UNCHANGED main_pc
+    /\ UNCHANGED aux_vars
 
 
 RecvConfig(n) ==
@@ -312,6 +318,23 @@ RecvConfig(n) ==
     /\ UNCHANGED main_pc
     /\ UNCHANGED data
     /\ UNCHANGED core_vars
+    /\ UNCHANGED aux_vars
+
+-------------------------------------------------------------------------------
+
+ConnectionClose ==
+    \E conn \in ConnAddr:
+        /\ num_close_conn < max_close_conn
+        /\ num_close_conn' = num_close_conn + 1
+        /\ ~global_conn[conn].closed
+        /\ global_conn' = [global_conn EXCEPT
+                ![conn].closed = TRUE,
+                ![conn].send = <<>>,
+                ![conn].recv = <<>>
+            ]
+        /\ UNCHANGED data
+        /\ UNCHANGED node_vars
+        /\ UNCHANGED core_vars
 
 -------------------------------------------------------------------------------
 
@@ -324,6 +347,7 @@ stopCondNode(n) ==
         /\ server_node_info[n].chan.data = <<>>
         /\ server_node_info[n].chan.status = "Empty"
     /\ node_conn[n] # nil =>
+        /\ ~global_conn[conn].closed
         /\ global_conn[conn].send = <<>>
         /\ global_conn[conn].recv = <<>>
 
@@ -348,6 +372,7 @@ Next ==
     \/ HandleConnect
     \/ \E n \in Node:
         \/ ConsumeChan(n)
+    \/ ConnectionClose
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -383,5 +408,12 @@ ChannelInv ==
            /\ ch.data = <<>>
         \/ /\ ch.status = "Ready"
            /\ Len(ch.data) = 1
+
+
+ClosedConnInv ==
+    \A conn \in ConnAddr:
+        global_conn[conn].closed =>
+            /\ global_conn[conn].send = <<>>
+            /\ global_conn[conn].recv = <<>>
 
 ====
