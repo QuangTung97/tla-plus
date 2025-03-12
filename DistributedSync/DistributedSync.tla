@@ -81,25 +81,37 @@ ActiveConnInfo == [
 ]
 
 Channel == [
-    status: {"Empty", "Ready"},
+    status: {"Empty", "Ready", "Nil"},
     data: Seq(Response)
 ]
 
-init_chan == [
+new_empty_chan == [
     status |-> "Empty",
     data |-> <<>>
 ]
 
 ServerNodeInfo == [
-    conn: ConnAddr,
-    chan: Channel
+    conn: NullConn,
+    chan: Channel,
+    pending: Seq(Dataset)
+]
+
+nil_chan == [
+    status |-> "Nil",
+    data |-> <<>>
+]
+
+init_server_node_info == [
+    conn |-> nil,
+    chan |-> nil_chan,
+    pending |-> <<>>
 ]
 
 -------------------------------------------------------------------------------
 
 TypeOK ==
     /\ config \in [Dataset -> NullConfig]
-    /\ server_node_info \in [Node -> (ServerNodeInfo \union {nil})]
+    /\ server_node_info \in [Node -> ServerNodeInfo]
     /\ active_conns \subseteq ConnAddr
     /\ data \in [Storage -> [Dataset -> NullValue]]
     /\ global_conn \in Seq(Conn)
@@ -109,7 +121,7 @@ TypeOK ==
 
 Init ==
     /\ config = [d \in Dataset |-> nil]
-    /\ server_node_info = [n \in Node |-> nil]
+    /\ server_node_info = [n \in Node |-> init_server_node_info]
     /\ active_conns = {}
     /\ data = [s \in Storage |-> [d \in Dataset |-> nil]]
     /\ global_conn = <<>>
@@ -138,19 +150,23 @@ SetupPrimaryConfig(d, n, s) ==
             replicas |-> {}
         ]
 
-        when_info_nil ==
-            /\ UNCHANGED server_node_info
+        ch == server_node_info[n].chan
 
-        when_info_not_nil ==
+        when_chan_nil ==
+            /\ server_node_info' = [server_node_info EXCEPT
+                    ![n].pending = Append(@, d)
+                ]
+
+        when_chan_not_nil ==
             /\ server_node_info' = [server_node_info EXCEPT
                     ![n].chan = new_ready_chan(new_config_resp(d))
                 ]
     IN
     /\ config[d] = nil
     /\ config' = [config EXCEPT ![d] = new_config]
-    /\ IF server_node_info[n] = nil
-        THEN when_info_nil
-        ELSE when_info_not_nil
+    /\ IF ch.status \in {"Nil", "Ready"}
+        THEN when_chan_nil
+        ELSE when_chan_not_nil
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -177,41 +193,32 @@ AcceptConn ==
 doHandleConnect(conn) ==
     LET
         req == global_conn[conn].send[1]
+        n == req.node
 
-        new_empty_info == [
-            conn |-> conn,
-            chan |-> init_chan
-        ]
+        pending_list == server_node_info[n].pending
+        pending_ds == pending_list[1]
 
-        config_is_valid(d) ==
-            /\ config[d] # nil
-            /\ config[d].runner = req.node
-
-        exist_config == \E d \in Dataset: config_is_valid(d)
-
-
-        new_ready_info(d) == [
-            conn |-> conn,
-            chan |-> new_ready_chan(new_config_resp(d))
-        ]
-
-        when_non_empty(d) ==
-            /\ config_is_valid(d)
+        when_pending_empty ==
             /\ server_node_info' = [server_node_info EXCEPT
-                    ![req.node] = new_ready_info(d)]
+                    ![n].conn = conn,
+                    ![n].chan = new_empty_chan
+                ]
 
-        when_empty_config ==
+        when_pending_non_empty ==
             /\ server_node_info' = [server_node_info EXCEPT
-                    ![req.node] = new_empty_info]
+                    ![n].conn = conn,
+                    ![n].pending = Tail(@),
+                    ![n].chan = new_ready_chan(new_config_resp(pending_ds))
+                ]
     IN
     /\ conn \in active_conns
     /\ global_conn[conn].send # <<>>
     /\ global_conn' = [global_conn EXCEPT ![conn].send = Tail(@)]
 
     /\ UNCHANGED config
-    /\ IF exist_config
-        THEN \E d \in Dataset: when_non_empty(d)
-        ELSE when_empty_config
+    /\ IF pending_list = <<>>
+        THEN when_pending_empty
+        ELSE when_pending_non_empty
 
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
@@ -223,18 +230,36 @@ HandleConnect ==
 
 ConsumeChan(n) ==
     LET
-        resp == server_node_info[n].chan.data[1]
+        old_chan == server_node_info[n].chan
+        resp == old_chan.data[1]
+
+        consumed == [old_chan EXCEPT !.data = Tail(@), !.status = "Empty"]
+
+        pending_list == server_node_info[n].pending
+        pending_ds == pending_list[1]
 
         conn == server_node_info[n].conn
+
+        when_empty ==
+            /\ server_node_info' = [server_node_info
+                    EXCEPT ![n].chan = consumed]
+
+        pushed_ch == new_ready_chan(new_config_resp(pending_ds))
+
+        when_non_empty ==
+            /\ server_node_info' = [server_node_info EXCEPT
+                    ![n].chan = pushed_ch,
+                    ![n].pending = Tail(@)
+                ]
     IN
-    /\ server_node_info[n] # nil
     /\ server_node_info[n].chan.status = "Ready"
-    /\ server_node_info' = [server_node_info EXCEPT
-            ![n].chan.data = Tail(@),
-            ![n].chan.status = "Empty"
-        ]
-    /\ global_conn' = [global_conn EXCEPT ![conn].recv = Append(@, resp)]
     /\ UNCHANGED config
+
+    /\ IF pending_list = <<>>
+        THEN when_empty
+        ELSE when_non_empty
+    /\ global_conn' = [global_conn EXCEPT ![conn].recv = Append(@, resp)]
+
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -345,5 +370,18 @@ NodeConfigMatchServerConfig ==
                     config_with_runner => node_config[n][d] = config[d]
     IN
         \A n \in Node: pre_cond(n) => cond(n)
+
+
+ChannelInv ==
+    \A n \in Node:
+        LET
+            ch == server_node_info[n].chan
+        IN
+        \/ /\ ch.status = "Nil"
+           /\ ch.data = <<>>
+        \/ /\ ch.status = "Empty"
+           /\ ch.data = <<>>
+        \/ /\ ch.status = "Ready"
+           /\ Len(ch.data) = 1
 
 ====
