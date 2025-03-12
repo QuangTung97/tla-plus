@@ -181,13 +181,21 @@ SetupPrimaryConfig(d, n, s) ==
 
 
 DeleteConfig(d) ==
+    LET
+        n == config[d].runner
+
+        filter_fn(x) == x # d
+
+        remove_deleted(list) ==
+            SelectSeq(list, filter_fn)
+    IN
     /\ config[d] # nil
     /\ ~config[d].deleted
     /\ config' = [config EXCEPT ![d].deleted = TRUE]
+    /\ change_list' = [change_list EXCEPT ![n] = remove_deleted(@)]
     /\ UNCHANGED server_node_info
     /\ UNCHANGED global_conn
     /\ UNCHANGED active_conns
-    /\ UNCHANGED change_list \* TODO
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
@@ -463,6 +471,12 @@ ClosedConnInv ==
         global_conn[conn].closed =>
             /\ global_conn[conn].send = <<>>
             /\ global_conn[conn].recv = <<>>
+
+
+ChangeListShouldNotContainDelete ==
+    \A n \in Node: \A i \in DOMAIN change_list[n]:
+        LET d == change_list[n][i] IN
+            config[d] # nil => ~config[d].deleted
 
 
 ====
