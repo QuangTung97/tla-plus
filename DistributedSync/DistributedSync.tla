@@ -45,7 +45,8 @@ NullNode == Node \union {nil}
 Config == [
     primary: Storage,
     runner: Node,
-    replicas: SUBSET Storage
+    replicas: SUBSET Storage,
+    deleted: BOOLEAN
 ]
 
 NullConfig == Config \union {nil}
@@ -150,7 +151,8 @@ SetupPrimaryConfig(d, n, s) ==
         new_config == [
             primary |-> s,
             runner |-> n,
-            replicas |-> {}
+            replicas |-> {},
+            deleted |-> FALSE
         ]
 
         ch == server_node_info[n].chan
@@ -180,6 +182,15 @@ SetupPrimaryConfig(d, n, s) ==
 
 DeleteConfig(d) ==
     /\ config[d] # nil
+    /\ ~config[d].deleted
+    /\ config' = [config EXCEPT ![d].deleted = TRUE]
+    /\ UNCHANGED server_node_info
+    /\ UNCHANGED global_conn
+    /\ UNCHANGED active_conns
+    /\ UNCHANGED change_list \* TODO
+    /\ UNCHANGED data
+    /\ UNCHANGED node_vars
+    /\ UNCHANGED aux_vars
 
 
 AcceptConn ==
@@ -322,7 +333,8 @@ RecvConfig(n) ==
         new_config == [
             primary |-> resp.primary,
             runner |-> n,
-            replicas |-> {}
+            replicas |-> {},
+            deleted |-> FALSE
         ]
     IN
     /\ node_conn[n] # nil
