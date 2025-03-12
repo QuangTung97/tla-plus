@@ -6,14 +6,14 @@ CONSTANTS Dataset, Node, Storage, nil
 VARIABLES
     config, active_conns, server_node_info,
     data, global_conn,
-    node_conn, main_pc
+    node_conn, node_config, main_pc
 
 core_vars == <<
     config, active_conns, server_node_info
 >>
 
 node_vars == <<
-    node_conn, main_pc
+    node_conn, node_config, main_pc
 >>
 
 vars == <<core_vars, data, global_conn, node_vars>>
@@ -81,7 +81,7 @@ ActiveConnInfo == [
 ]
 
 Channel == [
-    status: {"Nil", "Empty", "Ready"},
+    status: {"Empty", "Ready"},
     data: Seq(Response)
 ]
 
@@ -104,6 +104,7 @@ TypeOK ==
     /\ data \in [Storage -> [Dataset -> NullValue]]
     /\ global_conn \in Seq(Conn)
     /\ node_conn \in [Node -> NullConn]
+    /\ node_config \in [Node -> [Dataset -> NullConfig]]
     /\ main_pc \in [Node -> {"Init"}]
 
 Init ==
@@ -113,9 +114,21 @@ Init ==
     /\ data = [s \in Storage |-> [d \in Dataset |-> nil]]
     /\ global_conn = <<>>
     /\ node_conn = [n \in Node |-> nil]
+    /\ node_config = [n \in Node |-> [d \in Dataset |-> nil]]
     /\ main_pc = [n \in Node |-> "Init"]
 
 -------------------------------------------------------------------------------
+
+new_config_resp(d) == [
+    type |-> "Config",
+    ds |-> d,
+    primary |-> config'[d].primary
+]
+
+new_ready_chan(resp) == [
+    status |-> "Ready",
+    data |-> <<resp>>
+]
 
 SetupPrimaryConfig(d, n, s) ==
     LET
@@ -124,11 +137,21 @@ SetupPrimaryConfig(d, n, s) ==
             runner |-> n,
             replicas |-> {}
         ]
+
+        when_info_nil ==
+            /\ UNCHANGED server_node_info
+
+        when_info_not_nil ==
+            /\ server_node_info' = [server_node_info EXCEPT
+                    ![n].chan = new_ready_chan(new_config_resp(d))
+                ]
     IN
     /\ config[d] = nil
     /\ config' = [config EXCEPT ![d] = new_config]
+    /\ IF server_node_info[n] = nil
+        THEN when_info_nil
+        ELSE when_info_not_nil
     /\ UNCHANGED active_conns
-    /\ UNCHANGED server_node_info
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
     /\ UNCHANGED global_conn
@@ -166,20 +189,10 @@ doHandleConnect(conn) ==
 
         exist_config == \E d \in Dataset: config_is_valid(d)
 
-        new_resp(d) == [
-            type |-> "Config",
-            ds |-> d,
-            primary |-> config[d].primary
-        ]
-
-        new_chan(d) == [
-            status |-> "Ready",
-            data |-> <<new_resp(d)>>
-        ]
 
         new_ready_info(d) == [
             conn |-> conn,
-            chan |-> new_chan(d)
+            chan |-> new_ready_chan(new_config_resp(d))
         ]
 
         when_non_empty(d) ==
@@ -195,17 +208,36 @@ doHandleConnect(conn) ==
     /\ global_conn[conn].send # <<>>
     /\ global_conn' = [global_conn EXCEPT ![conn].send = Tail(@)]
 
+    /\ UNCHANGED config
     /\ IF exist_config
         THEN \E d \in Dataset: when_non_empty(d)
         ELSE when_empty_config
 
     /\ UNCHANGED active_conns
-    /\ UNCHANGED config
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
 
 HandleConnect ==
     \E conn \in ConnAddr: doHandleConnect(conn)
+
+
+ConsumeChan(n) ==
+    LET
+        resp == server_node_info[n].chan.data[1]
+
+        conn == server_node_info[n].conn
+    IN
+    /\ server_node_info[n] # nil
+    /\ server_node_info[n].chan.status = "Ready"
+    /\ server_node_info' = [server_node_info EXCEPT
+            ![n].chan.data = Tail(@),
+            ![n].chan.status = "Empty"
+        ]
+    /\ global_conn' = [global_conn EXCEPT ![conn].recv = Append(@, resp)]
+    /\ UNCHANGED config
+    /\ UNCHANGED active_conns
+    /\ UNCHANGED data
+    /\ UNCHANGED node_vars
 
 -------------------------------------------------------------------------------
 
@@ -227,17 +259,51 @@ NewConn(n) ==
     /\ node_conn[n] = nil
     /\ global_conn' = Append(global_conn, new_conn)
     /\ node_conn' = [node_conn EXCEPT ![n] = conn]
+    /\ UNCHANGED node_config
     /\ UNCHANGED core_vars
     /\ UNCHANGED data
     /\ UNCHANGED main_pc
 
+
+RecvConfig(n) ==
+    LET
+        conn == node_conn[n]
+        resp == global_conn[conn].recv[1]
+        d == resp.ds
+
+        new_config == [
+            primary |-> resp.primary,
+            runner |-> n,
+            replicas |-> {}
+        ]
+    IN
+    /\ node_conn[n] # nil
+    /\ global_conn[conn].recv # <<>>
+    /\ resp.type = "Config"
+    /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
+
+    /\ node_config' = [node_config EXCEPT ![n][d] = new_config]
+    /\ UNCHANGED node_conn
+    /\ UNCHANGED main_pc
+    /\ UNCHANGED data
+    /\ UNCHANGED core_vars
+
 -------------------------------------------------------------------------------
 
+
+stopCondNode(n) ==
+    LET
+        conn == node_conn[n]
+    IN
+    /\ server_node_info[n] # nil =>
+        /\ server_node_info[n].chan.data = <<>>
+        /\ server_node_info[n].chan.status = "Empty"
+    /\ node_conn[n] # nil =>
+        /\ global_conn[conn].send = <<>>
+        /\ global_conn[conn].recv = <<>>
+
 StopCond ==
-    /\ \A n \in Node:
-        server_node_info[n] # nil =>
-            /\ server_node_info[n].chan.data = <<>>
-            /\ server_node_info[n].chan.status = "Empty"
+    /\ \A n \in Node: stopCondNode(n)
 
 TerminateCond ==
     /\ StopCond
@@ -252,10 +318,32 @@ Next ==
         \/ SetupPrimaryConfig(d, n, s)
     \/ \E n \in Node:
         \/ NewConn(n)
+        \/ RecvConfig(n)
     \/ AcceptConn
     \/ HandleConnect
+    \/ \E n \in Node:
+        \/ ConsumeChan(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
+
+-------------------------------------------------------------------------------
+
+NodeConfigMatchServerConfig ==
+    LET
+        pre_cond(n)==
+            /\ node_conn[n] # nil
+            /\ stopCondNode(n)
+
+        cond(n) ==
+            \A d \in Dataset:
+                LET
+                    config_with_runner ==
+                        /\ config[d] # nil
+                        /\ config[d].runner = n
+                IN
+                    config_with_runner => node_config[n][d] = config[d]
+    IN
+        \A n \in Node: pre_cond(n) => cond(n)
 
 ====
