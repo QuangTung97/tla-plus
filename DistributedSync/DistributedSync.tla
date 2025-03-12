@@ -326,6 +326,22 @@ RecvConfig(n) ==
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
 
+
+NodeClearClosedConn(n) ==
+    LET
+        conn == node_conn[n]
+    IN
+    /\ node_conn[n] # nil
+    /\ global_conn[conn].closed
+    /\ node_conn' = [node_conn EXCEPT ![n] = nil]
+
+    /\ UNCHANGED main_pc
+    /\ UNCHANGED node_config
+    /\ UNCHANGED global_conn
+    /\ UNCHANGED data
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED aux_vars
+
 -------------------------------------------------------------------------------
 
 ConnectionClose ==
@@ -374,6 +390,7 @@ Next ==
     \/ \E n \in Node:
         \/ NewConn(n)
         \/ RecvConfig(n)
+        \/ NodeClearClosedConn(n)
     \/ AcceptConn
     \/ HandleConnect
     \/ \E n \in Node:
