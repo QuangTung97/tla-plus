@@ -262,7 +262,13 @@ ConsumeChan(n) ==
     /\ IF pending_list = <<>>
         THEN when_empty
         ELSE when_non_empty
-    /\ global_conn' = [global_conn EXCEPT ![conn].recv = Append(@, resp)]
+
+    /\ global_conn' = [global_conn EXCEPT
+            ![conn].recv =
+                IF global_conn[conn].closed
+                    THEN @
+                    ELSE Append(@, resp)
+        ]
 
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
