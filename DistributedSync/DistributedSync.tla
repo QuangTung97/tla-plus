@@ -4,13 +4,13 @@ EXTENDS TLC, Naturals, Sequences
 CONSTANTS Dataset, Node, Storage, nil, max_close_conn
 
 VARIABLES
-    config, active_conns, server_node_info,
+    config, change_list, active_conns, server_node_info,
     data, global_conn,
     node_conn, node_config, main_pc,
     num_close_conn
 
 core_vars == <<
-    config, active_conns, server_node_info
+    config, change_list, active_conns, server_node_info
 >>
 
 node_vars == <<node_conn, node_config, main_pc>>
@@ -110,6 +110,7 @@ init_server_node_info == [
 
 TypeOK ==
     /\ config \in [Dataset -> NullConfig]
+    /\ change_list \in [Node -> Seq(Dataset)]
     /\ server_node_info \in [Node -> ServerNodeInfo]
     /\ active_conns \subseteq ConnAddr
     /\ data \in [Storage -> [Dataset -> NullValue]]
@@ -121,6 +122,7 @@ TypeOK ==
 
 Init ==
     /\ config = [d \in Dataset |-> nil]
+    /\ change_list = [n \in Node |-> <<>>]
     /\ server_node_info = [n \in Node |-> init_server_node_info]
     /\ active_conns = {}
     /\ data = [s \in Storage |-> [d \in Dataset |-> nil]]
@@ -155,7 +157,7 @@ SetupPrimaryConfig(d, n, s) ==
 
         when_chan_nil ==
             /\ server_node_info' = [server_node_info EXCEPT
-                    ![n].pending = Append(@, d)
+                    ![n].pending = Append(@, d) \* TODO not append when not needed
                 ]
 
         when_chan_not_nil ==
@@ -165,6 +167,7 @@ SetupPrimaryConfig(d, n, s) ==
     IN
     /\ config[d] = nil
     /\ config' = [config EXCEPT ![d] = new_config]
+    /\ change_list' = [change_list EXCEPT ![n] = Append(@, d)]
     /\ IF ch.status \in {"Nil", "Ready"}
         THEN when_chan_nil
         ELSE when_chan_not_nil
@@ -173,6 +176,10 @@ SetupPrimaryConfig(d, n, s) ==
     /\ UNCHANGED node_vars
     /\ UNCHANGED global_conn
     /\ UNCHANGED aux_vars
+
+
+DeleteConfig(d) ==
+    /\ config[d] # nil
 
 
 AcceptConn ==
@@ -188,6 +195,7 @@ AcceptConn ==
         /\ UNCHANGED global_conn
         /\ UNCHANGED server_node_info
         /\ UNCHANGED config
+        /\ UNCHANGED change_list
         /\ UNCHANGED data
         /\ UNCHANGED node_vars
         /\ UNCHANGED aux_vars
@@ -198,7 +206,7 @@ doHandleConnect(conn) ==
         req == global_conn[conn].send[1]
         n == req.node
 
-        pending_list == server_node_info[n].pending
+        pending_list == change_list[n]
         pending_ds == pending_list[1]
 
         when_pending_empty ==
@@ -210,12 +218,13 @@ doHandleConnect(conn) ==
         when_pending_non_empty ==
             /\ server_node_info' = [server_node_info EXCEPT
                     ![n].conn = conn,
-                    ![n].pending = Tail(@),
+                    ![n].pending = Tail(pending_list),
                     ![n].chan = new_ready_chan(new_config_resp(pending_ds))
                 ]
     IN
     /\ conn \in active_conns
     /\ global_conn[conn].send # <<>>
+    /\ req.type = "Connect"
     /\ global_conn' = [global_conn EXCEPT ![conn].send = Tail(@)]
 
     /\ UNCHANGED config
@@ -223,6 +232,7 @@ doHandleConnect(conn) ==
         THEN when_pending_empty
         ELSE when_pending_non_empty
 
+    /\ UNCHANGED change_list
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -270,6 +280,7 @@ ConsumeChan(n) ==
                     ELSE Append(@, resp)
         ]
 
+    /\ UNCHANGED change_list
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -395,6 +406,8 @@ Next ==
     \/ HandleConnect
     \/ \E n \in Node:
         \/ ConsumeChan(n)
+    \/ \E d \in Dataset:
+        \/ DeleteConfig(d)
     \/ ConnectionClose
     \/ Terminated
 
@@ -438,5 +451,6 @@ ClosedConnInv ==
         global_conn[conn].closed =>
             /\ global_conn[conn].send = <<>>
             /\ global_conn[conn].recv = <<>>
+
 
 ====
