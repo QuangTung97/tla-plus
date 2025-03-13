@@ -386,7 +386,6 @@ HandleNewEntry(n) ==
         s == req.storage
     IN
     /\ conn # nil
-    /\ conn \in active_conns \* TODO
     /\ global_conn[conn].send # <<>>
     /\ req.type = "NewEntry"
     /\ global_conn' = [global_conn EXCEPT ![conn].send = Tail(@)]
@@ -515,12 +514,14 @@ NodeRecvConfig(n) ==
             primary |-> resp.primary,
             runner |-> n,
             replicas |-> resp.replicas,
-            deleted |-> resp.deleted \* TODO clear when deleted
+            deleted |-> FALSE
         ]
+
+        synced_replicas == {s \in Storage: node_db[d][s] # nil}
 
         pending_jobs ==
             IF node_db[d][primary] # nil
-                THEN resp.replicas
+                THEN resp.replicas \ synced_replicas
                 ELSE {}
     IN
     /\ node_conn[n] # nil
@@ -528,9 +529,14 @@ NodeRecvConfig(n) ==
     /\ resp.type = "Config"
 
     /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
-    /\ node_config' = [node_config EXCEPT ![n][d] = new_config]
-    /\ node_pending_jobs' = [node_pending_jobs EXCEPT
-            ![n][d] = @ \union pending_jobs]
+    /\ IF resp.deleted
+        THEN
+            /\ node_config' = [node_config EXCEPT ![n][d] = nil]
+            /\ node_pending_jobs' = [node_pending_jobs EXCEPT ![n][d] = {}]
+        ELSE
+            /\ node_config' = [node_config EXCEPT ![n][d] = new_config]
+            /\ node_pending_jobs' = [node_pending_jobs EXCEPT
+                    ![n][d] = @ \union pending_jobs]
 
     /\ UNCHANGED node_last_seq
     /\ UNCHANGED node_events
@@ -558,17 +564,17 @@ NodeClearClosedConn(n) ==
     /\ UNCHANGED aux_vars
 
 
-insert_event_new_entry(d, n, s) ==
+insert_event_new_entry(d, n, s, new_val) ==
     LET
         new_entry == [
             type |-> "NewEntry",
             seq |-> 31 + Len(node_events[n]),
             ds |-> d,
             storage |-> s,
-            value |-> data'[d][s]
+            value |-> node_db'[d][s]
         ]
     IN
-    /\ node_db' = [node_db EXCEPT ![d][s] = data'[d][s]]
+    /\ node_db' = [node_db EXCEPT ![d][s] = new_val]
     /\ node_events' = [node_events EXCEPT ![n] = Append(@, new_entry)]
 
 
@@ -589,12 +595,12 @@ NodeUpdateLocalDB(d, n) ==
     /\ conf # nil
     /\ data[d][s] # node_db[d][s]
 
-    /\ UNCHANGED data
-    /\ insert_event_new_entry(d, n, s)
+    /\ insert_event_new_entry(d, n, s, data[d][s])
     /\ node_pending_jobs' = [node_pending_jobs EXCEPT
             ![n][d] = @ \union conf.replicas]
 
     /\ UNCHANGED global_conn
+    /\ UNCHANGED data
     /\ UNCHANGED <<node_config, node_conn, node_last_seq>>
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
@@ -632,12 +638,13 @@ NodePushNewEntry(n) ==
 
 NodeHandlePendingJob(d, n, s) ==
     LET
-        primary == node_config[n][d].primary
+        conf == node_config[n][d]
+        primary == conf.primary
     IN
     /\ s \in node_pending_jobs[n][d]
 
     /\ data' = [data EXCEPT ![d][s] = data[d][primary]]
-    /\ insert_event_new_entry(d, n, s)
+    /\ insert_event_new_entry(d, n, s, node_db[d][primary])
     /\ node_pending_jobs' = [node_pending_jobs EXCEPT
             ![n][d] = @ \ {s}]
 
@@ -869,12 +876,34 @@ DiskReplicaMustExisted ==
 
 
 NodePendingJobInv ==
-    \A n \in Node, d \in Dataset:
+    \A d \in Dataset:
         LET
             primary == config[d].primary
+            n == config[d].runner
+
+            first_cond ==
+                config[d] # nil =>
+                    /\ node_pending_jobs[n][d] \subseteq config[d].replicas
+                    /\ node_pending_jobs[n][d] # {} => node_db[d][primary] # nil
+
+            second_cond ==
+                node_config[n][d] = nil =>
+                    node_pending_jobs[n][d] = {}
         IN
-        config[d] # nil =>
-            /\ node_pending_jobs[n][d] \subseteq config[d].replicas
-            /\ node_pending_jobs[n][d] # {} => node_db[d][primary] # nil
+            config[d] # nil =>
+                /\ first_cond
+                /\ second_cond
+
+
+NodeEventsMustNotDuplicated ==
+    \A n \in Node:
+        LET
+            clear_seq(ev) == [ev EXCEPT !.seq = 31]
+
+            list == [
+                i \in DOMAIN node_events[n] |->
+                    clear_seq(node_events[n][i])]
+        IN
+            seq_not_duplicated(list)
 
 ====
