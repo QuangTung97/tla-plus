@@ -106,6 +106,11 @@ config_is_active(d, n) ==
     /\ config[d].runner = n
     /\ ~config[d].deleted
 
+config_is_deleted(d, n) ==
+    /\ config[d] # nil
+    /\ config[d].runner = n
+    /\ config[d].deleted
+
 config_change_list(n) ==
     LET
         filter_fn(d) == config_is_active(d, n)
@@ -206,6 +211,22 @@ SetupPrimaryConfig(d, n, s) ==
     /\ UNCHANGED aux_vars
 
 
+AddReplicaConfig(d, s) ==
+    /\ config[d] # nil
+    /\ ~config[d].deleted
+    /\ s \notin config[d].replicas
+    /\ s # config[d].primary
+
+    /\ config' = [config EXCEPT ![d].replicas = @ \union {s}]
+    /\ updateConfigPushToChan(d, config[d].runner)
+
+    /\ UNCHANGED global_conn
+    /\ UNCHANGED active_conns
+    /\ UNCHANGED data
+    /\ UNCHANGED node_vars
+    /\ UNCHANGED aux_vars
+
+
 DeleteConfig(d) ==
     LET
         n == config[d].runner
@@ -218,7 +239,7 @@ DeleteConfig(d) ==
     /\ config[d] # nil
     /\ ~config[d].deleted
     /\ config' = [config EXCEPT ![d].deleted = TRUE]
-    /\ updateConfigPushToChan(d, config[d].runner)
+    /\ updateConfigPushToChan(d, n)
     /\ UNCHANGED global_conn
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
@@ -250,8 +271,10 @@ doHandleConnect(conn) ==
         n == req.node
 
         filter_fn(d) ==
-            \/ config_is_active(d, n)
-            \/ d \in req.current
+            \/ /\ config_is_active(d, n)
+               /\ d \notin req.current
+            \/ /\ config_is_deleted(d, n)
+               /\ d \in req.current
 
         pending_list == SelectSeq(dataset_sort_order, filter_fn)
 
@@ -472,6 +495,8 @@ Next ==
         \/ ConsumeChan(n)
     \/ \E d \in Dataset:
         \/ DeleteConfig(d)
+    \* \/ \E d \in Dataset, s \in Storage:
+    \*     \/ AddReplicaConfig(d, s)
     \/ ConnectionClose
     \/ Terminated
 
