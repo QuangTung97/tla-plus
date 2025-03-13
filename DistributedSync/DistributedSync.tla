@@ -19,24 +19,6 @@ vars == <<core_vars, data, global_conn, node_vars, aux_vars>>
 
 -------------------------------------------------------------------------------
 
-Range(f) == {f[x]: x \in DOMAIN f}
-
-IsMapOf(m, K, V) ==
-    /\ DOMAIN m \subseteq K
-    /\ Range(m) \subseteq V
-
-MapPut(m, k, v) ==
-    LET
-        new_dom == DOMAIN m \union {k}
-    IN
-        [x \in new_dom |-> IF x = k THEN v ELSE m[x]]
-
-ASSUME MapPut(<<>>, 1, 3) = <<3>>
-ASSUME MapPut(<<5>>, 1, 4) = <<4>>
-ASSUME MapPut(<<5>>, 2, 6) = <<5, 6>>
-
--------------------------------------------------------------------------------
-
 Value == 21..29
 NullValue == Value \union {nil}
 
@@ -63,7 +45,8 @@ Request ==
 Response == [
     type: {"Config"},
     ds: Dataset,
-    primary: Storage
+    primary: Storage,
+    deleted: BOOLEAN
 ]
 
 Conn == [
@@ -138,13 +121,38 @@ Init ==
 new_config_resp(d) == [
     type |-> "Config",
     ds |-> d,
-    primary |-> config'[d].primary
+    primary |-> config'[d].primary,
+    deleted |-> config'[d].deleted
 ]
 
 new_ready_chan(resp) == [
     status |-> "Ready",
     data |-> <<resp>>
 ]
+
+
+updateConfigPushToChan(d, n) ==
+    LET
+        ch == server_node_info[n].chan
+        conn == server_node_info[n].conn
+
+        when_chan_nil ==
+            /\ server_node_info' = [server_node_info EXCEPT
+                    ![n].pending = Append(@, d)
+                ]
+
+        when_chan_not_nil ==
+            /\ server_node_info' = [server_node_info EXCEPT
+                    ![n].chan = new_ready_chan(new_config_resp(d))
+                ]
+    IN
+    IF conn = nil THEN
+        UNCHANGED server_node_info
+    ELSE IF ch.status \in {"Nil", "Ready"} THEN
+        when_chan_nil
+    ELSE
+        when_chan_not_nil
+
 
 SetupPrimaryConfig(d, n, s) ==
     LET
@@ -154,25 +162,11 @@ SetupPrimaryConfig(d, n, s) ==
             replicas |-> {},
             deleted |-> FALSE
         ]
-
-        ch == server_node_info[n].chan
-
-        when_chan_nil ==
-            /\ server_node_info' = [server_node_info EXCEPT
-                    ![n].pending = Append(@, d) \* TODO not append when not needed
-                ]
-
-        when_chan_not_nil ==
-            /\ server_node_info' = [server_node_info EXCEPT
-                    ![n].chan = new_ready_chan(new_config_resp(d))
-                ]
     IN
     /\ config[d] = nil
     /\ config' = [config EXCEPT ![d] = new_config]
     /\ change_list' = [change_list EXCEPT ![n] = Append(@, d)]
-    /\ IF ch.status \in {"Nil", "Ready"}
-        THEN when_chan_nil
-        ELSE when_chan_not_nil
+    /\ updateConfigPushToChan(d, n)
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -193,7 +187,7 @@ DeleteConfig(d) ==
     /\ ~config[d].deleted
     /\ config' = [config EXCEPT ![d].deleted = TRUE]
     /\ change_list' = [change_list EXCEPT ![n] = remove_deleted(@)]
-    /\ UNCHANGED server_node_info
+    /\ updateConfigPushToChan(d, config[d].runner)
     /\ UNCHANGED global_conn
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
@@ -342,7 +336,7 @@ RecvConfig(n) ==
             primary |-> resp.primary,
             runner |-> n,
             replicas |-> {},
-            deleted |-> FALSE
+            deleted |-> resp.deleted
         ]
     IN
     /\ node_conn[n] # nil
@@ -441,14 +435,19 @@ NodeConfigMatchServerConfig ==
             /\ node_conn[n] # nil
             /\ stopCondNode(n)
 
+        cond_for_ds(d, n) ==
+            LET
+                config_with_runner ==
+                    /\ config[d] # nil
+                    /\ config[d].runner = n
+            IN
+                config_with_runner =>
+                    \/ node_config[n][d] = config[d]
+                    \/ /\ node_config[n][d] = nil
+                       /\ config[d].deleted
+
         cond(n) ==
-            \A d \in Dataset:
-                LET
-                    config_with_runner ==
-                        /\ config[d] # nil
-                        /\ config[d].runner = n
-                IN
-                    config_with_runner => node_config[n][d] = config[d]
+            \A d \in Dataset: cond_for_ds(d, n)
     IN
         \A n \in Node: pre_cond(n) => cond(n)
 
