@@ -45,7 +45,7 @@ Request ==
         connect == [
             type: {"Connect"},
             node: Node,
-            current: Seq(Dataset)
+            current: SUBSET Dataset
         ]
     IN
         UNION {connect}
@@ -100,12 +100,15 @@ init_server_node_info == [
     pending_set |-> {}
 ]
 
+
+config_is_active(d, n) ==
+    /\ config[d] # nil
+    /\ config[d].runner = n
+    /\ ~config[d].deleted
+
 config_change_list(n) ==
     LET
-        filter_fn(d) ==
-            /\ config[d] # nil
-            /\ config[d].runner = n
-            /\ ~config[d].deleted
+        filter_fn(d) == config_is_active(d, n)
     IN
     SelectSeq(dataset_sort_order, filter_fn)
 
@@ -159,9 +162,13 @@ updateConfigPushToChan(d, n) ==
         ch == server_node_info[n].chan
         conn == server_node_info[n].conn
 
+        existed_in_pending_set ==
+            d \in server_node_info[n].pending_set
+
         when_chan_nil ==
             /\ server_node_info' = [server_node_info EXCEPT
-                    ![n].pending = Append(@, d)
+                    ![n].pending = Append(@, d),
+                    ![n].pending_set = @ \union {d}
                 ]
 
         when_chan_not_nil ==
@@ -172,7 +179,10 @@ updateConfigPushToChan(d, n) ==
     IF conn = nil THEN
         UNCHANGED server_node_info
     ELSE IF ch.status \in {"Nil", "Ready"} THEN
-        when_chan_nil
+        IF existed_in_pending_set THEN
+            UNCHANGED server_node_info
+        ELSE
+            when_chan_nil
     ELSE
         when_chan_not_nil
 
@@ -239,7 +249,12 @@ doHandleConnect(conn) ==
         req == global_conn[conn].send[1]
         n == req.node
 
-        pending_list == config_change_list(n)
+        filter_fn(d) ==
+            \/ config_is_active(d, n)
+            \/ d \in req.current
+
+        pending_list == SelectSeq(dataset_sort_order, filter_fn)
+
         pending_ds == pending_list[1]
 
         when_pending_empty ==
@@ -295,10 +310,13 @@ ConsumeChan(n) ==
 
         pushed_ch == new_ready_chan(new_config_resp(pending_ds))
 
+        d == server_node_info[n].pending[1]
+
         when_non_empty ==
             /\ server_node_info' = [server_node_info EXCEPT
                     ![n].chan = pushed_ch,
-                    ![n].pending = Tail(@)
+                    ![n].pending = Tail(@),
+                    ![n].pending_set = @ \ {d}
                 ]
     IN
     /\ server_node_info[n].chan.status = "Ready"
@@ -322,20 +340,20 @@ ConsumeChan(n) ==
 
 -------------------------------------------------------------------------------
 
-node_config_change_list(n) ==
+node_config_change_set(n) ==
     LET
         filter_fn(d) ==
             /\ node_config[n][d] # nil
             /\ ~node_config[n][d].deleted
     IN
-    SelectSeq(dataset_sort_order, filter_fn)
+        {d \in Dataset: filter_fn(d)}
 
 NewConn(n) ==
     LET
         connect_req == [
             type |-> "Connect",
             node |-> n,
-            current |-> node_config_change_list(n)
+            current |-> node_config_change_set(n)
         ]
 
         new_conn == [
@@ -434,6 +452,7 @@ StopCond ==
 
 TerminateCond ==
     /\ StopCond
+    /\ num_close_conn = max_close_conn
 
 Terminated ==
     /\ TerminateCond
@@ -458,7 +477,12 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 -------------------------------------------------------------------------------
+
+AlwaysTerminate == <> TerminateCond
+
 
 NodeConfigMatchServerConfig ==
     LET
