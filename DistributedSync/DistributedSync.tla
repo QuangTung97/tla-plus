@@ -60,6 +60,7 @@ Request ==
 
         new_entry == [
             type: {"NewEntry"},
+            seq: EventSeq,
             ds: Dataset,
             storage: Storage,
             value: Value
@@ -374,6 +375,31 @@ HandleConnect ==
     \E conn \in ConnAddr: doHandleConnect(conn)
 
 
+HandleNewEntry(n) ==
+    LET
+        conn == server_node_info[n].conn
+        req == global_conn[conn].send[1]
+
+        d == req.ds
+        s == req.storage
+    IN
+    /\ conn # nil
+    /\ conn \in active_conns \* TODO
+    /\ global_conn[conn].send # <<>>
+    /\ req.type = "NewEntry"
+    /\ global_conn' = [global_conn EXCEPT ![conn].send = Tail(@)]
+
+    /\ db' = [db EXCEPT ![d][s] = req.value]
+    /\ last_seq' = [last_seq EXCEPT ![n] = req.seq]
+
+    /\ UNCHANGED config
+    /\ UNCHANGED server_node_info
+    /\ UNCHANGED active_conns
+    /\ UNCHANGED data
+    /\ UNCHANGED node_vars
+    /\ UNCHANGED aux_vars
+
+
 ConsumeChan(n) ==
     LET
         old_chan == server_node_info[n].chan
@@ -526,6 +552,7 @@ NodeUpdateLocalDB(d, n) ==
 
         new_entry == [
             type |-> "NewEntry",
+            seq |-> 31 + Len(node_events[n]),
             ds |-> d,
             storage |-> s,
             value |-> data[d][s]
@@ -666,6 +693,7 @@ Next ==
     \/ HandleConnect
     \/ \E n \in Node:
         \/ ConsumeChan(n)
+        \/ HandleNewEntry(n)
     \/ \E d \in Dataset:
         \/ DeleteConfig(d)
     \/ \E d \in Dataset, s \in Storage:
