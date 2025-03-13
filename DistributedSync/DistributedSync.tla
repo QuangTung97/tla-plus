@@ -1,21 +1,28 @@
 ------ MODULE DistributedSync ----
-EXTENDS TLC, Naturals, Sequences
+EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 CONSTANTS Dataset, Node, Storage, nil, max_close_conn
 
 VARIABLES
-    config, change_list, active_conns, server_node_info,
+    config, active_conns, server_node_info,
     data, global_conn,
     node_conn, node_config, main_pc,
-    num_close_conn
+    num_close_conn, dataset_sort_order
 
 core_vars == <<
-    config, change_list, active_conns, server_node_info
+    config, active_conns, server_node_info
 >>
 
 node_vars == <<node_conn, node_config, main_pc>>
-aux_vars == <<num_close_conn>>
+aux_vars == <<num_close_conn, dataset_sort_order>>
 vars == <<core_vars, data, global_conn, node_vars, aux_vars>>
+
+-------------------------------------------------------------------------------
+
+Range(f) == {f[x]: x \in DOMAIN f}
+
+seq_not_duplicated(f) ==
+    Cardinality(Range(f)) = Len(f)
 
 -------------------------------------------------------------------------------
 
@@ -37,7 +44,8 @@ Request ==
     LET
         connect == [
             type: {"Connect"},
-            node: Node
+            node: Node,
+            current: Seq(Dataset)
         ]
     IN
         UNION {connect}
@@ -76,7 +84,8 @@ new_empty_chan == [
 ServerNodeInfo == [
     conn: NullConn,
     chan: Channel,
-    pending: Seq(Dataset)
+    pending: Seq(Dataset),
+    pending_set: SUBSET Dataset
 ]
 
 nil_chan == [
@@ -87,14 +96,25 @@ nil_chan == [
 init_server_node_info == [
     conn |-> nil,
     chan |-> nil_chan,
-    pending |-> <<>>
+    pending |-> <<>>,
+    pending_set |-> {}
 ]
+
+config_change_list(n) ==
+    LET
+        filter_fn(d) ==
+            /\ config[d] # nil
+            /\ config[d].runner = n
+            /\ ~config[d].deleted
+    IN
+    SelectSeq(dataset_sort_order, filter_fn)
 
 -------------------------------------------------------------------------------
 
+num_dataset == Cardinality(Dataset)
+
 TypeOK ==
     /\ config \in [Dataset -> NullConfig]
-    /\ change_list \in [Node -> Seq(Dataset)]
     /\ server_node_info \in [Node -> ServerNodeInfo]
     /\ active_conns \subseteq ConnAddr
     /\ data \in [Storage -> [Dataset -> NullValue]]
@@ -103,10 +123,11 @@ TypeOK ==
     /\ node_config \in [Node -> [Dataset -> NullConfig]]
     /\ main_pc \in [Node -> {"Init"}]
     /\ num_close_conn \in 0..max_close_conn
+    /\ dataset_sort_order \in Seq(Dataset)
+    /\ Range(dataset_sort_order) = Dataset
 
 Init ==
     /\ config = [d \in Dataset |-> nil]
-    /\ change_list = [n \in Node |-> <<>>]
     /\ server_node_info = [n \in Node |-> init_server_node_info]
     /\ active_conns = {}
     /\ data = [s \in Storage |-> [d \in Dataset |-> nil]]
@@ -115,6 +136,8 @@ Init ==
     /\ node_config = [n \in Node |-> [d \in Dataset |-> nil]]
     /\ main_pc = [n \in Node |-> "Init"]
     /\ num_close_conn = 0
+    /\ dataset_sort_order \in [1..num_dataset -> Dataset]
+    /\ Range(dataset_sort_order) = Dataset
 
 -------------------------------------------------------------------------------
 
@@ -165,7 +188,6 @@ SetupPrimaryConfig(d, n, s) ==
     IN
     /\ config[d] = nil
     /\ config' = [config EXCEPT ![d] = new_config]
-    /\ change_list' = [change_list EXCEPT ![n] = Append(@, d)]
     /\ updateConfigPushToChan(d, n)
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
@@ -186,7 +208,6 @@ DeleteConfig(d) ==
     /\ config[d] # nil
     /\ ~config[d].deleted
     /\ config' = [config EXCEPT ![d].deleted = TRUE]
-    /\ change_list' = [change_list EXCEPT ![n] = remove_deleted(@)]
     /\ updateConfigPushToChan(d, config[d].runner)
     /\ UNCHANGED global_conn
     /\ UNCHANGED active_conns
@@ -208,7 +229,6 @@ AcceptConn ==
         /\ UNCHANGED global_conn
         /\ UNCHANGED server_node_info
         /\ UNCHANGED config
-        /\ UNCHANGED change_list
         /\ UNCHANGED data
         /\ UNCHANGED node_vars
         /\ UNCHANGED aux_vars
@@ -219,7 +239,7 @@ doHandleConnect(conn) ==
         req == global_conn[conn].send[1]
         n == req.node
 
-        pending_list == change_list[n]
+        pending_list == config_change_list(n)
         pending_ds == pending_list[1]
 
         when_pending_empty ==
@@ -228,10 +248,13 @@ doHandleConnect(conn) ==
                     ![n].chan = new_empty_chan
                 ]
 
+        new_pending == Tail(pending_list)
+
         when_pending_non_empty ==
             /\ server_node_info' = [server_node_info EXCEPT
                     ![n].conn = conn,
-                    ![n].pending = Tail(pending_list),
+                    ![n].pending = new_pending,
+                    ![n].pending_set = Range(new_pending),
                     ![n].chan = new_ready_chan(new_config_resp(pending_ds))
                 ]
     IN
@@ -245,7 +268,6 @@ doHandleConnect(conn) ==
         THEN when_pending_empty
         ELSE when_pending_non_empty
 
-    /\ UNCHANGED change_list
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -293,7 +315,6 @@ ConsumeChan(n) ==
                     ELSE Append(@, resp)
         ]
 
-    /\ UNCHANGED change_list
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -301,11 +322,20 @@ ConsumeChan(n) ==
 
 -------------------------------------------------------------------------------
 
+node_config_change_list(n) ==
+    LET
+        filter_fn(d) ==
+            /\ node_config[n][d] # nil
+            /\ ~node_config[n][d].deleted
+    IN
+    SelectSeq(dataset_sort_order, filter_fn)
+
 NewConn(n) ==
     LET
         connect_req == [
             type |-> "Connect",
-            node |-> n
+            node |-> n,
+            current |-> node_config_change_list(n)
         ]
 
         new_conn == [
@@ -382,6 +412,7 @@ ConnectionClose ==
         /\ UNCHANGED data
         /\ UNCHANGED node_vars
         /\ UNCHANGED core_vars
+        /\ UNCHANGED dataset_sort_order
 
 -------------------------------------------------------------------------------
 
@@ -473,9 +504,18 @@ ClosedConnInv ==
 
 
 ChangeListShouldNotContainDelete ==
-    \A n \in Node: \A i \in DOMAIN change_list[n]:
-        LET d == change_list[n][i] IN
+    \A n \in Node: \A i \in DOMAIN config_change_list(n):
+        LET d == config_change_list(n)[i] IN
             config[d] # nil => ~config[d].deleted
 
+
+ServerNodeInfoPendingListNonDuplicated ==
+    \A n \in Node:
+        seq_not_duplicated(server_node_info[n].pending)
+
+
+ServerNodeInfoPendingListMatchPendingSet ==
+    \A n \in Node:
+        Range(server_node_info[n].pending) = server_node_info[n].pending_set
 
 ====
