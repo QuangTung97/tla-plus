@@ -9,7 +9,7 @@ VARIABLES
     data, db, global_conn,
     node_conn, node_config, node_db, main_pc,
     num_close_conn, dataset_sort_order,
-    next_value
+    next_value, stop_delete
 
 core_vars == <<
     config, active_conns, server_node_info,
@@ -17,7 +17,7 @@ core_vars == <<
 >>
 
 node_vars == <<node_conn, node_config, node_db, main_pc>>
-aux_vars == <<num_close_conn, dataset_sort_order, next_value>>
+aux_vars == <<num_close_conn, dataset_sort_order, next_value, stop_delete>>
 vars == <<core_vars, data, global_conn, node_vars, aux_vars>>
 
 -------------------------------------------------------------------------------
@@ -150,6 +150,7 @@ TypeOK ==
     /\ dataset_sort_order \in Seq(Dataset)
     /\ Range(dataset_sort_order) = Dataset
     /\ next_value \in 20..max_value
+    /\ stop_delete \in BOOLEAN
 
 Init ==
     /\ config = [d \in Dataset |-> nil]
@@ -169,6 +170,7 @@ Init ==
     /\ dataset_sort_order \in [1..num_dataset -> Dataset]
     /\ Range(dataset_sort_order) = Dataset
     /\ next_value = 20
+    /\ stop_delete = FALSE
 
 -------------------------------------------------------------------------------
 
@@ -237,6 +239,7 @@ SetupPrimaryConfig(d, n, s) ==
 
 
 AddReplicaConfig(d, s) ==
+    /\ ~stop_delete
     /\ config[d] # nil
     /\ ~config[d].deleted
     /\ s \notin config[d].replicas
@@ -299,8 +302,7 @@ doHandleConnect(conn) ==
         n == req.node
 
         filter_fn(d) ==
-            \/ /\ config_is_active(d, n)
-               /\ d \notin req.current
+            \/ config_is_active(d, n)
             \/ /\ config_is_deleted(d, n)
                /\ d \in req.current
 
@@ -489,7 +491,7 @@ NodeUpdateLocalDB(d, n) ==
     /\ data[d][s] # node_db[d][s]
     /\ node_db' = [node_db EXCEPT ![d][s] = data[d][s]]
 
-    /\ IF global_conn[conn].closed
+    /\ IF conn = nil \/ global_conn[conn].closed
         THEN UNCHANGED global_conn
         ELSE global_conn' = [global_conn EXCEPT
                 ![conn].send = Append(@, req)]
@@ -516,6 +518,19 @@ ConnectionClose ==
         /\ UNCHANGED core_vars
         /\ UNCHANGED dataset_sort_order
         /\ UNCHANGED next_value
+        /\ UNCHANGED stop_delete
+
+
+EnableStopDelete ==
+    /\ ~stop_delete
+    /\ stop_delete' = TRUE
+    /\ UNCHANGED global_conn
+    /\ UNCHANGED num_close_conn
+    /\ UNCHANGED dataset_sort_order
+    /\ UNCHANGED data
+    /\ UNCHANGED next_value
+    /\ UNCHANGED node_vars
+    /\ UNCHANGED core_vars
 
 -------------------------------------------------------------------------------
 
@@ -528,6 +543,7 @@ UpdateDiskData(d, s) ==
     /\ UNCHANGED dataset_sort_order
     /\ UNCHANGED core_vars
     /\ UNCHANGED node_vars
+    /\ UNCHANGED stop_delete
 
 -------------------------------------------------------------------------------
 
@@ -545,8 +561,14 @@ stopCondNode(n) ==
         /\ global_conn[conn].recv = <<>>
 
 StopCond ==
+    LET
+        dataset_cond(d) ==
+            /\ config[d] # nil
+            /\ ~config[d].deleted
+    IN
     /\ \A n \in Node: stopCondNode(n)
-    /\ \A d \in Dataset: node_db[d] = data[d]
+    /\ \A d \in Dataset:
+        dataset_cond(d) => node_db[d] = data[d]
 
 TerminateCond ==
     /\ StopCond
@@ -577,6 +599,7 @@ Next ==
     \/ \E d \in Dataset, n \in Node:
         \/ NodeUpdateLocalDB(d, n)
     \/ ConnectionClose
+    \/ EnableStopDelete
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -621,6 +644,7 @@ DataMatchDB ==
             /\ stopCondNode(n)
             /\ node_config[n][d] # nil
             /\ node_db[d] = data[d]
+            /\ node_conn[n] # nil
     IN
     \A d \in Dataset:
         pre_cond(d) => data[d] = db[d]
