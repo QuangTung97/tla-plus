@@ -6,17 +6,22 @@ CONSTANTS Dataset, Node, Storage, nil,
 
 VARIABLES
     config, active_conns, server_node_info,
-    data, db, global_conn,
-    node_conn, node_config, node_db, main_pc,
+    data, db, last_seq, global_conn,
+    node_conn, node_config, node_db, node_last_seq,
+    node_events,
     num_close_conn, dataset_sort_order,
     next_value, stop_delete
 
 core_vars == <<
     config, active_conns, server_node_info,
-    db
+    db, last_seq
 >>
 
-node_vars == <<node_conn, node_config, node_db, main_pc>>
+node_vars == <<
+    node_conn, node_config, node_db, node_last_seq,
+    node_events
+>>
+
 aux_vars == <<num_close_conn, dataset_sort_order, next_value, stop_delete>>
 vars == <<core_vars, data, global_conn, node_vars, aux_vars>>
 
@@ -33,6 +38,8 @@ Value == 21..29
 NullValue == Value \union {nil}
 
 NullNode == Node \union {nil}
+
+EventSeq == 30..39
 
 Config == [
     primary: Storage,
@@ -60,13 +67,22 @@ Request ==
     IN
         UNION {connect, new_entry}
 
-Response == [
-    type: {"Config"},
-    ds: Dataset,
-    primary: Storage,
-    replicas: SUBSET Storage,
-    deleted: BOOLEAN
-]
+Response ==
+    LET
+        conf_resp == [
+            type: {"Config"},
+            ds: Dataset,
+            primary: Storage,
+            replicas: SUBSET Storage,
+            deleted: BOOLEAN
+        ]
+
+        connect_resp == [
+            type: {"ConnectReply"},
+            seq: EventSeq
+        ]
+    IN
+        UNION {conf_resp, connect_resp}
 
 Conn == [
     send: Seq(Request),
@@ -137,6 +153,7 @@ TypeOK ==
     /\ server_node_info \in [Node -> ServerNodeInfo]
     /\ active_conns \subseteq ConnAddr
     /\ db \in [Dataset -> [Storage -> NullValue]]
+    /\ last_seq \in [Node -> EventSeq]
 
     /\ data \in [Dataset -> [Storage -> NullValue]]
     /\ global_conn \in Seq(Conn)
@@ -144,7 +161,8 @@ TypeOK ==
     /\ node_conn \in [Node -> NullConn]
     /\ node_config \in [Node -> [Dataset -> NullConfig]]
     /\ node_db \in [Dataset -> [Storage -> NullValue]]
-    /\ main_pc \in [Node -> {"Init"}]
+    /\ node_last_seq \in [Node -> EventSeq \union {nil}]
+    /\ node_events \in [Node -> Seq(Request)]
 
     /\ num_close_conn \in 0..max_close_conn
     /\ dataset_sort_order \in Seq(Dataset)
@@ -157,6 +175,7 @@ Init ==
     /\ server_node_info = [n \in Node |-> init_server_node_info]
     /\ active_conns = {}
     /\ db = [d \in Dataset |-> [s \in Storage |-> nil]]
+    /\ last_seq = [n \in Node |-> 30]
 
     /\ data = [d \in Dataset |-> [s \in Storage |-> nil]]
     /\ global_conn = <<>>
@@ -164,7 +183,8 @@ Init ==
     /\ node_conn = [n \in Node |-> nil]
     /\ node_config = [n \in Node |-> [d \in Dataset |-> nil]]
     /\ node_db = [d \in Dataset |-> [s \in Storage |-> nil]]
-    /\ main_pc = [n \in Node |-> "Init"]
+    /\ node_last_seq = [n \in Node |-> nil]
+    /\ node_events = [n \in Node |-> <<>>]
 
     /\ num_close_conn = 0
     /\ dataset_sort_order \in [1..num_dataset -> Dataset]
@@ -230,7 +250,7 @@ SetupPrimaryConfig(d, n, s) ==
     /\ config[d] = nil
     /\ config' = [config EXCEPT ![d] = new_config]
     /\ updateConfigPushToChan(d, n)
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, last_seq>>
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -239,7 +259,6 @@ SetupPrimaryConfig(d, n, s) ==
 
 
 AddReplicaConfig(d, s) ==
-    /\ ~stop_delete
     /\ config[d] # nil
     /\ ~config[d].deleted
     /\ s \notin config[d].replicas
@@ -249,7 +268,7 @@ AddReplicaConfig(d, s) ==
     /\ updateConfigPushToChan(d, config[d].runner)
 
     /\ UNCHANGED global_conn
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, last_seq>>
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -265,11 +284,12 @@ DeleteConfig(d) ==
         remove_deleted(list) ==
             SelectSeq(list, filter_fn)
     IN
+    /\ ~stop_delete
     /\ config[d] # nil
     /\ ~config[d].deleted
     /\ config' = [config EXCEPT ![d].deleted = TRUE]
     /\ updateConfigPushToChan(d, n)
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, last_seq>>
     /\ UNCHANGED global_conn
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
@@ -288,7 +308,7 @@ AcceptConn ==
         /\ ~global_conn[conn].closed
         /\ active_conns' = active_conns \union {conn}
         /\ UNCHANGED global_conn
-        /\ UNCHANGED db
+        /\ UNCHANGED <<db, last_seq>>
         /\ UNCHANGED server_node_info
         /\ UNCHANGED config
         /\ UNCHANGED data
@@ -300,6 +320,11 @@ doHandleConnect(conn) ==
     LET
         req == global_conn[conn].send[1]
         n == req.node
+
+        connect_resp == [
+            type |-> "ConnectReply",
+            seq |-> last_seq[n]
+        ]
 
         filter_fn(d) ==
             \/ config_is_active(d, n)
@@ -329,7 +354,10 @@ doHandleConnect(conn) ==
     /\ conn \in active_conns
     /\ global_conn[conn].send # <<>>
     /\ req.type = "Connect"
-    /\ global_conn' = [global_conn EXCEPT ![conn].send = Tail(@)]
+    /\ global_conn' = [global_conn EXCEPT
+            ![conn].send = Tail(@),
+            ![conn].recv = Append(@, connect_resp)
+        ]
 
     /\ UNCHANGED config
     /\ IF pending_list = <<>>
@@ -337,7 +365,7 @@ doHandleConnect(conn) ==
         ELSE when_pending_non_empty
 
     /\ UNCHANGED active_conns
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, last_seq>>
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
@@ -389,7 +417,7 @@ ConsumeChan(n) ==
 
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
-    /\ UNCHANGED db
+    /\ UNCHANGED <<db, last_seq>>
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
 
@@ -422,15 +450,31 @@ NewConn(n) ==
     /\ node_conn[n] = nil
     /\ global_conn' = Append(global_conn, new_conn)
     /\ node_conn' = [node_conn EXCEPT ![n] = conn]
-    /\ UNCHANGED node_config
+    /\ UNCHANGED <<node_config, node_last_seq, node_events>>
     /\ UNCHANGED node_db
     /\ UNCHANGED core_vars
     /\ UNCHANGED data
-    /\ UNCHANGED main_pc
     /\ UNCHANGED aux_vars
 
 
-RecvConfig(n) ==
+NodeRecvConnectReply(n) ==
+    LET
+        conn == node_conn[n]
+        resp == global_conn[conn].recv[1]
+    IN
+    /\ conn # nil
+    /\ global_conn[conn].recv # <<>>
+    /\ resp.type = "ConnectReply"
+    /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
+    /\ node_last_seq' = [node_last_seq EXCEPT ![n] = resp.seq]
+
+    /\ UNCHANGED data
+    /\ UNCHANGED <<node_config, node_conn, node_db, node_events>>
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED aux_vars
+
+
+NodeRecvConfig(n) ==
     LET
         conn == node_conn[n]
         resp == global_conn[conn].recv[1]
@@ -447,11 +491,11 @@ RecvConfig(n) ==
     /\ global_conn[conn].recv # <<>>
     /\ resp.type = "Config"
     /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
-
     /\ node_config' = [node_config EXCEPT ![n][d] = new_config]
+    /\ UNCHANGED node_last_seq
+    /\ UNCHANGED node_events
     /\ UNCHANGED node_conn
     /\ UNCHANGED node_db
-    /\ UNCHANGED main_pc
     /\ UNCHANGED data
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
@@ -464,9 +508,9 @@ NodeClearClosedConn(n) ==
     /\ node_conn[n] # nil
     /\ global_conn[conn].closed
     /\ node_conn' = [node_conn EXCEPT ![n] = nil]
+    /\ node_last_seq' = [node_last_seq EXCEPT ![n] = nil]
 
-    /\ UNCHANGED main_pc
-    /\ UNCHANGED node_config
+    /\ UNCHANGED <<node_config, node_events>>
     /\ UNCHANGED node_db
     /\ UNCHANGED global_conn
     /\ UNCHANGED data
@@ -480,7 +524,7 @@ NodeUpdateLocalDB(d, n) ==
         s == conf.primary
         conn == node_conn[n]
 
-        req == [
+        new_entry == [
             type |-> "NewEntry",
             ds |-> d,
             storage |-> s,
@@ -490,14 +534,39 @@ NodeUpdateLocalDB(d, n) ==
     /\ conf # nil
     /\ data[d][s] # node_db[d][s]
     /\ node_db' = [node_db EXCEPT ![d][s] = data[d][s]]
+    /\ node_events' = [node_events EXCEPT ![n] = Append(@, new_entry)]
 
-    /\ IF conn = nil \/ global_conn[conn].closed
-        THEN UNCHANGED global_conn
-        ELSE global_conn' = [global_conn EXCEPT
-                ![conn].send = Append(@, req)]
-
-    /\ UNCHANGED <<node_config, node_conn, main_pc>>
+    /\ UNCHANGED global_conn
+    /\ UNCHANGED <<node_config, node_conn, node_last_seq>>
     /\ UNCHANGED data
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED aux_vars
+
+
+allowToPushNewEntry(n) ==
+    LET
+        len == Len(node_events[n])
+    IN
+    /\ node_last_seq[n] # nil
+    /\ node_last_seq[n] - 30 < len
+
+NodePushNewEntry(n) ==
+    LET
+        conn == node_conn[n]
+        offset == node_last_seq'[n] - 30
+
+        ev == node_events[n][offset]
+    IN
+    /\ conn # nil
+    /\ allowToPushNewEntry(n)
+    /\ ~global_conn[conn].closed
+
+    /\ node_last_seq' = [node_last_seq EXCEPT ![n] = @ + 1]
+    /\ global_conn' = [global_conn EXCEPT ![conn].send = Append(@, ev)]
+
+    /\ UNCHANGED node_events
+    /\ UNCHANGED data
+    /\ UNCHANGED <<node_config, node_conn, node_db>>
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
 
@@ -537,7 +606,11 @@ EnableStopDelete ==
 UpdateDiskData(d, s) ==
     /\ next_value < max_value
     /\ next_value' = next_value + 1
+    /\ config[d] # nil
+    /\ config[d].primary = s
+
     /\ data' = [data EXCEPT ![d][s] = next_value']
+
     /\ UNCHANGED global_conn
     /\ UNCHANGED num_close_conn
     /\ UNCHANGED dataset_sort_order
@@ -585,8 +658,10 @@ Next ==
         \/ SetupPrimaryConfig(d, n, s)
     \/ \E n \in Node:
         \/ NewConn(n)
-        \/ RecvConfig(n)
+        \/ NodeRecvConnectReply(n)
+        \/ NodeRecvConfig(n)
         \/ NodeClearClosedConn(n)
+        \/ NodePushNewEntry(n)
     \/ AcceptConn
     \/ HandleConnect
     \/ \E n \in Node:
@@ -645,6 +720,7 @@ DataMatchDB ==
             /\ node_config[n][d] # nil
             /\ node_db[d] = data[d]
             /\ node_conn[n] # nil
+            /\ ~allowToPushNewEntry(n)
     IN
     \A d \in Dataset:
         pre_cond(d) => data[d] = db[d]
@@ -684,5 +760,10 @@ ServerNodeInfoPendingListNonDuplicated ==
 ServerNodeInfoPendingListMatchPendingSet ==
     \A n \in Node:
         Range(server_node_info[n].pending) = server_node_info[n].pending_set
+
+
+NodeLastSeqInv ==
+    \A n \in Node:
+        node_last_seq[n] # nil => node_conn[n] # nil
 
 ====
