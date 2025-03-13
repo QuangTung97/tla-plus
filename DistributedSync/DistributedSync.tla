@@ -515,10 +515,13 @@ NodeRecvConfig(n) ==
             primary |-> resp.primary,
             runner |-> n,
             replicas |-> resp.replicas,
-            deleted |-> resp.deleted
+            deleted |-> resp.deleted \* TODO clear when deleted
         ]
 
-        pending_jobs == resp.replicas \* TODO
+        pending_jobs ==
+            IF node_db[d][primary] # nil
+                THEN resp.replicas
+                ELSE {}
     IN
     /\ node_conn[n] # nil
     /\ global_conn[conn].recv # <<>>
@@ -555,6 +558,20 @@ NodeClearClosedConn(n) ==
     /\ UNCHANGED aux_vars
 
 
+insert_event_new_entry(d, n, s) ==
+    LET
+        new_entry == [
+            type |-> "NewEntry",
+            seq |-> 31 + Len(node_events[n]),
+            ds |-> d,
+            storage |-> s,
+            value |-> data'[d][s]
+        ]
+    IN
+    /\ node_db' = [node_db EXCEPT ![d][s] = data'[d][s]]
+    /\ node_events' = [node_events EXCEPT ![n] = Append(@, new_entry)]
+
+
 NodeUpdateLocalDB(d, n) ==
     LET
         conf == node_config[n][d]
@@ -571,13 +588,14 @@ NodeUpdateLocalDB(d, n) ==
     IN
     /\ conf # nil
     /\ data[d][s] # node_db[d][s]
-    /\ node_db' = [node_db EXCEPT ![d][s] = data[d][s]]
-    /\ node_events' = [node_events EXCEPT ![n] = Append(@, new_entry)]
 
-    /\ UNCHANGED node_pending_jobs \* TODO
+    /\ UNCHANGED data
+    /\ insert_event_new_entry(d, n, s)
+    /\ node_pending_jobs' = [node_pending_jobs EXCEPT
+            ![n][d] = @ \union conf.replicas]
+
     /\ UNCHANGED global_conn
     /\ UNCHANGED <<node_config, node_conn, node_last_seq>>
-    /\ UNCHANGED data
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
 
@@ -608,6 +626,23 @@ NodePushNewEntry(n) ==
     /\ UNCHANGED node_pending_jobs
     /\ UNCHANGED data
     /\ UNCHANGED <<node_config, node_conn, node_db>>
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED aux_vars
+
+
+NodeHandlePendingJob(d, n, s) ==
+    LET
+        primary == node_config[n][d].primary
+    IN
+    /\ s \in node_pending_jobs[n][d]
+
+    /\ data' = [data EXCEPT ![d][s] = data[d][primary]]
+    /\ insert_event_new_entry(d, n, s)
+    /\ node_pending_jobs' = [node_pending_jobs EXCEPT
+            ![n][d] = @ \ {s}]
+
+    /\ UNCHANGED <<node_conn, node_config, node_last_seq>>
+    /\ UNCHANGED global_conn
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
 
@@ -699,6 +734,7 @@ Terminated ==
 Next ==
     \/ \E d \in Dataset, n \in Node, s \in Storage:
         \/ SetupPrimaryConfig(d, n, s)
+        \/ NodeHandlePendingJob(d, n, s)
     \/ \E n \in Node:
         \/ NewConn(n)
         \/ NodeRecvConnectReply(n)
@@ -763,6 +799,7 @@ DataMatchDB ==
             /\ stopCondNode(n)
             /\ node_config[n][d] # nil
             /\ node_db[d] = data[d]
+            /\ node_conn[n] # nil
             /\ ~allowToPushNewEntry(n)
     IN
     \A d \in Dataset:
@@ -820,11 +857,24 @@ DiskReplicaMustExisted ==
                 /\ config[d] # nil
                 /\ stopCondNode(n)
                 /\ node_config[n][d] # nil
+                /\ node_conn[n] # nil
+                /\ node_db[d][primary] # nil
+                /\ data[d][primary] = node_db[d][primary]
 
             cond ==
                 /\ \A s \in config[d].replicas:
                         data[d][s] = data[d][primary]
         IN
             pre_cond => cond
+
+
+NodePendingJobInv ==
+    \A n \in Node, d \in Dataset:
+        LET
+            primary == config[d].primary
+        IN
+        config[d] # nil =>
+            /\ node_pending_jobs[n][d] \subseteq config[d].replicas
+            /\ node_pending_jobs[n][d] # {} => node_db[d][primary] # nil
 
 ====
