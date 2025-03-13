@@ -7,7 +7,7 @@ CONSTANTS Dataset, Node, Storage, nil,
 VARIABLES
     config, active_conns, server_node_info,
     data, db, global_conn,
-    node_conn, node_config, main_pc,
+    node_conn, node_config, node_db, main_pc,
     num_close_conn, dataset_sort_order,
     next_value
 
@@ -16,7 +16,7 @@ core_vars == <<
     db
 >>
 
-node_vars == <<node_conn, node_config, main_pc>>
+node_vars == <<node_conn, node_config, node_db, main_pc>>
 aux_vars == <<num_close_conn, dataset_sort_order, next_value>>
 vars == <<core_vars, data, global_conn, node_vars, aux_vars>>
 
@@ -50,8 +50,15 @@ Request ==
             node: Node,
             current: SUBSET Dataset
         ]
+
+        new_entry == [
+            type: {"NewEntry"},
+            ds: Dataset,
+            storage: Storage,
+            value: Value
+        ]
     IN
-        UNION {connect}
+        UNION {connect, new_entry}
 
 Response == [
     type: {"Config"},
@@ -129,27 +136,35 @@ TypeOK ==
     /\ config \in [Dataset -> NullConfig]
     /\ server_node_info \in [Node -> ServerNodeInfo]
     /\ active_conns \subseteq ConnAddr
-    /\ db \in [Dataset -> NullValue]
-    /\ data \in [Dataset -> NullValue]
+    /\ db \in [Dataset -> [Storage -> NullValue]]
+
+    /\ data \in [Dataset -> [Storage -> NullValue]]
     /\ global_conn \in Seq(Conn)
+
     /\ node_conn \in [Node -> NullConn]
     /\ node_config \in [Node -> [Dataset -> NullConfig]]
+    /\ node_db \in [Dataset -> [Storage -> NullValue]]
     /\ main_pc \in [Node -> {"Init"}]
+
     /\ num_close_conn \in 0..max_close_conn
     /\ dataset_sort_order \in Seq(Dataset)
     /\ Range(dataset_sort_order) = Dataset
-    /\ next_value \in (Value \union {20})
+    /\ next_value \in 20..max_value
 
 Init ==
     /\ config = [d \in Dataset |-> nil]
     /\ server_node_info = [n \in Node |-> init_server_node_info]
     /\ active_conns = {}
-    /\ db = [d \in Dataset |-> nil]
-    /\ data = [d \in Dataset |-> nil]
+    /\ db = [d \in Dataset |-> [s \in Storage |-> nil]]
+
+    /\ data = [d \in Dataset |-> [s \in Storage |-> nil]]
     /\ global_conn = <<>>
+
     /\ node_conn = [n \in Node |-> nil]
     /\ node_config = [n \in Node |-> [d \in Dataset |-> nil]]
+    /\ node_db = [d \in Dataset |-> [s \in Storage |-> nil]]
     /\ main_pc = [n \in Node |-> "Init"]
+
     /\ num_close_conn = 0
     /\ dataset_sort_order \in [1..num_dataset -> Dataset]
     /\ Range(dataset_sort_order) = Dataset
@@ -406,6 +421,7 @@ NewConn(n) ==
     /\ global_conn' = Append(global_conn, new_conn)
     /\ node_conn' = [node_conn EXCEPT ![n] = conn]
     /\ UNCHANGED node_config
+    /\ UNCHANGED node_db
     /\ UNCHANGED core_vars
     /\ UNCHANGED data
     /\ UNCHANGED main_pc
@@ -432,6 +448,7 @@ RecvConfig(n) ==
 
     /\ node_config' = [node_config EXCEPT ![n][d] = new_config]
     /\ UNCHANGED node_conn
+    /\ UNCHANGED node_db
     /\ UNCHANGED main_pc
     /\ UNCHANGED data
     /\ UNCHANGED core_vars
@@ -448,7 +465,36 @@ NodeClearClosedConn(n) ==
 
     /\ UNCHANGED main_pc
     /\ UNCHANGED node_config
+    /\ UNCHANGED node_db
     /\ UNCHANGED global_conn
+    /\ UNCHANGED data
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED aux_vars
+
+
+NodeUpdateLocalDB(d, n) ==
+    LET
+        conf == node_config[n][d]
+        s == conf.primary
+        conn == node_conn[n]
+
+        req == [
+            type |-> "NewEntry",
+            ds |-> d,
+            storage |-> s,
+            value |-> data[d][s]
+        ]
+    IN
+    /\ conf # nil
+    /\ data[d][s] # node_db[d][s]
+    /\ node_db' = [node_db EXCEPT ![d][s] = data[d][s]]
+
+    /\ IF global_conn[conn].closed
+        THEN UNCHANGED global_conn
+        ELSE global_conn' = [global_conn EXCEPT
+                ![conn].send = Append(@, req)]
+
+    /\ UNCHANGED <<node_config, node_conn, main_pc>>
     /\ UNCHANGED data
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
@@ -473,11 +519,15 @@ ConnectionClose ==
 
 -------------------------------------------------------------------------------
 
-UpdateDiskData(d) ==
+UpdateDiskData(d, s) ==
     /\ next_value < max_value
     /\ next_value' = next_value + 1
+    /\ data' = [data EXCEPT ![d][s] = next_value']
+    /\ UNCHANGED global_conn
+    /\ UNCHANGED num_close_conn
     /\ UNCHANGED dataset_sort_order
-    /\ UNCHANGED next_value
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED node_vars
 
 -------------------------------------------------------------------------------
 
@@ -496,10 +546,12 @@ stopCondNode(n) ==
 
 StopCond ==
     /\ \A n \in Node: stopCondNode(n)
+    /\ \A d \in Dataset: node_db[d] = data[d]
 
 TerminateCond ==
     /\ StopCond
     /\ num_close_conn = max_close_conn
+    /\ next_value = max_value
 
 Terminated ==
     /\ TerminateCond
@@ -521,6 +573,9 @@ Next ==
         \/ DeleteConfig(d)
     \/ \E d \in Dataset, s \in Storage:
         \/ AddReplicaConfig(d, s)
+        \/ UpdateDiskData(d, s)
+    \/ \E d \in Dataset, n \in Node:
+        \/ NodeUpdateLocalDB(d, n)
     \/ ConnectionClose
     \/ Terminated
 
@@ -557,7 +612,18 @@ NodeConfigMatchServerConfig ==
 
 
 DataMatchDB ==
-    \A d \in Dataset: data[d] = db[d]
+    LET
+        pre_cond(d) ==
+            LET
+                n == config[d].runner
+            IN
+            /\ config[d] # nil
+            /\ stopCondNode(n)
+            /\ node_config[n][d] # nil
+            /\ node_db[d] = data[d]
+    IN
+    \A d \in Dataset:
+        pre_cond(d) => data[d] = db[d]
 
 
 ChannelInv ==
