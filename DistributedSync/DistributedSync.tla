@@ -1,20 +1,23 @@
 ------ MODULE DistributedSync ----
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-CONSTANTS Dataset, Node, Storage, nil, max_close_conn
+CONSTANTS Dataset, Node, Storage, nil,
+    max_close_conn, max_value
 
 VARIABLES
     config, active_conns, server_node_info,
-    data, global_conn,
+    data, db, global_conn,
     node_conn, node_config, main_pc,
-    num_close_conn, dataset_sort_order
+    num_close_conn, dataset_sort_order,
+    next_value
 
 core_vars == <<
-    config, active_conns, server_node_info
+    config, active_conns, server_node_info,
+    db
 >>
 
 node_vars == <<node_conn, node_config, main_pc>>
-aux_vars == <<num_close_conn, dataset_sort_order>>
+aux_vars == <<num_close_conn, dataset_sort_order, next_value>>
 vars == <<core_vars, data, global_conn, node_vars, aux_vars>>
 
 -------------------------------------------------------------------------------
@@ -54,6 +57,7 @@ Response == [
     type: {"Config"},
     ds: Dataset,
     primary: Storage,
+    replicas: SUBSET Storage,
     deleted: BOOLEAN
 ]
 
@@ -125,7 +129,8 @@ TypeOK ==
     /\ config \in [Dataset -> NullConfig]
     /\ server_node_info \in [Node -> ServerNodeInfo]
     /\ active_conns \subseteq ConnAddr
-    /\ data \in [Storage -> [Dataset -> NullValue]]
+    /\ db \in [Dataset -> NullValue]
+    /\ data \in [Dataset -> NullValue]
     /\ global_conn \in Seq(Conn)
     /\ node_conn \in [Node -> NullConn]
     /\ node_config \in [Node -> [Dataset -> NullConfig]]
@@ -133,12 +138,14 @@ TypeOK ==
     /\ num_close_conn \in 0..max_close_conn
     /\ dataset_sort_order \in Seq(Dataset)
     /\ Range(dataset_sort_order) = Dataset
+    /\ next_value \in (Value \union {20})
 
 Init ==
     /\ config = [d \in Dataset |-> nil]
     /\ server_node_info = [n \in Node |-> init_server_node_info]
     /\ active_conns = {}
-    /\ data = [s \in Storage |-> [d \in Dataset |-> nil]]
+    /\ db = [d \in Dataset |-> nil]
+    /\ data = [d \in Dataset |-> nil]
     /\ global_conn = <<>>
     /\ node_conn = [n \in Node |-> nil]
     /\ node_config = [n \in Node |-> [d \in Dataset |-> nil]]
@@ -146,6 +153,7 @@ Init ==
     /\ num_close_conn = 0
     /\ dataset_sort_order \in [1..num_dataset -> Dataset]
     /\ Range(dataset_sort_order) = Dataset
+    /\ next_value = 20
 
 -------------------------------------------------------------------------------
 
@@ -153,6 +161,7 @@ new_config_resp(d) == [
     type |-> "Config",
     ds |-> d,
     primary |-> config'[d].primary,
+    replicas |-> config'[d].replicas,
     deleted |-> config'[d].deleted
 ]
 
@@ -204,6 +213,7 @@ SetupPrimaryConfig(d, n, s) ==
     /\ config[d] = nil
     /\ config' = [config EXCEPT ![d] = new_config]
     /\ updateConfigPushToChan(d, n)
+    /\ UNCHANGED db
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -221,6 +231,7 @@ AddReplicaConfig(d, s) ==
     /\ updateConfigPushToChan(d, config[d].runner)
 
     /\ UNCHANGED global_conn
+    /\ UNCHANGED db
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -240,6 +251,7 @@ DeleteConfig(d) ==
     /\ ~config[d].deleted
     /\ config' = [config EXCEPT ![d].deleted = TRUE]
     /\ updateConfigPushToChan(d, n)
+    /\ UNCHANGED db
     /\ UNCHANGED global_conn
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
@@ -258,6 +270,7 @@ AcceptConn ==
         /\ ~global_conn[conn].closed
         /\ active_conns' = active_conns \union {conn}
         /\ UNCHANGED global_conn
+        /\ UNCHANGED db
         /\ UNCHANGED server_node_info
         /\ UNCHANGED config
         /\ UNCHANGED data
@@ -307,6 +320,7 @@ doHandleConnect(conn) ==
         ELSE when_pending_non_empty
 
     /\ UNCHANGED active_conns
+    /\ UNCHANGED db
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
@@ -358,6 +372,7 @@ ConsumeChan(n) ==
 
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
+    /\ UNCHANGED db
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
 
@@ -406,7 +421,7 @@ RecvConfig(n) ==
         new_config == [
             primary |-> resp.primary,
             runner |-> n,
-            replicas |-> {},
+            replicas |-> resp.replicas,
             deleted |-> resp.deleted
         ]
     IN
@@ -454,6 +469,15 @@ ConnectionClose ==
         /\ UNCHANGED node_vars
         /\ UNCHANGED core_vars
         /\ UNCHANGED dataset_sort_order
+        /\ UNCHANGED next_value
+
+-------------------------------------------------------------------------------
+
+UpdateDiskData(d) ==
+    /\ next_value < max_value
+    /\ next_value' = next_value + 1
+    /\ UNCHANGED dataset_sort_order
+    /\ UNCHANGED next_value
 
 -------------------------------------------------------------------------------
 
@@ -495,8 +519,8 @@ Next ==
         \/ ConsumeChan(n)
     \/ \E d \in Dataset:
         \/ DeleteConfig(d)
-    \* \/ \E d \in Dataset, s \in Storage:
-    \*     \/ AddReplicaConfig(d, s)
+    \/ \E d \in Dataset, s \in Storage:
+        \/ AddReplicaConfig(d, s)
     \/ ConnectionClose
     \/ Terminated
 
@@ -530,6 +554,10 @@ NodeConfigMatchServerConfig ==
             \A d \in Dataset: cond_for_ds(d, n)
     IN
         \A n \in Node: pre_cond(n) => cond(n)
+
+
+DataMatchDB ==
+    \A d \in Dataset: data[d] = db[d]
 
 
 ChannelInv ==
