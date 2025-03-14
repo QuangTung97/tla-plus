@@ -2,19 +2,20 @@
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 CONSTANTS Dataset, Node, Storage, nil,
-    max_close_conn, max_value
+    max_close_conn, max_value, max_sync_failed
 
 VARIABLES
     config, active_conns, server_node_info,
-    data, db, last_seq, global_conn,
+    db, last_seq, failed_replicas,
+    data, global_conn,
     node_conn, node_config, node_db, node_last_seq,
     node_events, node_pending_jobs,
     num_close_conn, dataset_sort_order,
-    next_value, stop_delete
+    next_value, stop_delete, num_sync_failed
 
 core_vars == <<
     config, active_conns, server_node_info,
-    db, last_seq
+    db, last_seq, failed_replicas
 >>
 
 node_vars == <<
@@ -22,7 +23,10 @@ node_vars == <<
     node_events, node_pending_jobs
 >>
 
-aux_vars == <<num_close_conn, dataset_sort_order, next_value, stop_delete>>
+aux_vars == <<
+    num_close_conn, dataset_sort_order,
+    next_value, stop_delete, num_sync_failed
+>>
 vars == <<core_vars, data, global_conn, node_vars, aux_vars>>
 
 -------------------------------------------------------------------------------
@@ -65,8 +69,15 @@ Request ==
             storage: Storage,
             value: Value
         ]
+
+        new_entry_failed == [
+            type: {"NewEntryFailed"},
+            seq: EventSeq,
+            ds: Dataset,
+            storage: Storage
+        ]
     IN
-        UNION {connect, new_entry}
+        UNION {connect, new_entry, new_entry_failed}
 
 Response ==
     LET
@@ -155,6 +166,7 @@ TypeOK ==
     /\ active_conns \subseteq ConnAddr
     /\ db \in [Dataset -> [Storage -> NullValue]]
     /\ last_seq \in [Node -> EventSeq]
+    /\ failed_replicas \in [Dataset -> SUBSET Storage]
 
     /\ data \in [Dataset -> [Storage -> NullValue]]
     /\ global_conn \in Seq(Conn)
@@ -171,6 +183,7 @@ TypeOK ==
     /\ Range(dataset_sort_order) = Dataset
     /\ next_value \in 20..max_value
     /\ stop_delete \in BOOLEAN
+    /\ num_sync_failed \in 0..max_sync_failed
 
 Init ==
     /\ config = [d \in Dataset |-> nil]
@@ -178,6 +191,7 @@ Init ==
     /\ active_conns = {}
     /\ db = [d \in Dataset |-> [s \in Storage |-> nil]]
     /\ last_seq = [n \in Node |-> 30]
+    /\ failed_replicas = [d \in Dataset |-> {}]
 
     /\ data = [d \in Dataset |-> [s \in Storage |-> nil]]
     /\ global_conn = <<>>
@@ -194,6 +208,7 @@ Init ==
     /\ Range(dataset_sort_order) = Dataset
     /\ next_value = 20
     /\ stop_delete = FALSE
+    /\ num_sync_failed = 0
 
 -------------------------------------------------------------------------------
 
@@ -253,7 +268,7 @@ SetupPrimaryConfig(d, n, s) ==
     /\ config[d] = nil
     /\ config' = [config EXCEPT ![d] = new_config]
     /\ updateConfigPushToChan(d, n)
-    /\ UNCHANGED <<db, last_seq>>
+    /\ UNCHANGED <<db, last_seq, failed_replicas>>
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -271,7 +286,7 @@ AddReplicaConfig(d, s) ==
     /\ updateConfigPushToChan(d, config[d].runner)
 
     /\ UNCHANGED global_conn
-    /\ UNCHANGED <<db, last_seq>>
+    /\ UNCHANGED <<db, last_seq, failed_replicas>>
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
@@ -292,7 +307,8 @@ DeleteConfig(d) ==
     /\ ~config[d].deleted
     /\ config' = [config EXCEPT ![d].deleted = TRUE]
     /\ updateConfigPushToChan(d, n)
-    /\ UNCHANGED <<db, last_seq>>
+
+    /\ UNCHANGED <<db, last_seq, failed_replicas>>
     /\ UNCHANGED global_conn
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
@@ -311,7 +327,7 @@ AcceptConn ==
         /\ ~global_conn[conn].closed
         /\ active_conns' = active_conns \union {conn}
         /\ UNCHANGED global_conn
-        /\ UNCHANGED <<db, last_seq>>
+        /\ UNCHANGED <<db, last_seq, failed_replicas>>
         /\ UNCHANGED server_node_info
         /\ UNCHANGED config
         /\ UNCHANGED data
@@ -368,7 +384,7 @@ doHandleConnect(conn) ==
         ELSE when_pending_non_empty
 
     /\ UNCHANGED active_conns
-    /\ UNCHANGED <<db, last_seq>>
+    /\ UNCHANGED <<db, last_seq, failed_replicas>>
     /\ UNCHANGED data
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
@@ -392,6 +408,32 @@ HandleNewEntry(n) ==
 
     /\ db' = [db EXCEPT ![d][s] = req.value]
     /\ last_seq' = [last_seq EXCEPT ![n] = req.seq]
+
+    /\ UNCHANGED config
+    /\ UNCHANGED failed_replicas
+    /\ UNCHANGED server_node_info
+    /\ UNCHANGED active_conns
+    /\ UNCHANGED data
+    /\ UNCHANGED node_vars
+    /\ UNCHANGED aux_vars
+
+
+HandleNewEntryFailed(n) ==
+    LET
+        conn == server_node_info[n].conn
+        req == global_conn[conn].send[1]
+
+        d == req.ds
+        s == req.storage
+    IN
+    /\ conn # nil
+    /\ global_conn[conn].send # <<>>
+    /\ req.type = "NewEntryFailed"
+    /\ global_conn' = [global_conn EXCEPT ![conn].send = Tail(@)]
+
+    /\ failed_replicas' = [failed_replicas EXCEPT ![d] = @ \union {s}]
+    /\ last_seq' = [last_seq EXCEPT ![n] = req.seq]
+    /\ UNCHANGED db
 
     /\ UNCHANGED config
     /\ UNCHANGED server_node_info
@@ -444,7 +486,7 @@ ConsumeChan(n) ==
 
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
-    /\ UNCHANGED <<db, last_seq>>
+    /\ UNCHANGED <<db, last_seq, failed_replicas>>
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
 
@@ -578,6 +620,19 @@ insert_event_new_entry(d, n, s, new_val) ==
     /\ node_events' = [node_events EXCEPT ![n] = Append(@, new_entry)]
 
 
+insert_event_failed_new_entry(d, n, s) ==
+    LET
+        ev == [
+            type |-> "NewEntryFailed",
+            seq |-> 31 + Len(node_events[n]),
+            ds |-> d,
+            storage |-> s
+        ]
+    IN
+    /\ node_events' = [node_events EXCEPT ![n] = Append(@, ev)]
+    /\ UNCHANGED node_db
+
+
 NodeUpdateLocalDB(d, n) ==
     LET
         conf == node_config[n][d]
@@ -640,18 +695,28 @@ NodeHandlePendingJob(d, n, s) ==
     LET
         conf == node_config[n][d]
         primary == conf.primary
+
+        when_normal ==
+            /\ data' = [data EXCEPT ![d][s] = data[d][primary]]
+            /\ insert_event_new_entry(d, n, s, node_db[d][primary])
+            /\ UNCHANGED num_sync_failed
+
+        when_failed ==
+            /\ num_sync_failed < max_sync_failed
+            /\ num_sync_failed' = num_sync_failed + 1
+            /\ UNCHANGED data
+            /\ insert_event_failed_new_entry(d, n, s)
     IN
     /\ s \in node_pending_jobs[n][d]
 
-    /\ data' = [data EXCEPT ![d][s] = data[d][primary]]
-    /\ insert_event_new_entry(d, n, s, node_db[d][primary])
-    /\ node_pending_jobs' = [node_pending_jobs EXCEPT
-            ![n][d] = @ \ {s}]
+    /\ node_pending_jobs' = [node_pending_jobs EXCEPT ![n][d] = @ \ {s}]
+    /\ \/ when_normal
+       \/ when_failed
 
     /\ UNCHANGED <<node_conn, node_config, node_last_seq>>
     /\ UNCHANGED global_conn
     /\ UNCHANGED core_vars
-    /\ UNCHANGED aux_vars
+    /\ UNCHANGED <<dataset_sort_order, next_value, num_close_conn, stop_delete>>
 
 -------------------------------------------------------------------------------
 
@@ -669,6 +734,7 @@ ConnectionClose ==
         /\ UNCHANGED node_vars
         /\ UNCHANGED core_vars
         /\ UNCHANGED dataset_sort_order
+        /\ UNCHANGED num_sync_failed
         /\ UNCHANGED next_value
         /\ UNCHANGED stop_delete
 
@@ -679,6 +745,7 @@ EnableStopDelete ==
     /\ UNCHANGED global_conn
     /\ UNCHANGED num_close_conn
     /\ UNCHANGED dataset_sort_order
+    /\ UNCHANGED num_sync_failed
     /\ UNCHANGED data
     /\ UNCHANGED next_value
     /\ UNCHANGED node_vars
@@ -697,6 +764,7 @@ UpdateDiskData(d, s) ==
     /\ UNCHANGED global_conn
     /\ UNCHANGED num_close_conn
     /\ UNCHANGED dataset_sort_order
+    /\ UNCHANGED num_sync_failed
     /\ UNCHANGED core_vars
     /\ UNCHANGED node_vars
     /\ UNCHANGED stop_delete
@@ -716,7 +784,8 @@ stopCondNode(n) ==
         /\ global_conn[conn].send = <<>>
         /\ global_conn[conn].recv = <<>>
     /\ \A d \in Dataset:
-        node_pending_jobs[n][d] = {}
+        /\ node_pending_jobs[n][d] = {}
+        /\ failed_replicas[d] = {}
 
 StopCond ==
     LET
@@ -753,6 +822,7 @@ Next ==
     \/ \E n \in Node:
         \/ ConsumeChan(n)
         \/ HandleNewEntry(n)
+        \/ HandleNewEntryFailed(n)
     \/ \E d \in Dataset:
         \/ DeleteConfig(d)
     \/ \E d \in Dataset, s \in Storage:
@@ -854,6 +924,9 @@ NodeLastSeqInv ==
         node_last_seq[n] # nil => node_conn[n] # nil
 
 
+node_get_max_seq(n) ==
+    node_events[n][Len(node_events[n])].seq
+
 DiskReplicaMustExisted ==
     \A d \in Dataset:
         LET
@@ -867,6 +940,7 @@ DiskReplicaMustExisted ==
                 /\ node_conn[n] # nil
                 /\ node_db[d][primary] # nil
                 /\ data[d][primary] = node_db[d][primary]
+                /\ node_last_seq[n] = node_get_max_seq(n)
 
             cond ==
                 /\ \A s \in config[d].replicas:
