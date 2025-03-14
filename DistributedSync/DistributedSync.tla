@@ -93,8 +93,14 @@ Response ==
             type: {"ConnectReply"},
             seq: EventSeq
         ]
+
+        retry_resp == [
+            type: {"RetryReplica"},
+            ds: Dataset,
+            storage: Storage
+        ]
     IN
-        UNION {conf_resp, connect_resp}
+        UNION {conf_resp, connect_resp, retry_resp}
 
 Conn == [
     send: Seq(Request),
@@ -408,9 +414,9 @@ HandleNewEntry(n) ==
 
     /\ db' = [db EXCEPT ![d][s] = req.value]
     /\ last_seq' = [last_seq EXCEPT ![n] = req.seq]
+    /\ UNCHANGED failed_replicas
 
     /\ UNCHANGED config
-    /\ UNCHANGED failed_replicas
     /\ UNCHANGED server_node_info
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
@@ -439,6 +445,34 @@ HandleNewEntryFailed(n) ==
     /\ UNCHANGED server_node_info
     /\ UNCHANGED active_conns
     /\ UNCHANGED data
+    /\ UNCHANGED node_vars
+    /\ UNCHANGED aux_vars
+
+
+RetryFailedReplica(d, s) ==
+    LET
+        n == config[d].runner
+        conn == server_node_info[n].conn
+
+        retry_resp == [
+            type |-> "RetryReplica",
+            ds |-> d,
+            storage |-> s
+        ]
+    IN
+    /\ s \in failed_replicas[d]
+    /\ ~global_conn[conn].closed
+    /\ num_close_conn = max_close_conn
+
+    /\ failed_replicas' = [failed_replicas EXCEPT ![d] = @ \ {s}]
+    /\ global_conn' = [global_conn EXCEPT ![conn].recv = Append(@, retry_resp)]
+
+    /\ UNCHANGED config
+    /\ UNCHANGED data
+    /\ UNCHANGED db
+    /\ UNCHANGED last_seq
+    /\ UNCHANGED server_node_info
+    /\ UNCHANGED active_conns
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
 
@@ -584,6 +618,30 @@ NodeRecvConfig(n) ==
     /\ UNCHANGED node_events
     /\ UNCHANGED node_conn
     /\ UNCHANGED node_db
+    /\ UNCHANGED data
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED aux_vars
+
+
+NodeRecvRetryReplica(n) ==
+    LET
+        conn == node_conn[n]
+        resp == global_conn[conn].recv[1]
+        d == resp.ds
+        s == resp.storage
+    IN
+    /\ node_conn[n] # nil
+    /\ global_conn[conn].recv # <<>>
+    /\ resp.type = "RetryReplica"
+
+    /\ global_conn' = [global_conn EXCEPT ![conn].recv = Tail(@)]
+    /\ IF node_config[n][d] = nil
+        THEN UNCHANGED node_pending_jobs
+        ELSE node_pending_jobs' = [node_pending_jobs EXCEPT
+                ![n][d] = @ \union {s}]
+
+    /\ UNCHANGED node_events
+    /\ UNCHANGED <<node_conn, node_db, node_config, node_last_seq>>
     /\ UNCHANGED data
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
@@ -815,6 +873,7 @@ Next ==
         \/ NewConn(n)
         \/ NodeRecvConnectReply(n)
         \/ NodeRecvConfig(n)
+        \/ NodeRecvRetryReplica(n)
         \/ NodeClearClosedConn(n)
         \/ NodePushNewEntry(n)
     \/ AcceptConn
@@ -828,6 +887,7 @@ Next ==
     \/ \E d \in Dataset, s \in Storage:
         \/ AddReplicaConfig(d, s)
         \/ UpdateDiskData(d, s)
+        \/ RetryFailedReplica(d, s)
     \/ \E d \in Dataset, n \in Node:
         \/ NodeUpdateLocalDB(d, n)
     \/ ConnectionClose
@@ -956,9 +1016,8 @@ NodePendingJobInv ==
             n == config[d].runner
 
             first_cond ==
-                config[d] # nil =>
-                    /\ node_pending_jobs[n][d] \subseteq config[d].replicas
-                    /\ node_pending_jobs[n][d] # {} => node_db[d][primary] # nil
+                /\ node_pending_jobs[n][d] \subseteq config[d].replicas
+                /\ node_pending_jobs[n][d] # {} => node_db[d][primary] # nil
 
             second_cond ==
                 node_config[n][d] = nil =>
