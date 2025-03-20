@@ -1,7 +1,7 @@
 ------ MODULE RateLimit ----
 EXTENDS TLC, Naturals, FiniteSets, Sequences
 
-CONSTANTS Node, nil, max_running
+CONSTANTS Node, nil, max_running, max_wait_list
 
 VARIABLES pc, state, global_chan, local_chan
 
@@ -72,11 +72,24 @@ NodeWait(n) ==
             /\ global_chan' = Append(global_chan, new_chan)
             /\ local_chan' = [local_chan EXCEPT ![n] = new_chan_addr]
             /\ state' = [state EXCEPT !.wait_list = Append(@, new_chan_addr)]
+
+        chan_with_data == [
+            data |-> <<"Error">>
+        ]
+
+        when_reach_wait_list_limit ==
+            /\ goto(n, "WaitOnChan")
+            /\ global_chan' = Append(global_chan, chan_with_data)
+            /\ local_chan' = [local_chan EXCEPT ![n] = new_chan_addr]
+            /\ UNCHANGED state
     IN
     /\ pc[n] = "Init"
-    /\ IF old_state.running < max_running
-        THEN when_normal
-        ELSE when_limit_running
+    /\ IF old_state.running < max_running THEN
+            when_normal
+        ELSE IF Len(old_state.wait_list) < max_wait_list THEN
+            when_limit_running
+        ELSE
+            when_reach_wait_list_limit
 
 
 WaitOnChan(n) ==
@@ -85,9 +98,20 @@ WaitOnChan(n) ==
 
         st == global_chan[ch].data[1]
 
+        when_status_ok ==
+            /\ goto(n, "Init")
+
+        when_status_error ==
+            /\ goto(n, "Terminated")
+
         when_chan_non_empty ==
             /\ global_chan[ch].data # <<>>
             /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
+            /\ IF st = "OK"
+                THEN when_status_ok
+                ELSE when_status_error
+            /\ local_chan' = [local_chan EXCEPT ![n] = nil]
+            /\ UNCHANGED state
     IN
     /\ pc[n] = "WaitOnChan"
     /\ when_chan_non_empty
@@ -141,5 +165,9 @@ MaxNumRunningInv ==
         running_set == {n \in Node: pc[n] = "HandleRequest"}
     IN
         Cardinality(running_set) <= max_running
+
+
+MaxWaitListInv ==
+    state # nil => Len(state.wait_list) <= max_wait_list
 
 ====
