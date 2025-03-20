@@ -112,9 +112,16 @@ WaitOnChan(n) ==
                 ELSE when_status_error
             /\ local_chan' = [local_chan EXCEPT ![n] = nil]
             /\ UNCHANGED state
+
+        when_context_cancelled ==
+            /\ goto(n, "Terminated")
+            /\ UNCHANGED global_chan
+            /\ UNCHANGED state
+            /\ UNCHANGED local_chan
     IN
     /\ pc[n] = "WaitOnChan"
-    /\ when_chan_non_empty
+    /\ \/ when_chan_non_empty
+       \/ when_context_cancelled
 
 
 HandleRequest(n) ==
@@ -158,7 +165,11 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ---------------------------------------------------------------------------------
+
+AlwaysTerminate == []<>TerminateCond
 
 MaxNumRunningInv ==
     LET
@@ -169,5 +180,10 @@ MaxNumRunningInv ==
 
 MaxWaitListInv ==
     state # nil => Len(state.wait_list) <= max_wait_list
+
+
+ChannelInv ==
+    \A ch \in Channel:
+        Len(global_chan[ch].data) <= 1
 
 ====
