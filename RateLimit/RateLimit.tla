@@ -184,8 +184,6 @@ RemoveFromWaitList(n) ==
 
         ch == state.wait_list[1]
 
-        new_state == [state EXCEPT !.wait_list = Tail(@)]
-
         allow_notify_other ==
             /\ state.running < max_running
             /\ state.wait_list # <<>>
