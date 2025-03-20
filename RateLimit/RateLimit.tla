@@ -186,6 +186,10 @@ RemoveFromWaitList(n) ==
 
         new_state == [state EXCEPT !.wait_list = Tail(@)]
 
+        allow_notify_other ==
+            /\ state.running < max_running
+            /\ state.wait_list # <<>>
+
         when_not_limit_running ==
             /\ set_state([state EXCEPT !.wait_list = Tail(@)])
             /\ global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
@@ -197,7 +201,7 @@ RemoveFromWaitList(n) ==
             when_state_nil
         ELSE IF changed_after_remove THEN
             when_remove_ok
-        ELSE IF state.running < max_running THEN
+        ELSE IF allow_notify_other THEN
             when_not_limit_running
         ELSE
             when_state_nil
@@ -266,5 +270,8 @@ WhenTerminateInv ==
     TerminateCond =>
         /\ \A n \in Node: local_chan[n] = nil
         /\ state = nil
+
+
+Sym == Permutations(Node)
 
 ====
