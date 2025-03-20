@@ -26,7 +26,10 @@ State == [
 
 NullState == State \union {nil}
 
-PC == {"Init", "HandleRequest", "WaitOnChan", "Terminated"}
+PC == {
+    "Init", "HandleRequest", "WaitOnChan",
+    "RemoveFromWaitList", "Terminated"
+}
 
 ---------------------------------------------------------------------------------
 
@@ -48,6 +51,12 @@ Init ==
 
 goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
+
+
+set_state(new) ==
+    IF new.running = 0 /\ new.wait_list = <<>>
+        THEN state' = nil
+        ELSE state' = new
 
 
 NodeWait(n) ==
@@ -118,8 +127,8 @@ WaitOnChan(n) ==
 
         when_context_cancelled ==
             /\ ~stop_cancel
-            /\ goto(n, "Terminated")
-            /\ local_chan' = [local_chan EXCEPT ![n] = nil]
+            /\ goto(n, "RemoveFromWaitList")
+            /\ UNCHANGED local_chan
             /\ UNCHANGED global_chan
             /\ UNCHANGED state
     IN
@@ -134,23 +143,15 @@ HandleRequest(n) ==
         state_dec == [state EXCEPT !.running = @ - 1]
 
         when_no_wait ==
-            /\ IF state_dec.running = 0
-                THEN state' = nil
-                ELSE state' = state_dec
+            /\ set_state(state_dec)
             /\ UNCHANGED global_chan
 
         ch == state.wait_list[1]
 
         state_removed == [state_dec EXCEPT !.wait_list = Tail(@)]
 
-        can_set_nil ==
-            /\ state_removed.running = 0
-            /\ state_removed.wait_list = <<>>
-
         when_waiting ==
-            /\ IF can_set_nil
-                THEN state' = nil
-                ELSE state' = state_removed
+            /\ set_state(state_removed)
             /\ global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
     IN
     /\ pc[n] = "HandleRequest"
@@ -159,6 +160,47 @@ HandleRequest(n) ==
         THEN when_no_wait
         ELSE when_waiting
     /\ UNCHANGED local_chan
+    /\ UNCHANGED stop_cancel
+
+
+RemoveFromWaitList(n) ==
+    LET
+        filter_fn(ch) == ch # local_chan[n]
+
+        old_list == state.wait_list
+
+        removed_wait_list == SelectSeq(old_list, filter_fn)
+
+        changed_after_remove ==
+            removed_wait_list # old_list
+
+        when_state_nil ==
+            /\ UNCHANGED state
+            /\ UNCHANGED global_chan
+
+        when_remove_ok ==
+            /\ set_state([state EXCEPT !.wait_list = removed_wait_list])
+            /\ UNCHANGED global_chan
+
+        ch == state.wait_list[1]
+
+        new_state == [state EXCEPT !.wait_list = Tail(@)]
+
+        when_not_limit_running ==
+            /\ set_state([state EXCEPT !.wait_list = Tail(@)])
+            /\ global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
+    IN
+    /\ pc[n] = "RemoveFromWaitList"
+    /\ goto(n, "Terminated")
+    /\ local_chan' = [local_chan EXCEPT ![n] = nil]
+    /\ IF state = nil THEN
+            when_state_nil
+        ELSE IF changed_after_remove THEN
+            when_remove_ok
+        ELSE IF state.running < max_running THEN
+            when_not_limit_running
+        ELSE
+            when_state_nil
     /\ UNCHANGED stop_cancel
 
 
@@ -185,6 +227,7 @@ Next ==
         \/ NodeWait(n)
         \/ WaitOnChan(n)
         \/ HandleRequest(n)
+        \/ RemoveFromWaitList(n)
     \/ StopContextCancel
     \/ Terminated
 
@@ -211,6 +254,12 @@ MaxWaitListInv ==
 ChannelInv ==
     \A ch \in Channel:
         Len(global_chan[ch].data) <= 1
+
+
+StateInv ==
+    state # nil =>
+        \/ state.running > 0
+        \/ state.wait_list # <<>>
 
 
 WhenTerminateInv ==
