@@ -199,4 +199,12 @@ WhenTerminatedInv ==
         /\ \A n \in Node: local_conn[n] = nil
         /\ Range(conn_pool) = cmp_set
 
+
+EachConnAtMostOneUser ==
+    \A c \in 21..next_conn:
+        LET
+            using_node == {n \in Node: pc[n] = "UseConn" /\ local_conn[n] = c}
+        IN
+            Cardinality(using_node) <= 1
+
 ====
