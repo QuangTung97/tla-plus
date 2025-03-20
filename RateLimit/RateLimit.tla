@@ -3,9 +3,9 @@ EXTENDS TLC, Naturals, FiniteSets, Sequences
 
 CONSTANTS Node, nil, max_running, max_wait_list
 
-VARIABLES pc, state, global_chan, local_chan
+VARIABLES pc, state, global_chan, local_chan, stop_cancel
 
-vars == <<pc, state, global_chan, local_chan>>
+vars == <<pc, state, global_chan, local_chan, stop_cancel>>
 
 ---------------------------------------------------------------------------------
 
@@ -35,12 +35,14 @@ TypeOK ==
     /\ state \in NullState
     /\ global_chan \in Seq(ChannelData)
     /\ local_chan \in [Node -> NullChannel]
+    /\ stop_cancel \in BOOLEAN
 
 Init ==
     /\ pc = [n \in Node |-> "Init"]
     /\ state = nil
     /\ global_chan = <<>>
     /\ local_chan = [n \in Node |-> nil]
+    /\ stop_cancel = FALSE
 
 ---------------------------------------------------------------------------------
 
@@ -90,6 +92,7 @@ NodeWait(n) ==
             when_limit_running
         ELSE
             when_reach_wait_list_limit
+    /\ UNCHANGED stop_cancel
 
 
 WaitOnChan(n) ==
@@ -114,6 +117,7 @@ WaitOnChan(n) ==
             /\ UNCHANGED state
 
         when_context_cancelled ==
+            /\ ~stop_cancel
             /\ goto(n, "Terminated")
             /\ local_chan' = [local_chan EXCEPT ![n] = nil]
             /\ UNCHANGED global_chan
@@ -122,6 +126,7 @@ WaitOnChan(n) ==
     /\ pc[n] = "WaitOnChan"
     /\ \/ when_chan_non_empty
        \/ when_context_cancelled
+    /\ UNCHANGED stop_cancel
 
 
 HandleRequest(n) ==
@@ -154,6 +159,16 @@ HandleRequest(n) ==
         THEN when_no_wait
         ELSE when_waiting
     /\ UNCHANGED local_chan
+    /\ UNCHANGED stop_cancel
+
+
+StopContextCancel ==
+    /\ ~stop_cancel
+    /\ stop_cancel' = TRUE
+    /\ UNCHANGED global_chan
+    /\ UNCHANGED pc
+    /\ UNCHANGED local_chan
+    /\ UNCHANGED state
 
 ---------------------------------------------------------------------------------
 
@@ -170,6 +185,7 @@ Next ==
         \/ NodeWait(n)
         \/ WaitOnChan(n)
         \/ HandleRequest(n)
+    \/ StopContextCancel
     \/ Terminated
 
 
