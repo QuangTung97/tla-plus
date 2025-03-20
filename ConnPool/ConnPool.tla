@@ -5,12 +5,25 @@ CONSTANTS Node, nil, limit_num_conn
 
 VARIABLES
     pc, next_conn, in_used, wait_list,
-    conn_pool, local_conn
+    conn_pool, local_conn, drop_conn
 
 vars == <<
     pc, next_conn, in_used, wait_list,
-    conn_pool, local_conn
+    conn_pool, local_conn, drop_conn
 >>
+
+---------------------------------------------------------------------------------
+
+DeleteSeq(s, index) ==
+    LET
+        n == Len(s) - 1
+    IN
+    [i \in 1..n |-> IF i < index THEN s[i] ELSE s[i + 1]]
+
+ASSUME DeleteSeq(<<4, 5, 6>>, 1) = <<5, 6>>
+ASSUME DeleteSeq(<<4, 5, 6>>, 2) = <<4, 6>>
+
+Range(f) == {f[x]: x \in DOMAIN f}
 
 ---------------------------------------------------------------------------------
 
@@ -32,6 +45,7 @@ TypeOK ==
     /\ wait_list \in Seq(Node)
     /\ conn_pool \in Seq(Conn)
     /\ local_conn \in [Node -> NullConn]
+    /\ drop_conn \subseteq Conn
 
 Init ==
     /\ pc = [n \in Node |-> "Init"]
@@ -40,6 +54,7 @@ Init ==
     /\ wait_list = <<>>
     /\ conn_pool = <<>>
     /\ local_conn = [n \in Node |-> nil]
+    /\ drop_conn = {}
 
 ---------------------------------------------------------------------------------
 
@@ -80,6 +95,7 @@ GetConn(n) ==
         ELSE
             when_reach_limit
     /\ UNCHANGED next_conn
+    /\ UNCHANGED drop_conn
 
 
 NewConn(n) ==
@@ -90,6 +106,7 @@ NewConn(n) ==
     /\ UNCHANGED in_used
     /\ UNCHANGED wait_list
     /\ UNCHANGED conn_pool
+    /\ UNCHANGED drop_conn
 
 
 notifyWaitList(new_pc) ==
@@ -113,11 +130,13 @@ UseConn(n) ==
             /\ in_used' = in_used - 1
             /\ local_conn' = [local_conn EXCEPT ![n] = nil]
             /\ notifyWaitList(new_pc)
+            /\ UNCHANGED drop_conn
 
         when_not_release ==
             /\ in_used' = in_used - 1
             /\ local_conn' = [local_conn EXCEPT ![n] = nil]
             /\ notifyWaitList(new_pc)
+            /\ drop_conn' = drop_conn \union {local_conn[n]}
             /\ UNCHANGED conn_pool
     IN
     /\ pc[n] = "UseConn"
@@ -125,6 +144,16 @@ UseConn(n) ==
        \/ when_not_release
     /\ UNCHANGED next_conn
 
+
+RemoveFromPool ==
+    \E i \in DOMAIN conn_pool:
+        /\ conn_pool' = DeleteSeq(conn_pool, i)
+        /\ drop_conn' = drop_conn \union {conn_pool[i]}
+        /\ UNCHANGED in_used
+        /\ UNCHANGED local_conn
+        /\ UNCHANGED next_conn
+        /\ UNCHANGED pc
+        /\ UNCHANGED wait_list
 
 ---------------------------------------------------------------------------------
 
@@ -141,6 +170,7 @@ Next ==
         \/ GetConn(n)
         \/ NewConn(n)
         \/ UseConn(n)
+    \/ RemoveFromPool
     \/ Terminated
 
 
@@ -160,9 +190,13 @@ LimitConnInUse ==
 
 
 WhenTerminatedInv ==
+    LET
+        cmp_set == 21..next_conn \ drop_conn
+    IN
     TerminateCond =>
         /\ in_used = 0
         /\ wait_list = <<>>
         /\ \A n \in Node: local_conn[n] = nil
+        /\ Range(conn_pool) = cmp_set
 
 ====
