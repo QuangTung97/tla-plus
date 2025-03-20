@@ -115,9 +115,9 @@ WaitOnChan(n) ==
 
         when_context_cancelled ==
             /\ goto(n, "Terminated")
+            /\ local_chan' = [local_chan EXCEPT ![n] = nil]
             /\ UNCHANGED global_chan
             /\ UNCHANGED state
-            /\ UNCHANGED local_chan
     IN
     /\ pc[n] = "WaitOnChan"
     /\ \/ when_chan_non_empty
@@ -129,13 +129,23 @@ HandleRequest(n) ==
         state_dec == [state EXCEPT !.running = @ - 1]
 
         when_no_wait ==
-            /\ state' = state_dec
+            /\ IF state_dec.running = 0
+                THEN state' = nil
+                ELSE state' = state_dec
             /\ UNCHANGED global_chan
 
         ch == state.wait_list[1]
 
+        state_removed == [state_dec EXCEPT !.wait_list = Tail(@)]
+
+        can_set_nil ==
+            /\ state_removed.running = 0
+            /\ state_removed.wait_list = <<>>
+
         when_waiting ==
-            /\ state' = [state_dec EXCEPT !.wait_list = Tail(@)]
+            /\ IF can_set_nil
+                THEN state' = nil
+                ELSE state' = state_removed
             /\ global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
     IN
     /\ pc[n] = "HandleRequest"
@@ -185,5 +195,11 @@ MaxWaitListInv ==
 ChannelInv ==
     \A ch \in Channel:
         Len(global_chan[ch].data) <= 1
+
+
+WhenTerminateInv ==
+    TerminateCond =>
+        /\ \A n \in Node: local_chan[n] = nil
+        /\ state = nil
 
 ====
