@@ -127,6 +127,22 @@ GetConn(n) ==
     /\ UNCHANGED stop_cancel
 
 
+notify_wait_chan(ch) ==
+    global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
+
+notifyWaitList ==
+    LET
+        ch == wait_list[1]
+    IN
+    IF Len(wait_list) = 0
+        THEN
+            /\ UNCHANGED wait_list
+            /\ UNCHANGED global_chan
+        ELSE
+            /\ wait_list' = Tail(wait_list)
+            /\ notify_wait_chan(ch)
+
+
 WaitOnChan(n) ==
     LET
         ch == local_chan[n]
@@ -136,17 +152,28 @@ WaitOnChan(n) ==
             /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
             /\ goto(n, "Init")
             /\ local_chan' = [local_chan EXCEPT ![n] = nil]
+            /\ UNCHANGED wait_list
+
+        filter_fn(x) == x # ch
+
+        removed_ok == ch \in Range(wait_list)
+
+        update_wait_list ==
+            IF removed_ok THEN
+                /\ wait_list' = SelectSeq(wait_list, filter_fn)
+                /\ UNCHANGED global_chan
+            ELSE
+                /\ notifyWaitList
 
         when_ctx_cancel ==
             /\ ~stop_cancel
             /\ goto(n, "Terminated")
             /\ local_chan' = [local_chan EXCEPT ![n] = nil]
-            /\ UNCHANGED global_chan
+            /\ update_wait_list
     IN
     /\ pc[n] = "WaitOnChan"
     /\ \/ when_non_empty
        \/ when_ctx_cancel
-    /\ UNCHANGED wait_list
     /\ UNCHANGED conn_pool
     /\ UNCHANGED next_conn
     /\ UNCHANGED drop_conn
@@ -169,17 +196,6 @@ NewConn(n) ==
     /\ UNCHANGED stop_cancel
 
 
-notifyWaitList ==
-    LET
-        ch == wait_list[1]
-    IN
-    IF Len(wait_list) = 0
-        THEN
-            /\ UNCHANGED wait_list
-            /\ UNCHANGED global_chan
-        ELSE
-            /\ wait_list' = Tail(wait_list)
-            /\ global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
 
 UseConn(n) ==
     LET
