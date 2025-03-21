@@ -4,11 +4,11 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 CONSTANTS Node, nil, limit_num_conn
 
 VARIABLES
-    pc, next_conn, in_used, wait_list,
+    pc, next_conn, in_used, global_chan, wait_list,
     conn_pool, local_conn, drop_conn
 
 vars == <<
-    pc, next_conn, in_used, wait_list,
+    pc, next_conn, in_used, global_chan, wait_list,
     conn_pool, local_conn, drop_conn
 >>
 
@@ -31,9 +31,19 @@ Conn == 20..29
 
 NullConn == Conn \union {nil}
 
+Status == {"OK"}
+
+ChannelData == [
+    data: Seq(Status)
+]
+
+Channel == DOMAIN global_chan
+
+NullChannel == Channel \union {nil}
+
 PC == {
     "Init", "NewConn", "UseConn",
-    "WaitSignal", "Terminated"
+    "WaitOnChan", "Terminated"
 }
 
 ---------------------------------------------------------------------------------
@@ -42,7 +52,8 @@ TypeOK ==
     /\ pc \in [Node -> PC]
     /\ next_conn \in Conn
     /\ in_used \in Nat
-    /\ wait_list \in Seq(Node)
+    /\ global_chan \in Seq(ChannelData)
+    /\ wait_list \in Seq(Channel)
     /\ conn_pool \in Seq(Conn)
     /\ local_conn \in [Node -> NullConn]
     /\ drop_conn \subseteq Conn
@@ -51,6 +62,7 @@ Init ==
     /\ pc = [n \in Node |-> "Init"]
     /\ next_conn = 20
     /\ in_used = 0
+    /\ global_chan = <<>>
     /\ wait_list = <<>>
     /\ conn_pool = <<>>
     /\ local_conn = [n \in Node |-> nil]
@@ -79,10 +91,18 @@ GetConn(n) ==
             /\ UNCHANGED wait_list
             /\ UNCHANGED conn_pool
             /\ UNCHANGED local_conn
+            /\ UNCHANGED global_chan
+
+        new_chan == [
+            data |-> <<>>
+        ]
+
+        ch == Len(global_chan')
 
         when_reach_limit ==
-            /\ goto(n, "WaitSignal")
-            /\ wait_list' = Append(wait_list, n)
+            /\ goto(n, "WaitOnChan")
+            /\ global_chan' = Append(global_chan, new_chan)
+            /\ wait_list' = Append(wait_list, ch)
             /\ UNCHANGED in_used
             /\ UNCHANGED conn_pool
             /\ UNCHANGED local_conn
@@ -107,35 +127,36 @@ NewConn(n) ==
     /\ UNCHANGED wait_list
     /\ UNCHANGED conn_pool
     /\ UNCHANGED drop_conn
+    /\ UNCHANGED global_chan
 
 
-notifyWaitList(new_pc) ==
+notifyWaitList ==
     LET
-        n == wait_list[1]
+        ch == wait_list[1]
     IN
     IF Len(wait_list) = 0
         THEN
-            /\ pc' = new_pc
             /\ UNCHANGED wait_list
+            /\ UNCHANGED global_chan
         ELSE
             /\ wait_list' = Tail(wait_list)
-            /\ pc' = [new_pc EXCEPT ![n] = "Init"]
+            /\ global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
 
 UseConn(n) ==
     LET
-        new_pc == [pc EXCEPT ![n] = "Terminated"]
-
         when_normal ==
+            /\ goto(n, "Terminated")
             /\ conn_pool' = Append(conn_pool, local_conn[n])
             /\ in_used' = in_used - 1
             /\ local_conn' = [local_conn EXCEPT ![n] = nil]
-            /\ notifyWaitList(new_pc)
+            /\ notifyWaitList
             /\ UNCHANGED drop_conn
 
         when_not_release ==
+            /\ goto(n, "Terminated")
             /\ in_used' = in_used - 1
             /\ local_conn' = [local_conn EXCEPT ![n] = nil]
-            /\ notifyWaitList(new_pc)
+            /\ notifyWaitList
             /\ drop_conn' = drop_conn \union {local_conn[n]}
             /\ UNCHANGED conn_pool
     IN
