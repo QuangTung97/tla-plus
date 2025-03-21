@@ -306,4 +306,8 @@ EachConnAtMostOneUser ==
         IN
             Cardinality(using_node) <= 1
 
+
+ConnPoolExistWhenNotLimit ==
+    Len(conn_pool) > 0 => in_used < limit_num_conn
+
 ====
