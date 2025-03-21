@@ -5,11 +5,11 @@ CONSTANTS Node, nil, limit_num_conn
 
 VARIABLES
     pc, next_conn, in_used, global_chan, wait_list,
-    conn_pool, local_conn, local_chan, drop_conn
+    conn_pool, local_conn, local_chan, drop_conn, stop_cancel
 
 vars == <<
     pc, next_conn, in_used, global_chan, wait_list,
-    conn_pool, local_conn, local_chan, drop_conn
+    conn_pool, local_conn, local_chan, drop_conn, stop_cancel
 >>
 
 ---------------------------------------------------------------------------------
@@ -58,6 +58,7 @@ TypeOK ==
     /\ local_conn \in [Node -> NullConn]
     /\ local_chan \in [Node -> NullChannel]
     /\ drop_conn \subseteq Conn
+    /\ stop_cancel \in BOOLEAN
 
 Init ==
     /\ pc = [n \in Node |-> "Init"]
@@ -69,6 +70,7 @@ Init ==
     /\ local_conn = [n \in Node |-> nil]
     /\ local_chan = [n \in Node |-> nil]
     /\ drop_conn = {}
+    /\ stop_cancel = FALSE
 
 ---------------------------------------------------------------------------------
 
@@ -122,6 +124,7 @@ GetConn(n) ==
             when_reach_limit
     /\ UNCHANGED next_conn
     /\ UNCHANGED drop_conn
+    /\ UNCHANGED stop_cancel
 
 
 WaitOnChan(n) ==
@@ -133,15 +136,23 @@ WaitOnChan(n) ==
             /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
             /\ goto(n, "Init")
             /\ local_chan' = [local_chan EXCEPT ![n] = nil]
+
+        when_ctx_cancel ==
+            /\ ~stop_cancel
+            /\ goto(n, "Terminated")
+            /\ local_chan' = [local_chan EXCEPT ![n] = nil]
+            /\ UNCHANGED global_chan
     IN
     /\ pc[n] = "WaitOnChan"
-    /\ when_non_empty
+    /\ \/ when_non_empty
+       \/ when_ctx_cancel
     /\ UNCHANGED wait_list
     /\ UNCHANGED conn_pool
     /\ UNCHANGED next_conn
     /\ UNCHANGED drop_conn
     /\ UNCHANGED in_used
     /\ UNCHANGED local_conn
+    /\ UNCHANGED stop_cancel
 
 
 NewConn(n) ==
@@ -155,6 +166,7 @@ NewConn(n) ==
     /\ UNCHANGED drop_conn
     /\ UNCHANGED global_chan
     /\ UNCHANGED local_chan
+    /\ UNCHANGED stop_cancel
 
 
 notifyWaitList ==
@@ -192,6 +204,7 @@ UseConn(n) ==
        \/ when_not_release
     /\ UNCHANGED next_conn
     /\ UNCHANGED local_chan
+    /\ UNCHANGED stop_cancel
 
 
 RemoveFromPool ==
@@ -205,6 +218,21 @@ RemoveFromPool ==
         /\ UNCHANGED wait_list
         /\ UNCHANGED global_chan
         /\ UNCHANGED local_chan
+        /\ UNCHANGED stop_cancel
+
+
+StopCancel ==
+    /\ ~stop_cancel
+    /\ stop_cancel' = TRUE
+    /\ UNCHANGED conn_pool
+    /\ UNCHANGED drop_conn
+    /\ UNCHANGED in_used
+    /\ UNCHANGED local_conn
+    /\ UNCHANGED next_conn
+    /\ UNCHANGED pc
+    /\ UNCHANGED wait_list
+    /\ UNCHANGED global_chan
+    /\ UNCHANGED local_chan
 
 ---------------------------------------------------------------------------------
 
@@ -223,6 +251,7 @@ Next ==
         \/ WaitOnChan(n)
         \/ UseConn(n)
     \/ RemoveFromPool
+    \/ StopCancel
     \/ Terminated
 
 
