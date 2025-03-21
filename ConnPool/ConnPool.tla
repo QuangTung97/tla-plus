@@ -5,11 +5,11 @@ CONSTANTS Node, nil, limit_num_conn
 
 VARIABLES
     pc, next_conn, in_used, global_chan, wait_list,
-    conn_pool, local_conn, drop_conn
+    conn_pool, local_conn, local_chan, drop_conn
 
 vars == <<
     pc, next_conn, in_used, global_chan, wait_list,
-    conn_pool, local_conn, drop_conn
+    conn_pool, local_conn, local_chan, drop_conn
 >>
 
 ---------------------------------------------------------------------------------
@@ -56,6 +56,7 @@ TypeOK ==
     /\ wait_list \in Seq(Channel)
     /\ conn_pool \in Seq(Conn)
     /\ local_conn \in [Node -> NullConn]
+    /\ local_chan \in [Node -> NullChannel]
     /\ drop_conn \subseteq Conn
 
 Init ==
@@ -66,6 +67,7 @@ Init ==
     /\ wait_list = <<>>
     /\ conn_pool = <<>>
     /\ local_conn = [n \in Node |-> nil]
+    /\ local_chan = [n \in Node |-> nil]
     /\ drop_conn = {}
 
 ---------------------------------------------------------------------------------
@@ -84,6 +86,8 @@ GetConn(n) ==
             /\ conn_pool' = Tail(conn_pool)
             /\ local_conn' = [local_conn EXCEPT ![n] = c]
             /\ UNCHANGED wait_list
+            /\ UNCHANGED global_chan
+            /\ UNCHANGED local_chan
 
         when_need_create ==
             /\ goto(n, "NewConn")
@@ -92,6 +96,7 @@ GetConn(n) ==
             /\ UNCHANGED conn_pool
             /\ UNCHANGED local_conn
             /\ UNCHANGED global_chan
+            /\ UNCHANGED local_chan
 
         new_chan == [
             data |-> <<>>
@@ -103,6 +108,7 @@ GetConn(n) ==
             /\ goto(n, "WaitOnChan")
             /\ global_chan' = Append(global_chan, new_chan)
             /\ wait_list' = Append(wait_list, ch)
+            /\ local_chan' = [local_chan EXCEPT ![n] = ch]
             /\ UNCHANGED in_used
             /\ UNCHANGED conn_pool
             /\ UNCHANGED local_conn
@@ -118,6 +124,26 @@ GetConn(n) ==
     /\ UNCHANGED drop_conn
 
 
+WaitOnChan(n) ==
+    LET
+        ch == local_chan[n]
+
+        when_non_empty ==
+            /\ global_chan[ch].data # <<>>
+            /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
+            /\ goto(n, "Init")
+            /\ local_chan' = [local_chan EXCEPT ![n] = nil]
+    IN
+    /\ pc[n] = "WaitOnChan"
+    /\ when_non_empty
+    /\ UNCHANGED wait_list
+    /\ UNCHANGED conn_pool
+    /\ UNCHANGED next_conn
+    /\ UNCHANGED drop_conn
+    /\ UNCHANGED in_used
+    /\ UNCHANGED local_conn
+
+
 NewConn(n) ==
     /\ pc[n] = "NewConn"
     /\ goto(n, "UseConn")
@@ -128,6 +154,7 @@ NewConn(n) ==
     /\ UNCHANGED conn_pool
     /\ UNCHANGED drop_conn
     /\ UNCHANGED global_chan
+    /\ UNCHANGED local_chan
 
 
 notifyWaitList ==
@@ -164,6 +191,7 @@ UseConn(n) ==
     /\ \/ when_normal
        \/ when_not_release
     /\ UNCHANGED next_conn
+    /\ UNCHANGED local_chan
 
 
 RemoveFromPool ==
@@ -175,6 +203,8 @@ RemoveFromPool ==
         /\ UNCHANGED next_conn
         /\ UNCHANGED pc
         /\ UNCHANGED wait_list
+        /\ UNCHANGED global_chan
+        /\ UNCHANGED local_chan
 
 ---------------------------------------------------------------------------------
 
@@ -190,6 +220,7 @@ Next ==
     \/ \E n \in Node:
         \/ GetConn(n)
         \/ NewConn(n)
+        \/ WaitOnChan(n)
         \/ UseConn(n)
     \/ RemoveFromPool
     \/ Terminated
@@ -217,7 +248,9 @@ WhenTerminatedInv ==
     TerminateCond =>
         /\ in_used = 0
         /\ wait_list = <<>>
-        /\ \A n \in Node: local_conn[n] = nil
+        /\ \A n \in Node:
+            /\ local_conn[n] = nil
+            /\ local_chan[n] = nil
         /\ Range(conn_pool) = cmp_set
 
 
