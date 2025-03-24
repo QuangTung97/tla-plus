@@ -310,4 +310,8 @@ EachConnAtMostOneUser ==
 ConnPoolExistWhenNotLimit ==
     Len(conn_pool) > 0 => in_used < limit_num_conn
 
+
+ConnPoolSizeLimit ==
+    Len(conn_pool) <= limit_num_conn
+
 ====
