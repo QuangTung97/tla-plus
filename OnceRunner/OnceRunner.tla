@@ -146,8 +146,7 @@ RunJob(n) ==
 
         when_cancelling ==
             /\ status' = "NoJob"
-            /\ wait_list' = Tail(wait_list)
-            /\ global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
+            /\ notify_wait_list
             /\ UNCHANGED ctx_cancelled
             /\ UNCHANGED running
             /\ UNCHANGED local_chan
@@ -172,7 +171,7 @@ WaitOnChan(n) ==
             /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
             /\ UNCHANGED wait_list
 
-        filter_fn(e) == e = ch
+        filter_fn(e) == e # ch
 
         remove_from_wait_list_or_notify ==
             IF ch \in Range(wait_list) THEN
