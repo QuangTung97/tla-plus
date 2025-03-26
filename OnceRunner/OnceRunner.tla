@@ -264,4 +264,9 @@ WhenTerminatedInv ==
         pc[n] = "Terminated" =>
             /\ local_chan[n] = nil
 
+
+ChannelInv ==
+    \A ch \in Channel:
+        Len(global_chan[ch].data) <= 1
+
 ====
