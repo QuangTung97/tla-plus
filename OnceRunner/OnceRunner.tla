@@ -5,11 +5,11 @@ CONSTANTS Node, nil
 
 VARIABLES
     pc, global_chan, status, running,
-    wait_list, local_chan, ctx_cancelled
+    wait_list, local_chan, ctx_cancelled, stop_cancel
 
 vars == <<
     pc, global_chan, status, running,
-    wait_list, local_chan, ctx_cancelled
+    wait_list, local_chan, ctx_cancelled, stop_cancel
 >>
 
 -----------------------------------------------------------------------
@@ -40,6 +40,7 @@ TypeOK ==
     /\ wait_list \in Seq(WaitEntry)
     /\ local_chan \in [Node -> NullChannel]
     /\ ctx_cancelled \subseteq Node
+    /\ stop_cancel \in BOOLEAN
 
 
 Init ==
@@ -50,6 +51,7 @@ Init ==
     /\ wait_list = <<>>
     /\ local_chan = [n \in Node |-> nil]
     /\ ctx_cancelled = {}
+    /\ stop_cancel = FALSE
 
 -----------------------------------------------------------------------
 
@@ -118,12 +120,18 @@ StartJob(n) ==
             when_running
         ELSE
             when_cancelling
+    /\ UNCHANGED stop_cancel
 
 
 RunJob(n) ==
     LET
         when_normal ==
+            /\ status' = "NoJob"
+            /\ running' = nil
             /\ UNCHANGED wait_list
+            /\ UNCHANGED ctx_cancelled
+            /\ UNCHANGED global_chan
+            /\ UNCHANGED local_chan
 
         wait == wait_list[1]
         ch == wait.chan
@@ -143,6 +151,7 @@ RunJob(n) ==
             when_normal
         ELSE
             when_cancelling
+    /\ UNCHANGED stop_cancel
 
 
 WaitOnChan(n) ==
@@ -155,9 +164,29 @@ WaitOnChan(n) ==
     /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
     /\ local_chan' = [local_chan EXCEPT ![n] = nil]
     /\ UNCHANGED ctx_cancelled
-    /\ UNCHANGED running
-    /\ UNCHANGED status
-    /\ UNCHANGED wait_list
+    /\ UNCHANGED <<status, running, wait_list>>
+    /\ UNCHANGED stop_cancel
+
+
+EnableStopCancel ==
+    /\ ~stop_cancel
+    /\ stop_cancel' = TRUE
+    /\ UNCHANGED pc
+    /\ UNCHANGED <<status, running, wait_list>>
+    /\ UNCHANGED global_chan
+    /\ UNCHANGED local_chan
+    /\ UNCHANGED ctx_cancelled
+
+
+CancelContext(n) ==
+    /\ ~stop_cancel
+    /\ n \notin ctx_cancelled
+    /\ ctx_cancelled' = ctx_cancelled \union {n}
+    /\ UNCHANGED <<status, running, wait_list>>
+    /\ UNCHANGED pc
+    /\ UNCHANGED stop_cancel
+    /\ UNCHANGED global_chan
+    /\ UNCHANGED local_chan
 
 -----------------------------------------------------------------------
 
@@ -177,6 +206,8 @@ Next ==
         \/ StartJob(n)
         \/ RunJob(n)
         \/ WaitOnChan(n)
+        \/ CancelContext(n)
+    \/ EnableStopCancel
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
