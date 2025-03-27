@@ -30,12 +30,13 @@ Channel == DOMAIN global_chan
 NullChan == Channel \union {nil}
 
 Config == [
-    updated: SUBSET (Key \X Value)
+    updated_keys: SUBSET Key, \* TODO not allow empty
+    updated_vals: [Key -> NullValue]
 ]
 
-ChannelData == [
-    data: Seq(Config)
-]
+ChannelData == Seq(Config)
+
+PC == {"Init", "WaitOnChan"}
 
 ----------------------------------------------------------------------------
 
@@ -47,7 +48,7 @@ TypeOK ==
     /\ wait_chan \in [SyncSlave -> NullChan]
 
     /\ slave_db \in [SyncSlave -> [Key -> NullValue]]
-    /\ pc \in [SyncSlave -> {"Init"}]
+    /\ pc \in [SyncSlave -> PC]
     /\ local_chan \in [SyncSlave -> NullChan]
 
     /\ next_val \in 20..max_val
@@ -82,13 +83,43 @@ UpdateDB(k) ==
     /\ UNCHANGED aux_vars
 
 
+slave_of_chan(ch) ==
+    CHOOSE s \in SyncSlave: wait_chan[s] = ch
+
+
 UpdateMem ==
     LET
         changed_keys(s) == {k \in Key: key_slave[k] = s /\ mem[k] # db[k]}
+
+        pushed_slaves == {
+            s \in SyncSlave:
+                /\ wait_chan[s] # nil
+                /\ changed_keys(s) # {}
+        }
+
+        pushed_chans == {wait_chan[s]: s \in pushed_slaves}
+
+        push_to(old, ch) ==
+            LET
+                s == slave_of_chan(ch)
+
+                conf == [
+                    updated_keys |-> changed_keys(s),
+                    updated_vals |-> mem'
+                ]
+            IN
+                IF ch \in pushed_chans
+                    THEN Append(old, conf)
+                    ELSE old
+
+        push ==
+            global_chan' = [
+                idx \in DOMAIN global_chan |->
+                    push_to(global_chan[idx], idx)]
     IN
     /\ mem # db
     /\ mem' = db
-    /\ UNCHANGED global_chan
+    /\ push
     /\ UNCHANGED wait_chan
     /\ UNCHANGED db
     /\ UNCHANGED next_val
@@ -97,15 +128,39 @@ UpdateMem ==
 
 ----------------------------------------------------------------------------
 
+goto(s, l) ==
+    pc' = [pc EXCEPT ![s] = l]
+
+
 SetupChan(s) ==
+    LET
+        non_nil_keys == {k \in Key: key_slave[k] = s /\ mem[k] # nil}
+
+        conf == [
+            updated_keys |-> non_nil_keys,
+            updated_vals |-> mem
+        ]
+
+        new_ch == <<conf>>
+
+        ch == Len(global_chan')
+    IN
     /\ pc[s] = "Init"
-    /\ UNCHANGED core_vars
+    /\ goto(s, "WaitOnChan")
+    /\ global_chan' = Append(global_chan, new_ch)
+    /\ local_chan' = [local_chan EXCEPT ![s] = ch]
+    /\ wait_chan' = [wait_chan EXCEPT ![s] = ch]
+    /\ UNCHANGED <<db, mem, next_val>>
+    /\ UNCHANGED slave_db
+    /\ UNCHANGED aux_vars
 
 ----------------------------------------------------------------------------
 
 TerminateCond ==
     /\ mem = db
-    /\ \A s \in SyncSlave: pc[s] = "WaitOnChan"
+    /\ \A s \in SyncSlave:
+        /\ pc[s] = "WaitOnChan"
+        /\ global_chan[local_chan[s]] = <<>>
 
 Terminated ==
     /\ TerminateCond
