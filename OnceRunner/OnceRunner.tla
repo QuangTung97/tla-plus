@@ -137,27 +137,14 @@ RunJob(n) ==
         when_normal ==
             /\ status' = "NoJob"
             /\ running' = nil
-            /\ UNCHANGED wait_list
-            /\ UNCHANGED ctx_cancelled
-            /\ UNCHANGED global_chan
-            /\ UNCHANGED local_chan
-
-        ch == wait_list[1]
-
-        when_cancelling ==
-            /\ status' = "NoJob"
             /\ notify_wait_list
             /\ UNCHANGED ctx_cancelled
-            /\ UNCHANGED running
             /\ UNCHANGED local_chan
     IN
     /\ pc[n] = "Running"
     /\ is_cancelled(n)
     /\ goto(n, "Terminated")
-    /\ IF status = "Running" THEN
-            when_normal
-        ELSE
-            when_cancelling
+    /\ when_normal
     /\ UNCHANGED stop_cancel
 
 
@@ -250,6 +237,23 @@ AtMostOneRunning ==
         running_set == {n \in Node: pc[n] ="Running"}
     IN
         Cardinality(running_set) <= 1
+
+
+StoppedCancelLeadToRunning ==
+    LET
+        running_set == {n \in Node: pc[n] ="Running"}
+
+        num_running == Cardinality(running_set)
+
+        pre_cond ==
+            /\ stop_cancel
+            /\ ctx_cancelled = {}
+
+        cond ==
+            /\ TerminateCond
+            /\ num_running = 1
+    IN
+        pre_cond ~> cond
 
 
 StatusRunningInv ==
