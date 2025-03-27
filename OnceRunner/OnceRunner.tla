@@ -5,11 +5,11 @@ CONSTANTS Node, nil
 
 VARIABLES
     pc, global_chan, status, running,
-    wait_list, local_chan, ctx_cancelled, stop_cancel
+    wait_list, wait_set, local_chan, ctx_cancelled, stop_cancel
 
 vars == <<
     pc, global_chan, status, running,
-    wait_list, local_chan, ctx_cancelled, stop_cancel
+    wait_list, wait_set, local_chan, ctx_cancelled, stop_cancel
 >>
 
 -----------------------------------------------------------------------
@@ -38,6 +38,7 @@ TypeOK ==
     /\ status \in {"NoJob", "Running", "Cancelling"}
     /\ running \in NullNode
     /\ wait_list \in Seq(Channel)
+    /\ wait_set \subseteq Channel
     /\ local_chan \in [Node -> NullChannel]
     /\ ctx_cancelled \subseteq Node
     /\ stop_cancel \in BOOLEAN
@@ -49,6 +50,7 @@ Init ==
     /\ status = "NoJob"
     /\ running = nil
     /\ wait_list = <<>>
+    /\ wait_set = {}
     /\ local_chan = [n \in Node |-> nil]
     /\ ctx_cancelled = {}
     /\ stop_cancel = FALSE
@@ -73,14 +75,14 @@ StartJob(n) ==
             /\ UNCHANGED global_chan
             /\ UNCHANGED local_chan
             /\ UNCHANGED ctx_cancelled
-            /\ UNCHANGED wait_list
+            /\ UNCHANGED <<wait_list, wait_set>>
 
         when_normal_with_wait_list ==
             /\ goto(n, "Running")
             /\ status' = "Cancelling"
             /\ ctx_cancelled' = ctx_cancelled \union {n}
             /\ UNCHANGED running
-            /\ UNCHANGED wait_list
+            /\ UNCHANGED <<wait_list, wait_set>>
             /\ UNCHANGED global_chan
             /\ UNCHANGED local_chan
 
@@ -95,6 +97,7 @@ StartJob(n) ==
             /\ global_chan' = Append(global_chan, empty_chan)
             /\ local_chan' = [local_chan EXCEPT ![n] = new_ch]
             /\ wait_list' = Append(wait_list, new_ch)
+            /\ wait_set' = wait_set \union {new_ch}
 
         when_running ==
             /\ goto(n, "WaitOnChan")
@@ -125,11 +128,12 @@ notify_wait_list ==
         ch == wait_list[1]
     IN
     IF wait_list = <<>> THEN
-        /\ UNCHANGED wait_list
+        /\ UNCHANGED <<wait_list, wait_set>>
         /\ UNCHANGED global_chan
     ELSE
         /\ wait_list' = Tail(wait_list)
         /\ global_chan' = [global_chan EXCEPT ![ch].data = Append(@, "OK")]
+        /\ wait_set' = wait_set \ {ch}
 
 
 RunJob(n) ==
@@ -156,13 +160,14 @@ WaitOnChan(n) ==
             /\ global_chan[ch].data # <<>>
             /\ goto(n, "Init")
             /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
-            /\ UNCHANGED wait_list
+            /\ UNCHANGED <<wait_list, wait_set>>
 
         filter_fn(e) == e # ch
 
         remove_from_wait_list_or_notify ==
-            IF ch \in Range(wait_list) THEN
+            IF ch \in wait_set THEN
                 /\ wait_list' = SelectSeq(wait_list, filter_fn)
+                /\ wait_set' = wait_set \ {ch}
                 /\ UNCHANGED global_chan
             ELSE
                 notify_wait_list
@@ -185,7 +190,7 @@ EnableStopCancel ==
     /\ ~stop_cancel
     /\ stop_cancel' = TRUE
     /\ UNCHANGED pc
-    /\ UNCHANGED <<status, running, wait_list>>
+    /\ UNCHANGED <<status, running, wait_list, wait_set>>
     /\ UNCHANGED global_chan
     /\ UNCHANGED local_chan
     /\ UNCHANGED ctx_cancelled
@@ -195,7 +200,7 @@ CancelContext(n) ==
     /\ ~stop_cancel
     /\ n \notin ctx_cancelled
     /\ ctx_cancelled' = ctx_cancelled \union {n}
-    /\ UNCHANGED <<status, running, wait_list>>
+    /\ UNCHANGED <<status, running, wait_list, wait_set>>
     /\ UNCHANGED pc
     /\ UNCHANGED stop_cancel
     /\ UNCHANGED global_chan
@@ -272,5 +277,9 @@ WhenTerminatedInv ==
 ChannelInv ==
     \A ch \in Channel:
         Len(global_chan[ch].data) <= 1
+
+
+WaitSetMatchWaitList ==
+    Range(wait_list) = wait_set
 
 ====
