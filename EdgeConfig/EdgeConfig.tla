@@ -30,7 +30,7 @@ Channel == DOMAIN global_chan
 NullChan == Channel \union {nil}
 
 Config == [
-    updated_keys: SUBSET Key, \* TODO not allow empty
+    updated_keys: SUBSET Key,
     updated_vals: [Key -> NullValue]
 ]
 
@@ -70,6 +70,9 @@ Init ==
 
 keys_of_slave(s) ==
     {k \in Key: key_slave[k] = s}
+
+mem_with_keys(keys) ==
+    [k \in DOMAIN mem |-> IF k \in keys THEN mem[k] ELSE nil]
 
 
 UpdateDB(k) ==
@@ -138,7 +141,7 @@ SetupChan(s) ==
 
         conf == [
             updated_keys |-> non_nil_keys,
-            updated_vals |-> mem
+            updated_vals |-> mem_with_keys(non_nil_keys)
         ]
 
         new_ch == <<conf>>
@@ -152,6 +155,17 @@ SetupChan(s) ==
     /\ wait_chan' = [wait_chan EXCEPT ![s] = ch]
     /\ UNCHANGED <<db, mem, next_val>>
     /\ UNCHANGED slave_db
+    /\ UNCHANGED aux_vars
+
+
+ConsumeChan(s) ==
+    LET
+        ch == local_chan[s]
+    IN
+    /\ pc[s] = "WaitOnChan"
+    /\ global_chan' = [global_chan EXCEPT ![ch] = Tail(@)]
+    /\ local_chan' = [local_chan EXCEPT ![s] = nil]
+    /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
 
 ----------------------------------------------------------------------------
@@ -172,6 +186,7 @@ Next ==
         \/ UpdateDB(k)
     \/ \E s \in SyncSlave:
         \/ SetupChan(s)
+        \/ ConsumeChan(s)
     \/ UpdateMem
     \/ Terminated
 
@@ -187,5 +202,18 @@ SlaveDBMatchDB ==
 
     IN
         TerminateCond => cond
+
+
+GlobalChanInv ==
+    \A ch \in Channel:
+        LET
+            ev == global_chan[ch][1]
+
+            cond ==
+                \A k \in Key:
+                    k \notin ev.updated_keys => ev.updated_vals[k] = nil
+        IN
+        /\ Len(global_chan[ch]) <= 1
+        /\ global_chan[ch] # <<>> => cond
 
 ====
