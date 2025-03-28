@@ -1,18 +1,18 @@
 ------ MODULE EdgeConfig ----
 EXTENDS TLC, Naturals, Sequences
 
-CONSTANTS Key, SyncSlave, nil, max_val
+CONSTANTS Key, SyncSlave, nil, max_val, max_restart
 
 VARIABLES
     db, mem, key_slave, next_val,
     global_chan, wait_chan, wait_status, slave_changes,
-    slave_db, pc, local_chan, stop_delete
+    slave_db, pc, local_chan, stop_delete, num_restart
 
 core_vars == <<
     db, mem, next_val, wait_chan, wait_status, slave_changes
 >>
 
-aux_vars == <<key_slave, stop_delete>>
+aux_vars == <<key_slave, stop_delete, num_restart>>
 
 slave_vars == <<
     slave_db, pc, local_chan
@@ -63,6 +63,7 @@ TypeOK ==
 
     /\ next_val \in 20..max_val
     /\ stop_delete \in BOOLEAN
+    /\ num_restart \in 0..max_restart
 
 Init ==
     /\ db = [k \in Key |-> nil]
@@ -79,6 +80,7 @@ Init ==
 
     /\ next_val = 20
     /\ stop_delete = FALSE
+    /\ num_restart = 0
 
 ----------------------------------------------------------------------------
 
@@ -177,6 +179,7 @@ EnableStopDelete ==
     /\ UNCHANGED slave_vars
     /\ UNCHANGED global_chan
     /\ UNCHANGED key_slave
+    /\ UNCHANGED num_restart
 
 ----------------------------------------------------------------------------
 
@@ -261,7 +264,20 @@ ConsumeChan(s) ==
 
 
 RestartSlave(s) ==
+    /\ num_restart < max_restart
+    /\ num_restart' = num_restart + 1
     /\ wait_status[s] # "Nil"
+
+    /\ goto(s, "Init")
+    /\ wait_status' = [wait_status EXCEPT ![s] = "Nil"]
+    /\ local_chan' = [local_chan EXCEPT ![s] = nil]
+    /\ slave_changes' = [slave_changes EXCEPT ![s] = {}]
+    /\ wait_chan' = [wait_chan EXCEPT ![s] = nil]
+    /\ UNCHANGED slave_db
+
+    /\ UNCHANGED <<db, mem, next_val>>
+    /\ UNCHANGED global_chan
+    /\ UNCHANGED <<stop_delete, key_slave>>
 
 ----------------------------------------------------------------------------
 
@@ -317,6 +333,8 @@ GlobalChanInv ==
 
 WaitStatusInv ==
     \A s \in SyncSlave:
-        /\ wait_status[s] = "Nil" => slave_changes[s] = {}
+        wait_status[s] = "Nil" =>
+            /\ slave_changes[s] = {}
+            /\ pc[s] = "Init"
 
 ====
