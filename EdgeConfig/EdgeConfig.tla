@@ -106,7 +106,11 @@ UpdateMem ==
     LET
         changed_keys(s) == {k \in Key: key_slave[k] = s /\ mem[k] # db[k]}
 
-        changed_slaves == {s \in SyncSlave: changed_keys(s) # {}}
+        changed_slaves == {
+            s \in SyncSlave:
+                /\ changed_keys(s) # {}
+                /\ wait_status[s] = "Connected"
+        }
 
         pushed_slaves == {s \in changed_slaves: /\ wait_chan[s] # nil}
 
@@ -279,5 +283,10 @@ GlobalChanInv ==
         IN
         /\ Len(global_chan[ch]) <= 1
         /\ global_chan[ch] # <<>> => cond
+
+
+WaitStatusInv ==
+    \A s \in SyncSlave:
+        /\ wait_status[s] = "Nil" => slave_changes[s] = {}
 
 ====
