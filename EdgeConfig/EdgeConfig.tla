@@ -5,10 +5,10 @@ CONSTANTS Key, SyncSlave, nil, max_val
 
 VARIABLES
     db, mem, key_slave, next_val,
-    global_chan, wait_chan,
+    global_chan, wait_chan, wait_status,
     slave_db, pc, local_chan
 
-core_vars == <<db, mem, next_val, wait_chan>>
+core_vars == <<db, mem, next_val, wait_chan, wait_status>>
 
 aux_vars == <<key_slave>>
 
@@ -46,6 +46,7 @@ TypeOK ==
     /\ key_slave \in [Key -> SyncSlave]
     /\ global_chan \in Seq(ChannelData)
     /\ wait_chan \in [SyncSlave -> NullChan]
+    /\ wait_status \in [SyncSlave -> {"Nil", "Connected"}]
 
     /\ slave_db \in [SyncSlave -> [Key -> NullValue]]
     /\ pc \in [SyncSlave -> PC]
@@ -59,6 +60,7 @@ Init ==
     /\ key_slave \in [Key -> SyncSlave]
     /\ global_chan = <<>>
     /\ wait_chan = [s \in SyncSlave |-> nil]
+    /\ wait_status = [s \in SyncSlave |-> "Nil"]
 
     /\ slave_db = [s \in SyncSlave |-> [k \in Key |-> nil]]
     /\ pc = [s \in SyncSlave |-> "Init"]
@@ -72,7 +74,7 @@ keys_of_slave(s) ==
     {k \in Key: key_slave[k] = s}
 
 mem_with_keys(keys) ==
-    [k \in DOMAIN mem |-> IF k \in keys THEN mem[k] ELSE nil]
+    [k \in DOMAIN mem' |-> IF k \in keys THEN mem'[k] ELSE nil]
 
 
 UpdateDB(k) ==
@@ -81,7 +83,7 @@ UpdateDB(k) ==
     /\ db' = [db EXCEPT ![k] = next_val']
     /\ UNCHANGED mem
     /\ UNCHANGED global_chan
-    /\ UNCHANGED wait_chan
+    /\ UNCHANGED <<wait_chan, wait_status>>
     /\ UNCHANGED slave_vars
     /\ UNCHANGED aux_vars
 
@@ -108,23 +110,29 @@ UpdateMem ==
 
                 conf == [
                     updated_keys |-> changed_keys(s),
-                    updated_vals |-> mem'
+                    updated_vals |-> mem_with_keys(changed_keys(s))
                 ]
             IN
                 IF ch \in pushed_chans
                     THEN Append(old, conf)
                     ELSE old
 
-        push ==
+        push_to_clients ==
             global_chan' = [
                 idx \in DOMAIN global_chan |->
                     push_to(global_chan[idx], idx)]
+
+        update_wait_ch(s, old) ==
+            IF s \in pushed_slaves
+                THEN nil
+                ELSE old
     IN
     /\ mem # db
     /\ mem' = db
-    /\ push
-    /\ UNCHANGED wait_chan
+    /\ push_to_clients
+    /\ wait_chan' = [s \in DOMAIN wait_chan |-> update_wait_ch(s, wait_chan[s])]
     /\ UNCHANGED db
+    /\ UNCHANGED wait_status
     /\ UNCHANGED next_val
     /\ UNCHANGED slave_vars
     /\ UNCHANGED aux_vars
@@ -147,13 +155,28 @@ SetupChan(s) ==
         new_ch == <<conf>>
 
         ch == Len(global_chan')
+
+        when_first_connect ==
+            /\ global_chan' = Append(global_chan, new_ch)
+            /\ local_chan' = [local_chan EXCEPT ![s] = ch]
+            /\ wait_status' = [wait_status EXCEPT ![s] = "Connected"]
+            /\ UNCHANGED wait_chan
+
+        when_after_connect ==
+            /\ global_chan' = Append(global_chan, <<>>)
+            /\ local_chan' = [local_chan EXCEPT ![s] = ch]
+            /\ wait_chan' = [wait_chan EXCEPT ![s] = ch]
+            /\ UNCHANGED wait_status
     IN
     /\ pc[s] = "Init"
     /\ goto(s, "WaitOnChan")
-    /\ global_chan' = Append(global_chan, new_ch)
-    /\ local_chan' = [local_chan EXCEPT ![s] = ch]
-    /\ wait_chan' = [wait_chan EXCEPT ![s] = ch]
-    /\ UNCHANGED <<db, mem, next_val>>
+    /\ UNCHANGED mem
+
+    /\ IF wait_status[s] = "Nil"
+        THEN when_first_connect
+        ELSE when_after_connect
+
+    /\ UNCHANGED <<db, next_val>>
     /\ UNCHANGED slave_db
     /\ UNCHANGED aux_vars
 
@@ -161,10 +184,23 @@ SetupChan(s) ==
 ConsumeChan(s) ==
     LET
         ch == local_chan[s]
+
+        ev == global_chan[ch][1]
+
+        do_update_key(k, old) ==
+            IF k \in ev.updated_keys
+                THEN ev.updated_vals[k]
+                ELSE old
+
+        update_slave_db(old) ==
+            [k \in Key |-> do_update_key(k, old[k])]
     IN
     /\ pc[s] = "WaitOnChan"
+    /\ global_chan[ch] # <<>>
+    /\ goto(s, "Init")
     /\ global_chan' = [global_chan EXCEPT ![ch] = Tail(@)]
     /\ local_chan' = [local_chan EXCEPT ![s] = nil]
+    /\ slave_db' = [slave_db EXCEPT ![s] = update_slave_db(@)]
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
 
