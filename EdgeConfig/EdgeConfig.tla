@@ -191,9 +191,13 @@ SetupChan(s) ==
     LET
         non_nil_keys == {k \in Key: key_slave[k] = s /\ mem[k] # nil}
 
+        slave_non_nil_keys == {k \in Key: slave_db[s][k] # nil}
+
+        init_keys == non_nil_keys \union slave_non_nil_keys
+
         conf == [
-            updated_keys |-> non_nil_keys,
-            updated_vals |-> mem_with_keys(non_nil_keys)
+            updated_keys |-> init_keys,
+            updated_vals |-> mem_with_keys(init_keys)
         ]
 
         ch == Len(global_chan')
@@ -281,11 +285,15 @@ RestartSlave(s) ==
 
 ----------------------------------------------------------------------------
 
-TerminateCond ==
+stopCond ==
     /\ mem = db
     /\ \A s \in SyncSlave:
         /\ pc[s] = "WaitOnChan"
         /\ global_chan[local_chan[s]] = <<>>
+
+TerminateCond ==
+    /\ stopCond
+    /\ next_val = max_val
 
 Terminated ==
     /\ TerminateCond
@@ -306,7 +314,12 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ----------------------------------------------------------------------------
+
+AlwaysTerminate == []<>TerminateCond
+
 
 SlaveDBMatchDB ==
     LET
@@ -315,7 +328,7 @@ SlaveDBMatchDB ==
                 db[k] = slave_db[s][k]
 
     IN
-        TerminateCond => cond
+        stopCond => cond
 
 
 GlobalChanInv ==
