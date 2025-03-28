@@ -6,13 +6,13 @@ CONSTANTS Key, SyncSlave, nil, max_val
 VARIABLES
     db, mem, key_slave, next_val,
     global_chan, wait_chan, wait_status, slave_changes,
-    slave_db, pc, local_chan
+    slave_db, pc, local_chan, stop_delete
 
 core_vars == <<
     db, mem, next_val, wait_chan, wait_status, slave_changes
 >>
 
-aux_vars == <<key_slave>>
+aux_vars == <<key_slave, stop_delete>>
 
 slave_vars == <<
     slave_db, pc, local_chan
@@ -62,6 +62,7 @@ TypeOK ==
     /\ local_chan \in [SyncSlave -> NullChan]
 
     /\ next_val \in 20..max_val
+    /\ stop_delete \in BOOLEAN
 
 Init ==
     /\ db = [k \in Key |-> nil]
@@ -77,6 +78,7 @@ Init ==
     /\ local_chan = [s \in SyncSlave |-> nil]
 
     /\ next_val = 20
+    /\ stop_delete = FALSE
 
 ----------------------------------------------------------------------------
 
@@ -94,6 +96,18 @@ UpdateDB(k) ==
     /\ UNCHANGED mem
     /\ UNCHANGED global_chan
     /\ UNCHANGED <<wait_chan, wait_status, slave_changes>>
+    /\ UNCHANGED slave_vars
+    /\ UNCHANGED aux_vars
+
+
+DeleteKey(k) ==
+    /\ ~stop_delete
+    /\ db[k] # nil
+    /\ db' = [db EXCEPT ![k] = nil]
+    /\ UNCHANGED mem
+    /\ UNCHANGED global_chan
+    /\ UNCHANGED <<wait_chan, wait_status, slave_changes>>
+    /\ UNCHANGED next_val
     /\ UNCHANGED slave_vars
     /\ UNCHANGED aux_vars
 
@@ -141,7 +155,7 @@ UpdateMem ==
 
         update_slave_changes(s, old) ==
             IF s \in (changed_slaves \ pushed_slaves)
-                THEN changed_keys(s) \* TODO
+                THEN old \union changed_keys(s)
                 ELSE old
     IN
     /\ mem # db
@@ -154,6 +168,15 @@ UpdateMem ==
     /\ UNCHANGED next_val
     /\ UNCHANGED slave_vars
     /\ UNCHANGED aux_vars
+
+
+EnableStopDelete ==
+    /\ ~stop_delete
+    /\ stop_delete' = TRUE
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED slave_vars
+    /\ UNCHANGED global_chan
+    /\ UNCHANGED key_slave
 
 ----------------------------------------------------------------------------
 
@@ -176,7 +199,7 @@ SetupChan(s) ==
             /\ global_chan' = Append(global_chan, <<conf>>)
             /\ local_chan' = [local_chan EXCEPT ![s] = ch]
             /\ wait_status' = [wait_status EXCEPT ![s] = "Connected"]
-            /\ slave_changes' = [slave_changes EXCEPT ![s] = {}] \* TODO Inv
+            /\ slave_changes' = [slave_changes EXCEPT ![s] = {}]
             /\ UNCHANGED wait_chan
 
         when_connected_change_empty ==
@@ -236,6 +259,10 @@ ConsumeChan(s) ==
     /\ UNCHANGED core_vars
     /\ UNCHANGED aux_vars
 
+
+RestartSlave(s) ==
+    /\ wait_status[s] # "Nil"
+
 ----------------------------------------------------------------------------
 
 TerminateCond ==
@@ -252,10 +279,13 @@ Terminated ==
 Next ==
     \/ \E k \in Key:
         \/ UpdateDB(k)
+        \/ DeleteKey(k)
     \/ \E s \in SyncSlave:
         \/ SetupChan(s)
         \/ ConsumeChan(s)
+        \/ RestartSlave(s)
     \/ UpdateMem
+    \/ EnableStopDelete
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
