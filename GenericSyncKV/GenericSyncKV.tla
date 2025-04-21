@@ -5,14 +5,14 @@ CONSTANTS Key, nil, max_action
 
 VARIABLES
     state, next_val, num_action, update_list,
-    global_chan, repl,
+    global_chan, repl, shutdown,
     pc, connected,
     wait_chan, local_update_list, local_changeset,
     local_chan
 
 vars == <<
     state, next_val, num_action, update_list,
-    global_chan, repl,
+    global_chan, repl, shutdown,
     pc, connected,
     wait_chan, local_update_list, local_changeset,
     local_chan
@@ -53,6 +53,7 @@ TypeOK ==
     /\ num_action \in 0..max_action
     /\ repl \in [Key -> NullValue]
     /\ update_list \in Seq(Key)
+    /\ shutdown \in BOOLEAN
 
     /\ global_chan \in Seq(ChanInfo)
 
@@ -70,6 +71,7 @@ Init ==
     /\ repl = [k \in Key |-> nil]
     /\ update_list = <<>>
     /\ global_chan = <<>>
+    /\ shutdown = FALSE
 
     /\ pc = "Init"
     /\ connected = FALSE
@@ -128,6 +130,7 @@ UpdateState(k) ==
         v == next_val'
     IN
     /\ num_action < max_action
+    /\ ~shutdown
     /\ num_action' = num_action + 1
     /\ next_val' = next_val + 1
     /\ state' = [state EXCEPT ![k] = v]
@@ -139,6 +142,7 @@ UpdateState(k) ==
     /\ pushChangeToClient(k)
 
     /\ UNCHANGED <<pc, local_chan, connected>>
+    /\ UNCHANGED shutdown
     /\ UNCHANGED repl
 
 
@@ -156,13 +160,27 @@ DeleteKey(k) ==
 
     /\ UNCHANGED next_val
     /\ UNCHANGED <<pc, local_chan, connected>>
+    /\ UNCHANGED shutdown
     /\ UNCHANGED repl
+
+
+Shutdown ==
+    /\ ~shutdown
+    /\ shutdown' = TRUE
+    /\ UNCHANGED global_chan \* TODO
+    /\ UNCHANGED <<local_changeset, local_update_list>>
+    /\ UNCHANGED <<num_action, next_val>>
+    /\ UNCHANGED <<pc, local_chan, connected>>
+    /\ UNCHANGED repl
+    /\ UNCHANGED wait_chan \* TODO
+    /\ UNCHANGED <<state, update_list>>
 
 ---------------------------------------------------------------------------
 
 localUnchanged ==
     /\ UNCHANGED <<num_action, next_val>>
     /\ UNCHANGED <<state, update_list>>
+    /\ UNCHANGED shutdown
 
 
 InitSession ==
@@ -256,6 +274,7 @@ Next ==
     \/ \E k \in Key:
         \/ UpdateState(k)
         \/ DeleteKey(k)
+    \/ Shutdown
     \/ InitSession
     \/ GetNew
     \/ ConsumeChan
