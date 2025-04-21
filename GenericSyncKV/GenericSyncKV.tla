@@ -168,19 +168,23 @@ DeleteKey(k) ==
 
 
 close_wait_chan ==
-    IF wait_chan = nil
-        THEN UNCHANGED global_chan
-        ELSE global_chan' = [global_chan EXCEPT ![wait_chan].closed = TRUE]
+    IF wait_chan = nil THEN
+        /\ UNCHANGED global_chan
+        /\ UNCHANGED wait_chan
+    ELSE
+        /\ global_chan' = [global_chan EXCEPT ![wait_chan].closed = TRUE]
+        /\ wait_chan' = nil
+
 
 Shutdown ==
     /\ ~shutdown
+    /\ ~client_finished
     /\ shutdown' = TRUE
     /\ close_wait_chan
     /\ UNCHANGED <<local_changeset, local_update_list>>
     /\ UNCHANGED <<num_action, next_val>>
     /\ UNCHANGED <<pc, local_chan, connected, client_finished>>
     /\ UNCHANGED repl
-    /\ UNCHANGED wait_chan
     /\ UNCHANGED <<state, update_list>>
 
 ---------------------------------------------------------------------------
@@ -232,7 +236,7 @@ GetNew ==
             /\ wait_chan' = ch
 
         when_update_list_empty ==
-            IF shutdown
+            IF shutdown \/ client_finished
                 THEN when_shutdown
                 ELSE when_update_list_empty_not_shutdown
 
@@ -300,19 +304,20 @@ ConsumeChan ==
 ClientDoFinish ==
     /\ connected
     /\ ~client_finished
+    /\ ~shutdown
     /\ client_finished' = TRUE
     /\ connected' = FALSE
     /\ close_wait_chan
 
     /\ UNCHANGED <<pc, repl>>
     /\ UNCHANGED <<local_chan, local_changeset, local_update_list>>
-    /\ UNCHANGED wait_chan
     /\ localUnchanged
 
 ---------------------------------------------------------------------------
 
 TerminateCond ==
-    /\ shutdown
+    /\ \/ shutdown
+       \/ client_finished
     /\ pc = "Terminated"
 
 Terminated ==
