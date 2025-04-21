@@ -40,6 +40,11 @@ GetOutput == [
     val: NullValue
 ]
 
+ChanInfo == [
+    data: Seq(GetOutput),
+    closed: BOOLEAN
+]
+
 ---------------------------------------------------------------------------
 
 TypeOK ==
@@ -49,7 +54,7 @@ TypeOK ==
     /\ repl \in [Key -> NullValue]
     /\ update_list \in Seq(Key)
 
-    /\ global_chan \in Seq(Seq(GetOutput))
+    /\ global_chan \in Seq(ChanInfo)
 
     /\ pc \in {"Init", "GetNew", "WaitOnChan"}
     /\ connected \in BOOLEAN
@@ -98,7 +103,7 @@ pushChangeToClient(k) ==
 
         when_wait_non_nil ==
             /\ global_chan' = [global_chan EXCEPT
-                    ![wait_chan] = Append(@, new_elem)]
+                    ![wait_chan].data = Append(@, new_elem)]
             /\ UNCHANGED local_update_list
             /\ UNCHANGED local_changeset
             /\ wait_chan' = nil
@@ -177,10 +182,15 @@ GetNew ==
     LET
         ch == Len(global_chan')
 
+        empty_ch == [
+            data |-> <<>>,
+            closed |-> FALSE
+        ]
+
         when_update_list_empty ==
             /\ UNCHANGED local_update_list
             /\ UNCHANGED local_changeset
-            /\ global_chan' = Append(global_chan, <<>>)
+            /\ global_chan' = Append(global_chan, empty_ch)
             /\ wait_chan' = ch
 
         k == local_update_list[1]
@@ -190,10 +200,15 @@ GetNew ==
             val |-> state[k]
         ]
 
+        non_empty_ch == [
+            data |-> <<new_elem>>,
+            closed |-> FALSE
+        ]
+
         remove_from_update_list ==
             /\ local_update_list' = Tail(local_update_list)
             /\ local_changeset' = local_changeset \ {k}
-            /\ global_chan' = Append(global_chan, <<new_elem>>)
+            /\ global_chan' = Append(global_chan, non_empty_ch)
             /\ UNCHANGED wait_chan
     IN
     /\ pc = "GetNew"
@@ -211,12 +226,12 @@ GetNew ==
 ConsumeChan ==
     LET
         ch == local_chan
-        e == global_chan[ch][1]
+        e == global_chan[ch].data[1]
     IN
     /\ pc = "WaitOnChan"
     /\ pc' = "GetNew"
-    /\ global_chan[ch] # <<>>
-    /\ global_chan' = [global_chan EXCEPT ![ch] = Tail(@)]
+    /\ global_chan[ch].data # <<>>
+    /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
     /\ local_chan' = nil
 
     /\ repl' = [repl EXCEPT ![e.key] = e.val]
@@ -230,8 +245,7 @@ ConsumeChan ==
 
 TerminateCond ==
     /\ num_action = max_action
-    /\ pc = "WaitOnChan"
-    /\ global_chan[local_chan] = <<>>
+    /\ pc = "Terminated"
 
 Terminated ==
     /\ TerminateCond
@@ -263,7 +277,7 @@ TerminateInv ==
 
 ChannelInv ==
     \A ch \in Chan:
-        Len(global_chan[ch]) <= 1
+        Len(global_chan[ch].data) <= 1
 
 
 ConnectedInv ==
