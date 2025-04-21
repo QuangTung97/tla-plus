@@ -6,14 +6,14 @@ CONSTANTS Key, nil, max_action
 VARIABLES
     state, next_val, num_action, update_list,
     global_chan, repl, shutdown,
-    pc, connected,
+    pc, connected, client_finished,
     wait_chan, local_update_list, local_changeset,
     local_chan
 
 vars == <<
     state, next_val, num_action, update_list,
     global_chan, repl, shutdown,
-    pc, connected,
+    pc, connected, client_finished,
     wait_chan, local_update_list, local_changeset,
     local_chan
 >>
@@ -57,8 +57,9 @@ TypeOK ==
 
     /\ global_chan \in Seq(ChanInfo)
 
-    /\ pc \in {"Init", "GetNew", "WaitOnChan"}
+    /\ pc \in {"Init", "GetNew", "WaitOnChan", "Terminated"}
     /\ connected \in BOOLEAN
+    /\ client_finished \in BOOLEAN
     /\ wait_chan \in NullChan
     /\ local_update_list \in Seq(Key)
     /\ local_changeset \subseteq Key
@@ -75,6 +76,7 @@ Init ==
 
     /\ pc = "Init"
     /\ connected = FALSE
+    /\ client_finished = FALSE
     /\ wait_chan = nil
     /\ local_update_list = <<>>
     /\ local_changeset = {}
@@ -141,7 +143,7 @@ UpdateState(k) ==
 
     /\ pushChangeToClient(k)
 
-    /\ UNCHANGED <<pc, local_chan, connected>>
+    /\ UNCHANGED <<pc, local_chan, connected, client_finished>>
     /\ UNCHANGED shutdown
     /\ UNCHANGED repl
 
@@ -151,6 +153,7 @@ DeleteKey(k) ==
         filter_fn(x) == x # k
     IN
     /\ num_action < max_action
+    /\ ~shutdown
     /\ num_action' = num_action + 1
     /\ state[k] # nil
     /\ state' = [state EXCEPT ![k] = nil]
@@ -159,20 +162,25 @@ DeleteKey(k) ==
     /\ pushChangeToClient(k)
 
     /\ UNCHANGED next_val
-    /\ UNCHANGED <<pc, local_chan, connected>>
+    /\ UNCHANGED <<pc, local_chan, connected, client_finished>>
     /\ UNCHANGED shutdown
     /\ UNCHANGED repl
 
 
+close_wait_chan ==
+    IF wait_chan = nil
+        THEN UNCHANGED global_chan
+        ELSE global_chan' = [global_chan EXCEPT ![wait_chan].closed = TRUE]
+
 Shutdown ==
     /\ ~shutdown
     /\ shutdown' = TRUE
-    /\ UNCHANGED global_chan \* TODO
+    /\ close_wait_chan
     /\ UNCHANGED <<local_changeset, local_update_list>>
     /\ UNCHANGED <<num_action, next_val>>
-    /\ UNCHANGED <<pc, local_chan, connected>>
+    /\ UNCHANGED <<pc, local_chan, connected, client_finished>>
     /\ UNCHANGED repl
-    /\ UNCHANGED wait_chan \* TODO
+    /\ UNCHANGED wait_chan
     /\ UNCHANGED <<state, update_list>>
 
 ---------------------------------------------------------------------------
@@ -193,6 +201,7 @@ InitSession ==
     /\ UNCHANGED global_chan
     /\ UNCHANGED local_chan
     /\ UNCHANGED repl
+    /\ UNCHANGED client_finished
     /\ localUnchanged
 
 
@@ -200,16 +209,32 @@ GetNew ==
     LET
         ch == Len(global_chan')
 
+        closed_ch == [
+            data |-> <<>>,
+            closed |-> TRUE
+        ]
+
+        when_shutdown ==
+            /\ UNCHANGED local_update_list
+            /\ UNCHANGED local_changeset
+            /\ global_chan' = Append(global_chan, closed_ch)
+            /\ UNCHANGED wait_chan
+
         empty_ch == [
             data |-> <<>>,
             closed |-> FALSE
         ]
 
-        when_update_list_empty ==
+        when_update_list_empty_not_shutdown ==
             /\ UNCHANGED local_update_list
             /\ UNCHANGED local_changeset
             /\ global_chan' = Append(global_chan, empty_ch)
             /\ wait_chan' = ch
+
+        when_update_list_empty ==
+            IF shutdown
+                THEN when_shutdown
+                ELSE when_update_list_empty_not_shutdown
 
         k == local_update_list[1]
 
@@ -238,6 +263,7 @@ GetNew ==
 
     /\ UNCHANGED repl
     /\ UNCHANGED connected
+    /\ UNCHANGED client_finished
     /\ localUnchanged
 
 
@@ -245,24 +271,48 @@ ConsumeChan ==
     LET
         ch == local_chan
         e == global_chan[ch].data[1]
+
+        when_has_data ==
+            /\ global_chan[ch].data # <<>>
+            /\ pc' = "GetNew"
+            /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
+            /\ local_chan' = nil
+            /\ repl' = [repl EXCEPT ![e.key] = e.val]
+
+        when_closed ==
+            /\ global_chan[ch].closed
+            /\ pc' = "Terminated"
+            /\ local_chan' = nil
+            /\ UNCHANGED global_chan
+            /\ UNCHANGED repl
     IN
     /\ pc = "WaitOnChan"
-    /\ pc' = "GetNew"
-    /\ global_chan[ch].data # <<>>
-    /\ global_chan' = [global_chan EXCEPT ![ch].data = Tail(@)]
-    /\ local_chan' = nil
-
-    /\ repl' = [repl EXCEPT ![e.key] = e.val]
+    /\ \/ when_has_data
+       \/ when_closed
 
     /\ UNCHANGED <<local_update_list, local_changeset>>
     /\ UNCHANGED connected
+    /\ UNCHANGED wait_chan
+    /\ UNCHANGED client_finished
+    /\ localUnchanged
+
+
+ClientDoFinish ==
+    /\ connected
+    /\ ~client_finished
+    /\ client_finished' = TRUE
+    /\ connected' = FALSE
+    /\ close_wait_chan
+
+    /\ UNCHANGED <<pc, repl>>
+    /\ UNCHANGED <<local_chan, local_changeset, local_update_list>>
     /\ UNCHANGED wait_chan
     /\ localUnchanged
 
 ---------------------------------------------------------------------------
 
 TerminateCond ==
-    /\ num_action = max_action
+    /\ shutdown
     /\ pc = "Terminated"
 
 Terminated ==
@@ -278,6 +328,7 @@ Next ==
     \/ InitSession
     \/ GetNew
     \/ ConsumeChan
+    \/ ClientDoFinish
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -291,16 +342,18 @@ AlwaysTerminate == []<>TerminateCond
 
 TerminateInv ==
     TerminateCond =>
-        /\ state = repl
+        /\ ~client_finished => state = repl
+        /\ local_chan = nil \* TODO
 
 
 ChannelInv ==
     \A ch \in Chan:
-        Len(global_chan[ch].data) <= 1
+        /\ Len(global_chan[ch].data) <= 1
+        /\ global_chan[ch].closed => global_chan[ch].data = <<>>
 
 
 ConnectedInv ==
-    connected <=> pc # "Init"
+    connected => pc # "Init"
 
 
 InitInv ==
@@ -315,5 +368,19 @@ UpdateListInv ==
 LocalUpdateListInv ==
     /\ IsUnique(local_update_list)
     /\ Range(local_update_list) = local_changeset
+
+
+ClientFinishInv ==
+    client_finished => ~connected
+
+
+NotAllowToCloseMultiTimes ==
+    LET
+        enable_cond ==
+            /\ wait_chan # nil
+            /\ \/ ENABLED Shutdown
+               \/ ENABLED ClientDoFinish
+    IN
+        enable_cond => ~global_chan[wait_chan].closed
 
 ====
