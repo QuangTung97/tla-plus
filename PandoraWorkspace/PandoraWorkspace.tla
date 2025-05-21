@@ -17,7 +17,7 @@ vars == <<mem, mem_state, disk, local_vars>>
 
 MemState == [
     key: Key,
-    status: {"Creating", "Ready"},
+    status: {"WriteLock", "NoLock"},
     deleted: BOOLEAN,
     update: 0..10
 ]
@@ -30,7 +30,11 @@ DiskState == [
 
 NullDiskState == DiskState \union {nil}
 
-PC == {"Init", "CreateKeyOnDisk", "RemoveFromMem", "Terminated"}
+PC == {
+    "Init", "CreateKeyOnDisk", "RemoveFromMem",
+    "DoActualDelete",
+    "Terminated"
+}
 
 -------------------------------------------------------
 
@@ -63,7 +67,7 @@ CreateNewKey(n, k) ==
     LET
         new_state == [
             key |-> k,
-            status |-> "Creating",
+            status |-> "WriteLock", \* Two phase locking here
             deleted |-> FALSE,
             update |-> 0
         ]
@@ -89,13 +93,17 @@ CreateKeyOnDisk(n) ==
 
         when_success ==
             /\ goto(n, "Terminated")
-            /\ mem_state' = [mem_state EXCEPT ![addr].status = "Ready"] \* need lock
             /\ disk' = [disk EXCEPT ![k] = [ready |-> TRUE]]
+            \* release lock
+            /\ mem_state' = [mem_state EXCEPT ![addr].status = "NoLock"]
             /\ update_local(local_state, n, nil)
 
         when_fail ==
             /\ goto(n, "RemoveFromMem")
-            /\ UNCHANGED mem_state
+            /\ mem_state' = [mem_state EXCEPT
+                    ![addr].deleted = TRUE,
+                    ![addr].status = "NoLock"
+                ]
             /\ UNCHANGED local_state
             /\ UNCHANGED disk
     IN
@@ -116,10 +124,49 @@ RemoveFromMem(n) ==
     /\ goto(n, "Terminated")
 
     /\ mem' = [mem EXCEPT ![k] = nil]
-    /\ mem_state' = [mem_state EXCEPT ![addr].deleted = TRUE]
     /\ update_local(local_state, n, nil)
 
+    /\ UNCHANGED mem_state
     /\ UNCHANGED disk
+
+
+CheckToDelete(n, k) ==
+    /\ pc[n] = "Init"
+    /\ mem[k] # nil
+
+    /\ goto(n, "DoActualDelete")
+    /\ update_local(local_state, n, mem[k])
+
+    /\ UNCHANGED disk
+    /\ UNCHANGED mem
+    /\ UNCHANGED mem_state
+
+
+DoActualDelete(n) ==
+    LET
+        addr == local_state[n]
+        k == mem_state[addr].key
+
+        do_nothing ==
+            /\ goto(n, "Terminated")
+            /\ UNCHANGED disk
+            /\ UNCHANGED mem_state
+
+        do_delete ==
+            /\ goto(n, "RemoveFromMem")
+            /\ mem_state' = [mem_state EXCEPT ![addr].deleted = TRUE]
+            /\ disk' = [disk EXCEPT ![k] = nil]
+    IN
+    /\ pc[n] = "DoActualDelete"
+    /\ mem_state[addr].status = "NoLock" \* wait for write lock
+
+    /\ IF mem_state[addr].deleted
+        THEN do_nothing
+        ELSE do_delete
+
+    /\ UNCHANGED mem
+    /\ UNCHANGED local_state
+
 
 -------------------------------------------------------
 
@@ -134,9 +181,11 @@ Terminated ==
 Next ==
     \/ \E n \in Node, k \in Key:
         \/ CreateNewKey(n, k)
+        \/ CheckToDelete(n, k)
     \/ \E n \in Node:
         \/ CreateKeyOnDisk(n)
         \/ RemoveFromMem(n)
+        \/ DoActualDelete(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -159,7 +208,8 @@ memMatchDisk ==
 WhenTerminatedInv ==
     TerminateCond =>
         /\ \A addr \in DOMAIN(mem_state):
-                memStateDeletedCond(addr)
+                /\ memStateDeletedCond(addr)
+                /\ mem_state[addr].status = "NoLock"
         /\ memMatchDisk
 
 ====
