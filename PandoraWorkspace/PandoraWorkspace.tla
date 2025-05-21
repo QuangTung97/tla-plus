@@ -17,7 +17,8 @@ vars == <<mem, mem_state, disk, local_vars>>
 
 MemState == [
     key: Key,
-    ready: BOOLEAN,
+    status: {"Creating", "Ready"},
+    deleted: BOOLEAN,
     update: 0..10
 ]
 
@@ -29,7 +30,7 @@ DiskState == [
 
 NullDiskState == DiskState \union {nil}
 
-PC == {"Init", "CreateKeyOnDisk", "Terminated"}
+PC == {"Init", "CreateKeyOnDisk", "RemoveFromMem", "Terminated"}
 
 -------------------------------------------------------
 
@@ -62,7 +63,8 @@ CreateNewKey(n, k) ==
     LET
         new_state == [
             key |-> k,
-            ready |-> FALSE,
+            status |-> "Creating",
+            deleted |-> FALSE,
             update |-> 0
         ]
 
@@ -87,14 +89,37 @@ CreateKeyOnDisk(n) ==
 
         when_success ==
             /\ goto(n, "Terminated")
-            /\ mem_state' = [mem_state EXCEPT ![addr].ready = TRUE]
+            /\ mem_state' = [mem_state EXCEPT ![addr].status = "Ready"] \* need lock
             /\ disk' = [disk EXCEPT ![k] = [ready |-> TRUE]]
             /\ update_local(local_state, n, nil)
+
+        when_fail ==
+            /\ goto(n, "RemoveFromMem")
+            /\ UNCHANGED mem_state
+            /\ UNCHANGED local_state
+            /\ UNCHANGED disk
     IN
     /\ pc[n] = "CreateKeyOnDisk"
     /\ \/ when_success
+       \/ when_fail
 
     /\ UNCHANGED mem
+
+
+RemoveFromMem(n) ==
+    LET
+        addr == local_state[n]
+        state == mem_state[addr]
+        k == state.key
+    IN
+    /\ pc[n] = "RemoveFromMem"
+    /\ goto(n, "Terminated")
+
+    /\ mem' = [mem EXCEPT ![k] = nil]
+    /\ mem_state' = [mem_state EXCEPT ![addr].deleted = TRUE]
+    /\ update_local(local_state, n, nil)
+
+    /\ UNCHANGED disk
 
 -------------------------------------------------------
 
@@ -111,8 +136,30 @@ Next ==
         \/ CreateNewKey(n, k)
     \/ \E n \in Node:
         \/ CreateKeyOnDisk(n)
+        \/ RemoveFromMem(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
+
+-------------------------------------------------------
+
+memStateDeletedCond(addr) ==
+    LET
+        k == mem_state[addr].key
+    IN
+    mem_state[addr].deleted <=> mem[k] # addr
+
+memMatchDisk ==
+    LET
+        mem_keys == {k \in Key: mem[k] # nil}
+        disk_keys == {k \in Key: disk[k] # nil}
+    IN
+        mem_keys = disk_keys
+
+WhenTerminatedInv ==
+    TerminateCond =>
+        /\ \A addr \in DOMAIN(mem_state):
+                memStateDeletedCond(addr)
+        /\ memMatchDisk
 
 ====
