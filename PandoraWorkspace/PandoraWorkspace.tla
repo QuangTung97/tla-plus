@@ -42,6 +42,7 @@ PC == {
     "RemoveFromMem",
     "SoftDeleteDoLock", "SoftDelete", "SoftDeleteFinish",
     "HardDelete",
+    "RecoverDoLock", "Recover", "RecoverFinish",
     "GetKey",
     "Terminated"
 }
@@ -320,6 +321,99 @@ HardDelete(n) ==
 
 -------------------------------------------------------
 
+RecoverOnMem(n, k) ==
+    LET
+        old_key == <<"deleted", k>>
+
+        new_state == [
+            key |-> k,
+            status |-> "WriteLock",
+            deleted |-> FALSE,
+            read_count |-> 0
+        ]
+
+        new_addr == Len(global_state')
+    IN
+    /\ pc[n] = "Init"
+    /\ mem[old_key] # nil
+    /\ mem_status[old_key] = "Ready"
+
+    /\ goto(n, "RecoverDoLock")
+    /\ global_state' = Append(global_state, new_state)
+    /\ mem' = [mem EXCEPT ![k] = new_addr]
+    /\ mem_status' = [mem_status EXCEPT
+            ![old_key] = "Deleting",
+            ![k] = "Creating"
+        ]
+
+    /\ update_local(local_addr, n, mem[old_key])
+    /\ update_local(local_new_addr, n, new_addr)
+
+    /\ UNCHANGED disk
+
+
+RecoverDoLock(n) ==
+    LET
+        addr == local_addr[n]
+    IN
+    /\ pc[n] = "RecoverDoLock"
+    /\ goto(n, "Recover")
+
+    /\ obtainWriteLock(addr)
+
+    /\ UNCHANGED disk
+    /\ memUnchanged
+
+
+Recover(n) ==
+    LET
+        old_addr == local_addr[n]
+        new_addr == local_new_addr[n]
+
+        old_key == global_state[old_addr].key
+        new_key == global_state[new_addr].key
+    IN
+    /\ pc[n] = "Recover"
+    /\ goto(n, "RecoverFinish")
+
+    /\ disk' = [disk EXCEPT
+            ![old_key] = nil,
+            ![new_key] = [ready |-> TRUE]
+        ]
+    /\ global_state' = [global_state EXCEPT
+            ![old_addr].deleted = TRUE,
+            ![old_addr].status = "NoLock",
+            ![new_addr].status = "NoLock"
+        ]
+
+    /\ memUnchanged
+
+
+RecoverFinish(n) ==
+    LET
+        old_addr == local_addr[n]
+        new_addr == local_new_addr[n]
+
+        old_key == global_state[old_addr].key
+        new_key == global_state[new_addr].key
+    IN
+    /\ pc[n] = "RecoverFinish"
+    /\ goto(n, "Terminated")
+
+    /\ mem' = [mem EXCEPT ![old_key] = nil]
+    /\ mem_status' = [mem_status EXCEPT
+            ![old_key] = nil,
+            ![new_key] = "Ready"
+        ]
+
+    /\ update_local(local_addr, n, nil)
+    /\ update_local(local_new_addr, n, nil)
+
+    /\ UNCHANGED global_state
+    /\ UNCHANGED disk
+
+-------------------------------------------------------
+
 getKeyUnchanged ==
     /\ UNCHANGED global_state
     /\ UNCHANGED mem
@@ -386,6 +480,7 @@ Next ==
         \/ CreateNewKey(n, k)
         \/ SoftDeleteOnMem(n, k)
         \/ HardDeleteOnMem(n, k)
+        \/ RecoverOnMem(n, k)
         \/ GetKeyOnMem(n, k)
     \/ \E n \in Node:
         \/ CreateKeyOnDisk(n)
@@ -397,6 +492,10 @@ Next ==
         \/ SoftDeleteFinish(n)
 
         \/ HardDelete(n)
+
+        \/ RecoverDoLock(n)
+        \/ Recover(n)
+        \/ RecoverFinish(n)
 
         \/ GetKeyFound(n)
         \/ GetKeyNotFound(n)
