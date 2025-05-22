@@ -42,7 +42,7 @@ PC == {
     "RemoveFromMem",
     "SoftDeleteDoLock", "SoftDelete", "SoftDeleteFinish",
     "HardDeleteDoLock", "HardDelete",
-    "RecoverDoLock", "Recover", "RecoverFinish",
+    "RecoverDoLock", "Recover", "RecoverFinish", "RecoverRollback",
     "GetKey",
     "Terminated"
 }
@@ -390,19 +390,31 @@ Recover(n) ==
 
         old_key == global_state[old_addr].key
         new_key == global_state[new_addr].key
+
+        when_success ==
+            /\ goto(n, "RecoverFinish")
+            /\ disk' = [disk EXCEPT
+                    ![old_key] = nil,
+                    ![new_key] = [ready |-> TRUE]
+                ]
+            /\ global_state' = [global_state EXCEPT
+                    ![old_addr].deleted = TRUE,
+                    ![old_addr].status = "NoLock",
+                    ![new_addr].status = "NoLock"
+                ]
+
+        when_fail ==
+            /\ goto(n, "RecoverRollback")
+            /\ global_state' = [global_state EXCEPT
+                    ![old_addr].status = "NoLock",
+                    ![new_addr].status = "NoLock",
+                    ![new_addr].deleted = TRUE
+                ]
+            /\ UNCHANGED disk
     IN
     /\ pc[n] = "Recover"
-    /\ goto(n, "RecoverFinish")
-
-    /\ disk' = [disk EXCEPT
-            ![old_key] = nil,
-            ![new_key] = [ready |-> TRUE]
-        ]
-    /\ global_state' = [global_state EXCEPT
-            ![old_addr].deleted = TRUE,
-            ![old_addr].status = "NoLock",
-            ![new_addr].status = "NoLock"
-        ]
+    /\ \/ when_success
+       \/ when_fail
 
     /\ memUnchanged
 
@@ -422,6 +434,30 @@ RecoverFinish(n) ==
     /\ mem_status' = [mem_status EXCEPT
             ![old_key] = nil,
             ![new_key] = "Ready"
+        ]
+
+    /\ update_local(local_addr, n, nil)
+    /\ update_local(local_new_addr, n, nil)
+
+    /\ UNCHANGED global_state
+    /\ UNCHANGED disk
+
+
+RecoverRollback(n) ==
+    LET
+        old_addr == local_addr[n]
+        new_addr == local_new_addr[n]
+
+        old_key == global_state[old_addr].key
+        new_key == global_state[new_addr].key
+    IN
+    /\ pc[n] = "RecoverRollback"
+    /\ goto(n, "Terminated")
+
+    /\ mem' = [mem EXCEPT ![new_key] = nil]
+    /\ mem_status' = [mem_status EXCEPT
+            ![old_key] = "Ready",
+            ![new_key] = nil
         ]
 
     /\ update_local(local_addr, n, nil)
@@ -515,6 +551,7 @@ Next ==
         \/ RecoverDoLock(n)
         \/ Recover(n)
         \/ RecoverFinish(n)
+        \/ RecoverRollback(n)
 
         \/ GetKeyFound(n)
         \/ GetKeyNotFound(n)
