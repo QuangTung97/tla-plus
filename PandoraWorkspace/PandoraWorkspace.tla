@@ -40,8 +40,9 @@ PC == {
     "Init",
     "CreateKeyOnDisk", "UpdateStatusToReady",
     "RemoveFromMem",
-    "SoftDelete", "SoftDeleteFinish",
+    "SoftDeleteDoLock", "SoftDelete", "SoftDeleteFinish",
     "HardDelete",
+    "GetKey",
     "Terminated"
 }
 
@@ -167,10 +168,10 @@ RemoveFromMem(n) ==
     /\ UNCHANGED global_state
     /\ UNCHANGED disk
 
+-------------------------------------------------------
 
 update_status_to_deleting(old_status, k) ==
     [old_status EXCEPT ![k] = "Deleting"]
-
 
 
 SoftDeleteOnMem(n, k) ==
@@ -191,7 +192,7 @@ SoftDeleteOnMem(n, k) ==
         new_addr == Len(global_state')
     IN
     /\ pc[n] = "Init"
-    /\ goto(n, "SoftDelete")
+    /\ goto(n, "SoftDeleteDoLock")
 
     /\ mem[k] # nil
     /\ mem_status[k] = "Ready"
@@ -204,6 +205,30 @@ SoftDeleteOnMem(n, k) ==
     /\ update_local(local_new_addr, n, new_addr)
 
     /\ UNCHANGED disk
+
+
+memUnchanged ==
+    /\ UNCHANGED <<local_addr, local_new_addr>>
+    /\ UNCHANGED mem
+    /\ UNCHANGED mem_status
+
+
+obtainWriteLock(addr) ==
+    /\ global_state[addr].status = "NoLock"
+    /\ global_state' = [global_state EXCEPT ![addr].status = "WriteLock"]
+
+
+SoftDeleteDoLock(n) ==
+    LET
+        addr == local_addr[n]
+    IN
+    /\ pc[n] = "SoftDeleteDoLock"
+    /\ goto(n, "SoftDelete")
+
+    /\ obtainWriteLock(addr)
+
+    /\ UNCHANGED disk
+    /\ memUnchanged
 
 
 SoftDelete(n) == \* TODO on fail
@@ -219,9 +244,9 @@ SoftDelete(n) == \* TODO on fail
     /\ pc[n] = "SoftDelete"
     /\ goto(n, "SoftDeleteFinish")
 
-    /\ old_state.status = "NoLock"
     /\ global_state' = [global_state EXCEPT
             ![old_addr].deleted = TRUE,
+            ![old_addr].status = "NoLock",
             ![new_addr].status = "NoLock"
         ]
 
@@ -257,6 +282,7 @@ SoftDeleteFinish(n) ==
     /\ UNCHANGED global_state
     /\ UNCHANGED disk
 
+-------------------------------------------------------
 
 HardDeleteOnMem(n, k) ==
     LET
@@ -294,6 +320,59 @@ HardDelete(n) ==
 
 -------------------------------------------------------
 
+getKeyUnchanged ==
+    /\ UNCHANGED global_state
+    /\ UNCHANGED mem
+    /\ UNCHANGED mem_status
+    /\ UNCHANGED disk
+    /\ UNCHANGED local_new_addr
+
+GetKeyOnMem(n, k) ==
+    LET
+        when_found ==
+            /\ mem[k] # nil
+            /\ goto(n, "GetKey")
+            /\ update_local(local_addr, n, mem[k])
+    IN
+    /\ pc[n] = "Init"
+    /\ \/ when_found
+
+    /\ getKeyUnchanged
+
+
+GetKeyFound(n) ==
+    LET
+        addr == local_addr[n]
+        state == global_state[addr]
+        k == state.key
+    IN
+    /\ pc[n] = "GetKey"
+    /\ state.status = "NoLock"
+    /\ ~state.deleted
+
+    /\ goto(n, "Terminated")
+    /\ update_local(local_addr, n, nil)
+
+    /\ getKeyUnchanged
+
+
+GetKeyNotFound(n) ==
+    LET
+        addr == local_addr[n]
+        state == global_state[addr]
+        k == state.key
+    IN
+    /\ pc[n] = "GetKey"
+    /\ state.status = "NoLock"
+    /\ state.deleted
+
+    /\ goto(n, "Terminated")
+    /\ update_local(local_addr, n, nil)
+
+    /\ getKeyUnchanged
+
+-------------------------------------------------------
+
 TerminateCond ==
     /\ \A n \in Node: pc[n] = "Terminated"
 
@@ -307,13 +386,20 @@ Next ==
         \/ CreateNewKey(n, k)
         \/ SoftDeleteOnMem(n, k)
         \/ HardDeleteOnMem(n, k)
+        \/ GetKeyOnMem(n, k)
     \/ \E n \in Node:
         \/ CreateKeyOnDisk(n)
         \/ UpdateStatusToReady(n)
         \/ RemoveFromMem(n)
+
+        \/ SoftDeleteDoLock(n)
         \/ SoftDelete(n)
         \/ SoftDeleteFinish(n)
+
         \/ HardDelete(n)
+
+        \/ GetKeyFound(n)
+        \/ GetKeyNotFound(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -343,14 +429,20 @@ localVarsAreNil ==
         /\ local_addr[n] = nil
         /\ local_new_addr[n] = nil
 
-WhenTerminatedInv ==
+WhenTerminatedGlobalStateInv ==
     TerminateCond =>
-        /\ \A addr \in DOMAIN(global_state):
-                /\ memStateDeletedCond(addr)
-                /\ global_state[addr].status = "NoLock"
-        /\ memMatchDisk
-        /\ memStatusReadyOrNil
-        /\ localVarsAreNil
+        \A addr \in DOMAIN(global_state):
+            /\ memStateDeletedCond(addr)
+            /\ global_state[addr].status = "NoLock"
+
+WhenTerminatedMemMatchDiskInv ==
+    TerminateCond => memMatchDisk
+
+WhenTerminatedMemStatusInv ==
+    TerminateCond => memStatusReadyOrNil
+
+WhenTerminatedLocalVarsInv ==
+    TerminateCond => localVarsAreNil
 
 
 MemStatusInv ==
@@ -366,8 +458,17 @@ MustNotConcurrentWriteToDisk ==
             \/ ENABLED HardDelete(n)
 
         writing_set == {n \in Node: writing_to_disk(n)}
-    IN
-        Cardinality(writing_set) <= 1
 
+        reading_set == {n \in Node: ENABLED GetKeyFound(n)}
+    IN
+        /\ Cardinality(writing_set) <= 1
+        /\ \/ writing_set = {}
+           \/ reading_set = {}
+
+
+CanNotBothGetFoundAndNotFound ==
+    \A n \in Node:
+        \/ ~(ENABLED GetKeyFound(n))
+        \/ ~(ENABLED GetKeyNotFound(n))
 
 ====
