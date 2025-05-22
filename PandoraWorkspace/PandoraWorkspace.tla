@@ -1,5 +1,5 @@
 ------ MODULE PandoraWorkspace ----
-EXTENDS TLC, Sequences, Naturals
+EXTENDS TLC, Sequences, Naturals, FiniteSets
 
 CONSTANTS Node, Key, nil
 
@@ -41,6 +41,7 @@ PC == {
     "CreateKeyOnDisk", "UpdateStatusToReady",
     "RemoveFromMem",
     "SoftDelete", "SoftDeleteFinish",
+    "HardDelete",
     "Terminated"
 }
 
@@ -256,6 +257,41 @@ SoftDeleteFinish(n) ==
     /\ UNCHANGED global_state
     /\ UNCHANGED disk
 
+
+HardDeleteOnMem(n, k) ==
+    LET
+        new_key == <<"deleted", k>>
+    IN
+    /\ pc[n] = "Init"
+    /\ mem[new_key] # nil
+    /\ mem_status[new_key] = "Ready"
+
+    /\ goto(n, "HardDelete")
+    /\ mem_status' = [mem_status EXCEPT ![new_key] = "Deleting"]
+
+    /\ update_local(local_addr, n, mem[new_key])
+    /\ UNCHANGED local_new_addr
+
+    /\ UNCHANGED global_state
+    /\ UNCHANGED mem
+    /\ UNCHANGED disk
+
+
+HardDelete(n) ==
+    LET
+        addr == local_addr[n]
+        k == global_state[addr].key
+    IN
+    /\ pc[n] = "HardDelete"
+    /\ goto(n, "RemoveFromMem")
+
+    /\ disk' = [disk EXCEPT ![k] = nil]
+    /\ global_state' = [global_state EXCEPT ![addr].deleted = TRUE]
+
+    /\ UNCHANGED <<local_addr, local_new_addr>>
+    /\ UNCHANGED <<mem, mem_status>>
+
+
 -------------------------------------------------------
 
 TerminateCond ==
@@ -270,12 +306,14 @@ Next ==
     \/ \E n \in Node, k \in Key:
         \/ CreateNewKey(n, k)
         \/ SoftDeleteOnMem(n, k)
+        \/ HardDeleteOnMem(n, k)
     \/ \E n \in Node:
         \/ CreateKeyOnDisk(n)
         \/ UpdateStatusToReady(n)
         \/ RemoveFromMem(n)
         \/ SoftDelete(n)
         \/ SoftDeleteFinish(n)
+        \/ HardDelete(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -300,6 +338,11 @@ memStatusReadyOrNil ==
         \/ mem_status[k] = nil
         \/ mem_status[k] = "Ready"
 
+localVarsAreNil ==
+    \A n \in Node:
+        /\ local_addr[n] = nil
+        /\ local_new_addr[n] = nil
+
 WhenTerminatedInv ==
     TerminateCond =>
         /\ \A addr \in DOMAIN(global_state):
@@ -307,10 +350,24 @@ WhenTerminatedInv ==
                 /\ global_state[addr].status = "NoLock"
         /\ memMatchDisk
         /\ memStatusReadyOrNil
+        /\ localVarsAreNil
 
 
 MemStatusInv ==
     \A k \in DeleteKey:
         mem_status[k] # nil <=> mem[k] # nil
+
+
+MustNotConcurrentWriteToDisk ==
+    LET
+        writing_to_disk(n) ==
+            \/ ENABLED CreateKeyOnDisk(n)
+            \/ ENABLED SoftDelete(n)
+            \/ ENABLED HardDelete(n)
+
+        writing_set == {n \in Node: writing_to_disk(n)}
+    IN
+        Cardinality(writing_set) <= 1
+
 
 ====
