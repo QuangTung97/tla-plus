@@ -559,7 +559,12 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 -------------------------------------------------------
+
+AlwaysTerminate == []<>TerminateCond
+
 
 memStateDeletedCond(addr) ==
     LET
