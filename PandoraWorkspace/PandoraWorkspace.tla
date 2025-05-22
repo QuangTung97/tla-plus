@@ -646,6 +646,67 @@ CanNotBothGetFoundAndNotFound ==
         \/ ~(ENABLED GetKeyNotFound(n))
 
 
+SoftDeleteInv ==
+    \A n \in Node:
+        LET
+            old_addr == local_addr[n]
+            new_addr == local_new_addr[n]
+
+            old_key == global_state[old_addr].key
+            new_key == global_state[new_addr].key
+
+            pre_cond ==
+                /\ ENABLED SoftDelete(n)
+
+            cond ==
+                /\ old_addr # new_addr
+                /\ old_key # new_key
+                /\ disk[old_key] # nil
+                /\ disk[new_key] = nil
+                /\ global_state[old_addr].status = "WriteLock"
+                /\ global_state[new_addr].status = "WriteLock"
+        IN
+            pre_cond => cond
+
+
+RecoverInv ==
+    \A n \in Node:
+        LET
+            old_addr == local_addr[n]
+            new_addr == local_new_addr[n]
+
+            old_key == global_state[old_addr].key
+            new_key == global_state[new_addr].key
+
+            pre_cond ==
+                /\ ENABLED Recover(n)
+
+            cond ==
+                /\ old_addr # new_addr
+                /\ old_key # new_key
+                /\ disk[old_key] # nil
+                /\ disk[new_key] = nil
+                /\ global_state[old_addr].status = "WriteLock"
+                /\ global_state[new_addr].status = "WriteLock"
+        IN
+            pre_cond => cond
+
+HardDeleteInv ==
+    \A n \in Node:
+        LET
+            addr == local_addr[n]
+            key == global_state[addr].key
+
+            pre_cond ==
+                /\ ENABLED HardDelete(n)
+
+            cond ==
+                /\ disk[key] # nil
+                /\ global_state[addr].status = "WriteLock"
+        IN
+            pre_cond => cond
+
+
 ReverseCond ==
     \A n \in Node: ~(ENABLED HardDelete(n))
 
