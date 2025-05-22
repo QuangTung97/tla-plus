@@ -41,7 +41,7 @@ PC == {
     "CreateKeyOnDisk", "UpdateStatusToReady",
     "RemoveFromMem",
     "SoftDeleteDoLock", "SoftDelete", "SoftDeleteFinish",
-    "HardDelete",
+    "HardDeleteDoLock", "HardDelete",
     "RecoverDoLock", "Recover", "RecoverFinish",
     "GetKey",
     "Terminated"
@@ -197,6 +197,7 @@ SoftDeleteOnMem(n, k) ==
 
     /\ mem[k] # nil
     /\ mem_status[k] = "Ready"
+    /\ mem[new_key] = nil \* Special Condition
 
     /\ mem_status' = final_status
     /\ global_state' = Append(global_state, new_state)
@@ -293,7 +294,7 @@ HardDeleteOnMem(n, k) ==
     /\ mem[new_key] # nil
     /\ mem_status[new_key] = "Ready"
 
-    /\ goto(n, "HardDelete")
+    /\ goto(n, "HardDeleteDoLock")
     /\ mem_status' = [mem_status EXCEPT ![new_key] = "Deleting"]
 
     /\ update_local(local_addr, n, mem[new_key])
@@ -302,6 +303,19 @@ HardDeleteOnMem(n, k) ==
     /\ UNCHANGED global_state
     /\ UNCHANGED mem
     /\ UNCHANGED disk
+
+
+HardDeleteDoLock(n) ==
+    LET
+        addr == local_addr[n]
+    IN
+    /\ pc[n] = "HardDeleteDoLock"
+
+    /\ goto(n, "HardDelete")
+    /\ obtainWriteLock(addr)
+
+    /\ UNCHANGED disk
+    /\ memUnchanged
 
 
 HardDelete(n) ==
@@ -313,7 +327,10 @@ HardDelete(n) ==
     /\ goto(n, "RemoveFromMem")
 
     /\ disk' = [disk EXCEPT ![k] = nil]
-    /\ global_state' = [global_state EXCEPT ![addr].deleted = TRUE]
+    /\ global_state' = [global_state EXCEPT
+            ![addr].deleted = TRUE,
+            ![addr].status = "NoLock"
+        ]
 
     /\ UNCHANGED <<local_addr, local_new_addr>>
     /\ UNCHANGED <<mem, mem_status>>
@@ -337,6 +354,7 @@ RecoverOnMem(n, k) ==
     /\ pc[n] = "Init"
     /\ mem[old_key] # nil
     /\ mem_status[old_key] = "Ready"
+    /\ mem[k] = nil
 
     /\ goto(n, "RecoverDoLock")
     /\ global_state' = Append(global_state, new_state)
@@ -491,6 +509,7 @@ Next ==
         \/ SoftDelete(n)
         \/ SoftDeleteFinish(n)
 
+        \/ HardDeleteDoLock(n)
         \/ HardDelete(n)
 
         \/ RecoverDoLock(n)
@@ -554,7 +573,7 @@ MustNotConcurrentWriteToDisk ==
         writing_to_disk(n) ==
             \/ ENABLED CreateKeyOnDisk(n)
             \/ ENABLED SoftDelete(n)
-            \/ ENABLED HardDelete(n)
+            \/ ENABLED Recover(n)
 
         writing_set == {n \in Node: writing_to_disk(n)}
 
@@ -565,9 +584,27 @@ MustNotConcurrentWriteToDisk ==
            \/ reading_set = {}
 
 
+MustNotConcurrentWriteToDiskHardDelete ==
+    LET
+        writing_to_disk(n) ==
+            \/ ENABLED SoftDelete(n)
+            \/ ENABLED Recover(n)
+            \/ ENABLED HardDelete(n)
+
+        writing_set == {n \in Node: writing_to_disk(n)}
+
+        reading_set == {n \in Node: ENABLED GetKeyFound(n)}
+    IN
+        /\ Cardinality(writing_set) <= 1
+
+
 CanNotBothGetFoundAndNotFound ==
     \A n \in Node:
         \/ ~(ENABLED GetKeyFound(n))
         \/ ~(ENABLED GetKeyNotFound(n))
+
+
+ReverseCond ==
+    \A n \in Node: ~(ENABLED HardDelete(n))
 
 ====
