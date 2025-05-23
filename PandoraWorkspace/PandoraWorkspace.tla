@@ -6,14 +6,14 @@ CONSTANTS Node, Key, nil
 VARIABLES
     mem, global_state, mem_status, deleted_keys, disk,
     pc, local_addr, local_new_addr,
-    job_pc, job_disk_keys, job_loading
+    job_pc, job_mem_keys, job_disk_keys, job_loading
 
 local_vars == <<
     pc, local_addr, local_new_addr
 >>
 
 job_vars == <<
-    job_pc, job_disk_keys, job_loading
+    job_pc, job_mem_keys, job_disk_keys, job_loading
 >>
 
 vars == <<
@@ -54,7 +54,10 @@ PC == {
     "Terminated"
 }
 
-JobPC == {"Init", "JobLoadDisk",  "JobInsertKey", "Terminated"}
+JobPC == {
+    "Init", "JobLoadDisk",
+    "JobDeleteKey", "JobInsertKey", "Terminated"
+}
 
 -------------------------------------------------------
 
@@ -70,6 +73,7 @@ TypeOK ==
     /\ local_new_addr \in [Node -> NullAddr]
 
     /\ job_pc \in JobPC
+    /\ job_mem_keys \subseteq DeleteKey
     /\ job_disk_keys \subseteq DeleteKey
     /\ job_loading \in BOOLEAN
 
@@ -85,6 +89,7 @@ Init ==
     /\ local_new_addr = [n \in Node |-> nil]
 
     /\ job_pc = "Init"
+    /\ job_mem_keys = {}
     /\ job_disk_keys = {}
     /\ job_loading = FALSE
 
@@ -576,9 +581,13 @@ jobUnchanged ==
 
 
 JobStartLoading ==
+    LET
+        mem_keys == {k \in DeleteKey: mem[k] # nil}
+    IN
     /\ job_pc = "Init"
     /\ job_pc' = "JobLoadDisk"
     /\ job_loading' = TRUE
+    /\ job_mem_keys' = mem_keys
 
     /\ UNCHANGED job_disk_keys
     /\ UNCHANGED global_state
@@ -592,10 +601,56 @@ JobLoadDisk ==
         disk_keys == {k \in DeleteKey: disk[k] # nil}
     IN
     /\ job_pc = "JobLoadDisk"
-    /\ job_pc' = "JobInsertKey"
+    /\ job_pc' = "JobDeleteKey"
     /\ job_disk_keys' = disk_keys
 
     /\ UNCHANGED job_loading
+    /\ UNCHANGED global_state
+    /\ UNCHANGED <<mem, mem_status>>
+    /\ UNCHANGED job_mem_keys
+    /\ UNCHANGED deleted_keys
+    /\ jobUnchanged
+
+
+jobNeedDeleteSet == (job_mem_keys \ job_disk_keys)
+
+JobDeleteKey(k) ==
+    LET
+        delete_cond ==
+            /\ mem_status[k] = "Ready"
+
+        do_delete ==
+            /\ UNCHANGED job_pc \* TODO
+            /\ mem' = [mem EXCEPT ![k] = nil]
+            /\ mem_status' = [mem_status EXCEPT ![k] = nil]
+
+        do_nothing ==
+            /\ UNCHANGED job_pc
+            /\ UNCHANGED <<mem, mem_status>>
+    IN
+    /\ job_pc = "JobDeleteKey"
+    /\ k \in jobNeedDeleteSet
+    /\ job_mem_keys' = job_mem_keys \ {k}
+
+    /\ IF delete_cond
+        THEN do_delete
+        ELSE do_nothing
+
+    /\ UNCHANGED deleted_keys
+    /\ UNCHANGED job_loading
+    /\ UNCHANGED job_disk_keys
+    /\ UNCHANGED global_state
+    /\ jobUnchanged
+
+
+JobDeleteFinish ==
+    /\ job_pc = "JobDeleteKey"
+    /\ jobNeedDeleteSet = {}
+    /\ job_pc' = "JobInsertKey"
+
+    /\ UNCHANGED job_loading
+    /\ UNCHANGED job_mem_keys
+    /\ UNCHANGED job_disk_keys
     /\ UNCHANGED global_state
     /\ UNCHANGED <<mem, mem_status>>
     /\ UNCHANGED deleted_keys
@@ -632,6 +687,7 @@ JobInsertKey(k) ==
         THEN when_insert
         ELSE when_nothing
 
+    /\ UNCHANGED job_mem_keys
     /\ UNCHANGED job_pc
     /\ UNCHANGED job_loading
     /\ UNCHANGED deleted_keys
@@ -646,6 +702,7 @@ JobInsertFinish ==
     /\ job_loading' = FALSE
     /\ deleted_keys' = {}
 
+    /\ UNCHANGED job_mem_keys
     /\ UNCHANGED job_disk_keys
     /\ UNCHANGED global_state
     /\ UNCHANGED <<mem, mem_status>>
@@ -692,7 +749,9 @@ Next ==
     \/ JobStartLoading
     \/ JobLoadDisk
     \/ \E k \in DeleteKey:
+        \/ JobDeleteKey(k)
         \/ JobInsertKey(k)
+    \/ JobDeleteFinish
     \/ JobInsertFinish
 
     \/ Terminated
@@ -746,6 +805,7 @@ WhenTerminatedLocalVarsInv ==
 
 WhenTerminatedJobInv ==
     TerminateCond =>
+        /\ job_mem_keys = {}
         /\ job_disk_keys = {}
         /\ job_loading = FALSE
         /\ deleted_keys = {}
@@ -852,6 +912,10 @@ HardDeleteInv ==
         IN
             pre_cond => cond
 
+
+JobDeleteInv ==
+    \/ ~(\E k \in DeleteKey: ENABLED JobDeleteKey(k))
+    \/ ~(ENABLED JobDeleteFinish)
 
 JobInsertInv ==
     \/ ~(\E k \in DeleteKey: ENABLED JobInsertKey(k))
