@@ -4,7 +4,7 @@ EXTENDS TLC, Sequences, Naturals, FiniteSets
 CONSTANTS Node, Key, nil
 
 VARIABLES
-    mem, global_state, mem_status, deleted_keys, disk,
+    mem, global_state, mem_status, added_keys, deleted_keys, disk,
     pc, local_addr, local_new_addr,
     job_pc, job_mem_keys, job_disk_keys, job_loading
 
@@ -17,7 +17,7 @@ job_vars == <<
 >>
 
 vars == <<
-    mem, global_state, mem_status, deleted_keys, disk,
+    mem, global_state, mem_status, added_keys, deleted_keys, disk,
     local_vars, job_vars
 >>
 
@@ -65,6 +65,7 @@ TypeOK ==
     /\ mem \in [DeleteKey -> NullAddr]
     /\ global_state \in Seq(MemState)
     /\ mem_status \in [DeleteKey -> NullMemStatus]
+    /\ added_keys \subseteq DeleteKey
     /\ deleted_keys \subseteq DeleteKey
     /\ disk \in [DeleteKey -> NullDiskState]
 
@@ -81,6 +82,7 @@ Init ==
     /\ mem = [k \in DeleteKey |-> nil]
     /\ global_state = <<>>
     /\ mem_status = [k \in DeleteKey |-> nil]
+    /\ added_keys = {}
     /\ deleted_keys = {}
     /\ disk = [k \in DeleteKey |-> nil]
 
@@ -105,6 +107,21 @@ update_status_to_creating(old_status, k) ==
     [old_status EXCEPT ![k] = "Creating"]
 
 
+jobKeysUnchanged ==
+    /\ UNCHANGED added_keys
+    /\ UNCHANGED deleted_keys
+
+addToAddedKeys(k) ==
+    IF job_loading
+        THEN added_keys' = added_keys \union {k}
+        ELSE UNCHANGED added_keys
+
+addToDeletedKeys(k) ==
+    IF job_loading
+        THEN deleted_keys' = deleted_keys \union {k}
+        ELSE UNCHANGED deleted_keys
+
+
 CreateNewKey(n, k) ==
     LET
         new_state == [
@@ -127,7 +144,7 @@ CreateNewKey(n, k) ==
     /\ UNCHANGED local_new_addr
     /\ UNCHANGED disk
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 
 CreateKeyOnDisk(n) ==
@@ -159,7 +176,7 @@ CreateKeyOnDisk(n) ==
     /\ UNCHANGED mem
     /\ UNCHANGED mem_status
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 
 UpdateStatusToReady(n) ==
@@ -173,18 +190,13 @@ UpdateStatusToReady(n) ==
     /\ mem_status' = [mem_status EXCEPT ![k] = "Ready"]
     /\ update_local(local_addr, n, nil)
     /\ UNCHANGED mem
+    /\ addToAddedKeys(k)
 
     /\ UNCHANGED local_new_addr
     /\ UNCHANGED global_state
     /\ UNCHANGED disk
     /\ UNCHANGED job_vars
     /\ UNCHANGED deleted_keys
-
-
-addToDeletedKeys(k) ==
-    IF job_loading
-        THEN deleted_keys' = deleted_keys \union {k}
-        ELSE UNCHANGED deleted_keys
 
 
 RemoveFromMem(n) ==
@@ -205,6 +217,7 @@ RemoveFromMem(n) ==
     /\ UNCHANGED global_state
     /\ UNCHANGED disk
     /\ UNCHANGED job_vars
+    /\ UNCHANGED added_keys
 
 -------------------------------------------------------
 
@@ -244,7 +257,7 @@ SoftDeleteOnMem(n, k) ==
 
     /\ UNCHANGED disk
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 
 memUnchanged ==
@@ -252,7 +265,7 @@ memUnchanged ==
     /\ UNCHANGED mem
     /\ UNCHANGED mem_status
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 
 obtainWriteLock(addr) ==
@@ -300,7 +313,7 @@ SoftDelete(n) == \* TODO on fail
     /\ UNCHANGED mem
     /\ UNCHANGED mem_status
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 
 SoftDeleteFinish(n) ==
@@ -318,6 +331,7 @@ SoftDeleteFinish(n) ==
             ![k] = nil,
             ![new_key] = "Ready"
         ]
+    /\ addToAddedKeys(new_key)
     /\ addToDeletedKeys(k)
 
     /\ update_local(local_addr, n, nil)
@@ -347,7 +361,7 @@ HardDeleteOnMem(n, k) ==
     /\ UNCHANGED mem
     /\ UNCHANGED disk
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 
 HardDeleteDoLock(n) ==
@@ -380,7 +394,7 @@ HardDelete(n) ==
     /\ UNCHANGED <<local_addr, local_new_addr>>
     /\ UNCHANGED <<mem, mem_status>>
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 
 -------------------------------------------------------
@@ -415,7 +429,7 @@ RecoverOnMem(n, k) ==
 
     /\ UNCHANGED disk
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 
 RecoverDoLock(n) ==
@@ -483,6 +497,7 @@ RecoverFinish(n) ==
             ![old_key] = nil,
             ![new_key] = "Ready"
         ]
+    /\ addToAddedKeys(new_key)
     /\ addToDeletedKeys(old_key)
 
     /\ update_local(local_addr, n, nil)
@@ -516,7 +531,7 @@ RecoverRollback(n) ==
     /\ UNCHANGED global_state
     /\ UNCHANGED disk
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 -------------------------------------------------------
 
@@ -527,7 +542,7 @@ getKeyUnchanged ==
     /\ UNCHANGED disk
     /\ UNCHANGED local_new_addr
     /\ UNCHANGED job_vars
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
 
 GetKeyOnMem(n, k) ==
     LET
@@ -592,7 +607,7 @@ JobStartLoading ==
     /\ UNCHANGED job_disk_keys
     /\ UNCHANGED global_state
     /\ UNCHANGED <<mem, mem_status>>
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
     /\ jobUnchanged
 
 
@@ -608,7 +623,7 @@ JobLoadDisk ==
     /\ UNCHANGED global_state
     /\ UNCHANGED <<mem, mem_status>>
     /\ UNCHANGED job_mem_keys
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
     /\ jobUnchanged
 
 
@@ -618,15 +633,20 @@ JobDeleteKey(k) ==
     LET
         delete_cond ==
             /\ mem_status[k] = "Ready"
+            /\ k \notin added_keys
 
         do_delete ==
-            /\ UNCHANGED job_pc \* TODO
+            /\ UNCHANGED job_pc
             /\ mem' = [mem EXCEPT ![k] = nil]
             /\ mem_status' = [mem_status EXCEPT ![k] = nil]
+            /\ global_state' = [global_state EXCEPT
+                    ![mem[k]].deleted = TRUE
+                ]
 
         do_nothing ==
             /\ UNCHANGED job_pc
             /\ UNCHANGED <<mem, mem_status>>
+            /\ UNCHANGED global_state
     IN
     /\ job_pc = "JobDeleteKey"
     /\ k \in jobNeedDeleteSet
@@ -636,24 +656,24 @@ JobDeleteKey(k) ==
         THEN do_delete
         ELSE do_nothing
 
-    /\ UNCHANGED deleted_keys
     /\ UNCHANGED job_loading
     /\ UNCHANGED job_disk_keys
-    /\ UNCHANGED global_state
+    /\ jobKeysUnchanged
     /\ jobUnchanged
 
 
 JobDeleteFinish ==
     /\ job_pc = "JobDeleteKey"
     /\ jobNeedDeleteSet = {}
+
     /\ job_pc' = "JobInsertKey"
+    /\ job_mem_keys' = {}
 
     /\ UNCHANGED job_loading
-    /\ UNCHANGED job_mem_keys
     /\ UNCHANGED job_disk_keys
     /\ UNCHANGED global_state
     /\ UNCHANGED <<mem, mem_status>>
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
     /\ jobUnchanged
 
 
@@ -690,7 +710,7 @@ JobInsertKey(k) ==
     /\ UNCHANGED job_mem_keys
     /\ UNCHANGED job_pc
     /\ UNCHANGED job_loading
-    /\ UNCHANGED deleted_keys
+    /\ jobKeysUnchanged
     /\ jobUnchanged
 
 
@@ -700,6 +720,7 @@ JobInsertFinish ==
 
     /\ job_pc' = "Terminated"
     /\ job_loading' = FALSE
+    /\ added_keys' = {}
     /\ deleted_keys' = {}
 
     /\ UNCHANGED job_mem_keys
