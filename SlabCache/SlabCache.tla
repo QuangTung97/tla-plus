@@ -28,7 +28,7 @@ SlabItem == [
 ]
 
 PC == {
-    "Init", "SetItemUnlock", "DeleteItem",
+    "Init", "SetItemUnlock", "FreeItem",
     "GetUnlockItem", "ReadValue",
     "Terminated"
 }
@@ -125,7 +125,7 @@ SetItemUnlock(n) ==
             /\ UNCHANGED local_del_addr
 
         with_del ==
-            /\ goto(n, "DeleteItem")
+            /\ goto(n, "FreeItem")
             /\ UNCHANGED local_del_addr
     IN
     /\ pc[n] = "SetItemUnlock"
@@ -141,11 +141,11 @@ SetItemUnlock(n) ==
     /\ UNCHANGED table
 
 
-DeleteItem(n) ==
+FreeItem(n) ==
     LET
         addr == local_del_addr[n]
     IN
-    /\ pc[n] = "DeleteItem"
+    /\ pc[n] = "FreeItem"
     /\ goto(n, "Terminated")
 
     /\ global_mem' = [global_mem EXCEPT ![addr].freed = @ + 1]
@@ -190,14 +190,23 @@ ReadValue(n) ==
     LET
         addr == local_addr[n]
         s == global_mem[addr].slot
+
+        when_need_free ==
+            /\ goto(n, "FreeItem")
+            /\ local_del_addr' = [local_del_addr EXCEPT ![n] = addr]
+
+        when_not_free ==
+            /\ goto(n, "Terminated")
+            /\ UNCHANGED local_del_addr
     IN
     /\ pc[n] = "ReadValue"
-    /\ goto(n, "Terminated")
 
     /\ local_addr' = [local_addr EXCEPT ![n] = nil]
-    /\ UNCHANGED global_mem
+    /\ global_mem' = [global_mem EXCEPT ![addr].ref = @ - 1]
+    /\ IF global_mem'[addr].ref = 0
+        THEN when_need_free
+        ELSE when_not_free
 
-    /\ UNCHANGED local_del_addr
     /\ UNCHANGED next_val
     /\ UNCHANGED <<table, table_lock>>
 
@@ -217,14 +226,20 @@ Next ==
         \/ GetItem(n, s)
     \/ \E n \in Node:
         \/ SetItemUnlock(n)
-        \/ DeleteItem(n)
+        \/ FreeItem(n)
         \/ GetUnlockItem(n)
         \/ ReadValue(n)
     \/ Terminated
 
+
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ---------------------------------------------------------------------
+
+AlwaysTerminate == []<>TerminateCond
+
 
 itemActiveOrFreeCondition ==
     \A addr \in DOMAIN global_mem:
