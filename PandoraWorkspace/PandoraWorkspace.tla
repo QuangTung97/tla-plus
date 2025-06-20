@@ -27,7 +27,7 @@ DeleteKey == Key \union ({"deleted"} \X Key)
 
 MemState == [
     key: DeleteKey,
-    status: {"WriteLock", "NoLock"},
+    status: {"WriteLock", "ReadLock", "NoLock"},
     deleted: BOOLEAN
 ]
 
@@ -47,10 +47,10 @@ PC == {
     "Init",
     "CreateKeyOnDisk", "UpdateStatusToReady",
     "RemoveFromMem",
-    "SoftDeleteDoLock", "SoftDelete", "SoftDeleteFinish",
+    "SoftDeleteDoLock", "SoftDelete", "SoftDeleteFinish", "SoftDeleteRollback",
     "HardDeleteDoLock", "HardDelete",
     "RecoverDoLock", "Recover", "RecoverFinish", "RecoverRollback",
-    "GetKey",
+    "GetKey", "ReleaseReadLock",
     "Terminated"
 }
 
@@ -268,19 +268,39 @@ memUnchanged ==
     /\ jobKeysUnchanged
 
 
+\* TODO remove
 obtainWriteLock(addr) ==
     /\ global_state[addr].status = "NoLock"
     /\ global_state' = [global_state EXCEPT ![addr].status = "WriteLock"]
+
+acquireWriteLock(addr) ==
+    /\ global_state' = [global_state EXCEPT ![addr].status = "WriteLock"]
+
+releaseWriteLock(addr) ==
+    /\ global_state' = [global_state EXCEPT ![addr].status = "NoLock"]
 
 
 SoftDeleteDoLock(n) ==
     LET
         addr == local_addr[n]
+        new_addr == local_new_addr[n]
+
+        when_unlock ==
+            /\ goto(n, "SoftDelete")
+            /\ acquireWriteLock(addr)
+
+        when_locked ==
+            /\ goto(n, "SoftDeleteRollback")
+            /\ global_state' = [global_state EXCEPT
+                    ![new_addr].status = "NoLock",
+                    ![new_addr].deleted = TRUE
+                ]
     IN
     /\ pc[n] = "SoftDeleteDoLock"
-    /\ goto(n, "SoftDelete")
 
-    /\ obtainWriteLock(addr)
+    /\ IF global_state[addr].status = "NoLock"
+        THEN when_unlock
+        ELSE when_locked
 
     /\ UNCHANGED disk
     /\ memUnchanged
@@ -340,6 +360,31 @@ SoftDeleteFinish(n) ==
     /\ UNCHANGED global_state
     /\ UNCHANGED disk
     /\ UNCHANGED job_vars
+
+
+SoftDeleteRollback(n) ==
+    LET
+        old_addr == local_addr[n]
+        old_state == global_state[old_addr]
+        k == old_state.key
+        new_key == <<"deleted", k>>
+    IN
+    /\ pc[n] = "SoftDeleteRollback"
+    /\ goto(n, "Terminated")
+
+    /\ mem' = [mem EXCEPT ![new_key] = nil]
+    /\ mem_status' = [mem_status EXCEPT
+            ![k] = "Ready",
+            ![new_key] = nil
+        ]
+
+    /\ update_local(local_addr, n, nil)
+    /\ update_local(local_new_addr, n, nil)
+
+    /\ UNCHANGED global_state
+    /\ UNCHANGED disk
+    /\ UNCHANGED job_vars
+    /\ jobKeysUnchanged
 
 -------------------------------------------------------
 
@@ -536,7 +581,6 @@ RecoverRollback(n) ==
 -------------------------------------------------------
 
 getKeyUnchanged ==
-    /\ UNCHANGED global_state
     /\ UNCHANGED mem
     /\ UNCHANGED mem_status
     /\ UNCHANGED disk
@@ -555,19 +599,33 @@ GetKeyOnMem(n, k) ==
     /\ \/ when_found
 
     /\ getKeyUnchanged
+    /\ UNCHANGED global_state
 
 
 GetKeyFound(n) ==
     LET
         addr == local_addr[n]
         state == global_state[addr]
-        k == state.key
     IN
     /\ pc[n] = "GetKey"
     /\ state.status = "NoLock"
     /\ ~state.deleted
 
+    /\ goto(n, "ReleaseReadLock")
+    /\ global_state' = [global_state EXCEPT ![addr].status = "ReadLock"]
+
+    /\ UNCHANGED local_addr
+    /\ getKeyUnchanged
+
+
+ReleaseReadLock(n) ==
+    LET
+        addr == local_addr[n]
+    IN
+    /\ pc[n] = "ReleaseReadLock"
     /\ goto(n, "Terminated")
+
+    /\ global_state' = [global_state EXCEPT ![addr].status = "NoLock"]
     /\ update_local(local_addr, n, nil)
 
     /\ getKeyUnchanged
@@ -577,7 +635,6 @@ GetKeyNotFound(n) ==
     LET
         addr == local_addr[n]
         state == global_state[addr]
-        k == state.key
     IN
     /\ pc[n] = "GetKey"
     /\ state.status = "NoLock"
@@ -586,6 +643,7 @@ GetKeyNotFound(n) ==
     /\ goto(n, "Terminated")
     /\ update_local(local_addr, n, nil)
 
+    /\ UNCHANGED global_state
     /\ getKeyUnchanged
 
 -------------------------------------------------------
@@ -755,6 +813,7 @@ Next ==
         \/ SoftDeleteDoLock(n)
         \/ SoftDelete(n)
         \/ SoftDeleteFinish(n)
+        \/ SoftDeleteRollback(n)
 
         \/ HardDeleteDoLock(n)
         \/ HardDelete(n)
@@ -765,6 +824,7 @@ Next ==
         \/ RecoverRollback(n)
 
         \/ GetKeyFound(n)
+        \/ ReleaseReadLock(n)
         \/ GetKeyNotFound(n)
 
     \/ JobStartLoading
