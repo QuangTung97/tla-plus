@@ -306,7 +306,7 @@ SoftDeleteDoLock(n) ==
     /\ memUnchanged
 
 
-SoftDelete(n) == \* TODO on fail
+SoftDelete(n) ==
     LET
         old_addr == local_addr[n]
         old_state == global_state[old_addr]
@@ -315,19 +315,32 @@ SoftDelete(n) == \* TODO on fail
         new_addr == local_new_addr[n]
 
         new_key == <<"deleted", k>>
+
+        when_success ==
+            /\ goto(n, "SoftDeleteFinish")
+            /\ global_state' = [global_state EXCEPT
+                    ![old_addr].deleted = TRUE,
+                    ![old_addr].status = "NoLock",
+                    ![new_addr].status = "NoLock"
+                ]
+            /\ disk' = [disk EXCEPT
+                    ![k] = nil,
+                    ![new_key] = [ready |-> TRUE]
+                ]
+
+        when_fail ==
+            /\ goto(n, "SoftDeleteRollback")
+            /\ global_state' = [global_state EXCEPT
+                    ![old_addr].status = "NoLock",
+                    ![new_addr].status = "NoLock",
+                    ![new_addr].deleted = TRUE
+                ]
+            /\ UNCHANGED disk
     IN
     /\ pc[n] = "SoftDelete"
-    /\ goto(n, "SoftDeleteFinish")
 
-    /\ global_state' = [global_state EXCEPT
-            ![old_addr].deleted = TRUE,
-            ![old_addr].status = "NoLock",
-            ![new_addr].status = "NoLock"
-        ]
-    /\ disk' = [disk EXCEPT
-            ![k] = nil,
-            ![new_key] = [ready |-> TRUE]
-        ]
+    /\ \/ when_success
+       \/ when_fail
 
     /\ UNCHANGED <<local_addr, local_new_addr>>
     /\ UNCHANGED mem
