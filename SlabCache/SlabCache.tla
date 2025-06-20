@@ -1,15 +1,15 @@
 ----- MODULE SlabCache ----
-EXTENDS TLC, Naturals, Sequences
+EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-CONSTANTS Node, Slot, nil, max_val
+CONSTANTS Node, Slot, nil, max_val, max_lru
 
 VARIABLES
-    table, table_lock, global_mem, next_val,
-    pc, local_addr, local_del_addr
+    table, table_lock, global_mem, next_val, lru_list,
+    pc, local_addr, local_del_addr, local_slot
 
 vars == <<
-    table, table_lock, global_mem, next_val,
-    pc, local_addr, local_del_addr
+    table, table_lock, global_mem, next_val, lru_list,
+    pc, local_addr, local_del_addr, local_slot
 >>
 
 ---------------------------------------------------------------------
@@ -29,9 +29,12 @@ SlabItem == [
 
 PC == {
     "Init", "SetItemUnlock", "FreeItem",
+    "RemoveFromLRU",
     "GetUnlockItem", "ReadValue",
     "Terminated"
 }
+
+NullSlot == Slot \union {nil}
 
 ---------------------------------------------------------------------
 
@@ -40,10 +43,12 @@ TypeOK ==
     /\ table_lock \in [Slot -> {"NoLock", "Locked"}]
     /\ global_mem \in Seq(SlabItem)
     /\ next_val \in Value
+    /\ lru_list \subseteq Addr
 
     /\ pc \in [Node -> PC]
     /\ local_addr \in [Node -> NullAddr]
     /\ local_del_addr \in [Node -> NullAddr]
+    /\ local_slot \in [Node -> NullSlot]
 
 
 Init ==
@@ -51,10 +56,12 @@ Init ==
     /\ table_lock = [s \in Slot |-> "NoLock"]
     /\ global_mem = <<>>
     /\ next_val = 20
+    /\ lru_list = {}
 
     /\ pc = [n \in Node |-> "Init"]
     /\ local_addr = [n \in Node |-> nil]
     /\ local_del_addr = [n \in Node |-> nil]
+    /\ local_slot = [n \in Node |-> nil]
 
 ---------------------------------------------------------------------
 
@@ -84,12 +91,28 @@ SetNewItem(n, s) ==
 
         addr == Len(global_mem')
 
-        when_set_new ==
+        when_set_new_lru_not_reached ==
             /\ goto(n, "SetItemUnlock")
+            /\ inc_next_val
             /\ global_mem' = Append(global_mem, new_obj)
             /\ local_addr' = [local_addr EXCEPT ![n] = addr]
             /\ table' = [table EXCEPT ![s] = addr]
+            /\ lru_list' = lru_list \union {addr}
             /\ UNCHANGED local_del_addr
+        
+        when_lru_reached ==
+            /\ goto(n, "RemoveFromLRU")
+            /\ UNCHANGED table
+            /\ UNCHANGED global_mem
+            /\ UNCHANGED lru_list
+            /\ UNCHANGED local_addr
+            /\ UNCHANGED local_del_addr
+            /\ UNCHANGED next_val
+        
+        when_set_new ==
+            IF Cardinality(lru_list) < max_lru
+                THEN when_set_new_lru_not_reached
+                ELSE when_lru_reached
 
         old_addr == table[s]
 
@@ -98,9 +121,11 @@ SetNewItem(n, s) ==
 
         when_update ==
             /\ goto(n, "SetItemUnlock")
+            /\ inc_next_val
             /\ global_mem' = Append(dec_ref, new_obj)
             /\ local_addr' = [local_addr EXCEPT ![n] = addr]
             /\ table' = [table EXCEPT ![s] = addr]
+            /\ lru_list' = (lru_list \ {old_addr}) \union {addr}
 
             /\ IF global_mem'[old_addr].ref = 0
                 THEN local_del_addr' = [local_del_addr EXCEPT ![n] = old_addr]
@@ -108,7 +133,7 @@ SetNewItem(n, s) ==
     IN
     /\ pc[n] = "Init"
     /\ lock_slot(s)
-    /\ inc_next_val
+    /\ local_slot' = [local_slot EXCEPT ![n] = s]
     /\ IF table[s] = nil
         THEN when_set_new
         ELSE when_update
@@ -139,6 +164,8 @@ SetItemUnlock(n) ==
     /\ UNCHANGED next_val
     /\ UNCHANGED global_mem
     /\ UNCHANGED table
+    /\ UNCHANGED lru_list
+    /\ UNCHANGED local_slot
 
 
 FreeItem(n) ==
@@ -154,6 +181,7 @@ FreeItem(n) ==
     /\ UNCHANGED local_addr
     /\ UNCHANGED next_val
     /\ UNCHANGED <<table, table_lock>>
+    /\ UNCHANGED lru_list
 
 
 GetItem(n, s) ==
@@ -168,6 +196,7 @@ GetItem(n, s) ==
     /\ UNCHANGED local_del_addr
     /\ UNCHANGED next_val
     /\ UNCHANGED table
+    /\ UNCHANGED lru_list
 
 
 GetUnlockItem(n) ==
@@ -273,5 +302,16 @@ CanNotReadFreedItem ==
             obj == global_mem[addr]
         IN
             ENABLED ReadValue(n) => obj.freed = 0
+
+
+LruSizeInv ==
+    Cardinality(lru_list) <= max_lru
+
+
+LruListMatchTable ==
+    LET
+        non_empty_slots == {s \in Slot: table[s] # nil}
+    IN
+    lru_list = {table[s]: s \in non_empty_slots}
 
 ====
