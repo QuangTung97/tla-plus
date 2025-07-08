@@ -40,6 +40,8 @@ NullValue == Value \union {nil}
 
 ReplicaID == DOMAIN replicas
 
+Version == 0..10
+
 Replica == [
     id: ReplicaID,
     span: SpanID,
@@ -47,7 +49,10 @@ Replica == [
     status: {"Empty", "Writing", "Written"},
     value: NullValue,
     delete_status: {"NoAction", "NeedDelete", "CanDelete", "Deleting", "Deleted"},
-    slave_status: {nil, "SlaveWriting", "SlaveWriteCompleted", "SlaveDeleted"}
+    write_version: Version,
+
+    slave_status: {nil, "SlaveWriting", "SlaveWriteCompleted", "SlaveDeleted"},
+    slave_version: Version
 ]
 
 SyncJobID == DOMAIN sync_jobs
@@ -67,7 +72,8 @@ SlaveEvent ==
 
         write_completed_event == [
             type: {"WriteComplete"},
-            repl_id: ReplicaID
+            repl_id: ReplicaID,
+            version: Version
         ]
     IN
     write_event \union write_completed_event
@@ -154,7 +160,10 @@ AddReplica(span) ==
             status |-> "Empty",
             value |-> nil,
             delete_status |-> "NoAction",
-            slave_status |-> nil
+            write_version |-> 0,
+
+            slave_status |-> nil,
+            slave_version |-> 0
         ]
 
         src_id == find_source_replica(span)
@@ -234,14 +243,19 @@ set_replica_delete_status(ids, input_replicas, input_jobs) ==
         [id \in DOMAIN input_replicas |-> update(id, input_replicas[id])]
 
 
-updatePrimary(id) ==
+updatePrimary(id, version) ==
     LET
-        updated == [replicas EXCEPT ![id].status = "Written"]
+        new_delete_status(old) ==
+            IF old = "NoAction"
+                THEN old
+                ELSE "NeedDelete"
+
+        updated == [replicas EXCEPT
+                ![id].status = "Written",
+                ![id].write_version = version,
+                ![id].delete_status = new_delete_status(@)
+            ]
     IN
-    IF is_replica_deleted(id) THEN
-        /\ UNCHANGED sync_jobs
-        /\ UNCHANGED replicas
-    ELSE
         /\ sync_jobs' = trigger_sync_replica(id, sync_jobs)
         /\ replicas' = set_replica_delete_status({id}, updated, sync_jobs')
 
@@ -252,14 +266,12 @@ HandleSlaveEvent ==
 
         handle_writing ==
             /\ e.type = "Write"
-            /\ IF is_replica_deleted(id)
-                THEN UNCHANGED replicas
-                ELSE replicas' = [replicas EXCEPT ![id].status = "Writing"]
+            /\ replicas' = [replicas EXCEPT ![id].status = "Writing"]
             /\ UNCHANGED sync_jobs
 
         handle_write_completed ==
             /\ e.type = "WriteComplete"
-            /\ updatePrimary(id)
+            /\ updatePrimary(id, e.version)
     IN
     /\ slave_events # <<>>
     /\ slave_events' = Tail(slave_events)
@@ -333,11 +345,25 @@ ApplyDeleteRule(span) ==
 
 
 doUpdateToDeleting(id) ==
+    LET
+        normal_flow ==
+            /\ replicas' = [replicas EXCEPT
+                    ![id].delete_status = "Deleting",
+                    ![id].slave_status = "SlaveDeleted"
+                ]
+
+        when_is_writing ==
+            /\ replicas' = [replicas EXCEPT ![id].delete_status = "NeedDelete"]
+
+        when_is_primary ==
+            IF replicas[id].slave_version = replicas[id].write_version
+                THEN normal_flow
+                ELSE when_is_writing
+    IN
     /\ replicas[id].delete_status = "CanDelete"
-    /\ replicas' = [replicas EXCEPT
-            ![id].delete_status = "Deleting",
-            ![id].slave_status = "SlaveDeleted" \* TODO check
-        ]
+    /\ IF replicas[id].type = "Primary"
+        THEN when_is_primary
+        ELSE replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
 
     /\ UNCHANGED sync_jobs
     /\ UNCHANGED deleted_spans
@@ -393,7 +419,10 @@ slaveDoWrite(id) ==
         \/ when_write_completed
 
     /\ slave_events' = Append(slave_events, event)
-    /\ replicas' = [replicas EXCEPT ![id].slave_status = "SlaveWriting"]
+    /\ replicas' = [replicas EXCEPT
+            ![id].slave_status = "SlaveWriting",
+            ![id].slave_version = @ + 1
+        ]
 
     /\ UNCHANGED next_val
     /\ slave_unchanged
@@ -407,18 +436,20 @@ SlaveWriteComplete ==
         LET
             event == [
                 type |-> "WriteComplete",
-                repl_id |-> id
+                repl_id |-> id,
+                version |-> replicas'[id].slave_version
             ]
         IN
         /\ master_replicas[id].type = "Primary"
         /\ replicas[id].slave_status = "SlaveWriting"
 
         /\ next_val' = next_val + 1
-        /\ slave_events' = Append(slave_events, event)
         /\ replicas' = [replicas EXCEPT
                 ![id].slave_status = "SlaveWriteCompleted",
+                ![id].slave_version = @ + 1,
                 ![id].value = next_val'
             ]
+        /\ slave_events' = Append(slave_events, event)
 
         /\ UNCHANGED num_actions
         /\ slave_unchanged
