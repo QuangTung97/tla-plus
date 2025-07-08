@@ -3,11 +3,17 @@ EXTENDS TLC, Sequences, Naturals, FiniteSets
 
 CONSTANTS nil, max_actions
 
-VARIABLES replicas, sync_jobs, source_map, next_val, num_actions
+VARIABLES
+    replicas, sync_jobs, source_map,
+    next_val, num_actions,
+    master_replicas
 
 const_vars == <<source_map>>
 
-vars == <<replicas, sync_jobs, next_val, num_actions, const_vars>>
+vars == <<
+    replicas, sync_jobs, next_val, num_actions,
+    master_replicas, const_vars
+>>
 
 --------------------------------------------------------------------------
 
@@ -60,6 +66,7 @@ TypeOK ==
     /\ source_map \in possible_source_map
     /\ next_val \in Value
     /\ num_actions \in 0..max_actions
+    /\ master_replicas \in Seq(Replica)
 
 
 Init ==
@@ -68,6 +75,7 @@ Init ==
     /\ source_map \in possible_source_map
     /\ next_val = 30
     /\ num_actions = 0
+    /\ master_replicas = <<>>
 
 --------------------------------------------------------------------------
 
@@ -135,6 +143,19 @@ AddReplica(span) ==
 
     /\ UNCHANGED next_val
     /\ UNCHANGED const_vars
+    /\ UNCHANGED master_replicas
+
+--------------------------------------------------------------------------
+
+MasterSync ==
+    /\ master_replicas # replicas
+    /\ master_replicas' = replicas
+
+    /\ UNCHANGED replicas
+    /\ UNCHANGED next_val
+    /\ UNCHANGED sync_jobs
+    /\ UNCHANGED num_actions
+    /\ UNCHANGED const_vars
 
 --------------------------------------------------------------------------
 
@@ -149,6 +170,7 @@ Terminated ==
 Next ==
     \/ \E span \in SpanID:
         \/ AddReplica(span)
+    \/ MasterSync
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
