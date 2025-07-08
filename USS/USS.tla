@@ -42,6 +42,8 @@ ReplicaID == DOMAIN replicas
 
 Version == 0..10
 
+Generation == 0..10
+
 Replica == [
     id: ReplicaID,
     span: SpanID,
@@ -50,9 +52,11 @@ Replica == [
     value: NullValue,
     delete_status: {"NoAction", "NeedDelete", "CanDelete", "Deleting", "Deleted"},
     write_version: Version,
+    generation: Generation,
 
     slave_status: {nil, "SlaveWriting", "SlaveWriteCompleted", "SlaveDeleted"},
-    slave_version: Version
+    slave_version: Version,
+    slave_generation: Generation
 ]
 
 SyncJobID == DOMAIN sync_jobs
@@ -161,9 +165,11 @@ AddReplica(span) ==
             value |-> nil,
             delete_status |-> "NoAction",
             write_version |-> 0,
+            generation |-> 1,
 
             slave_status |-> nil,
-            slave_version |-> 0
+            slave_version |-> 0,
+            slave_generation |-> 1
         ]
 
         src_id == find_source_replica(span)
@@ -398,7 +404,8 @@ doDeleteReplica(id) ==
         when_normal ==
             /\ replicas' = [replicas EXCEPT
                     ![id].delete_status = "Deleted",
-                    ![id].value = nil
+                    ![id].value = nil,
+                    ![id].generation = @ + 1
                 ]
             /\ UNCHANGED sync_jobs
 
@@ -435,6 +442,8 @@ slave_unchanged ==
 
 slaveDoWrite(id) ==
     LET
+        repl == master_replicas[id]
+
         event == [
             type |-> "Write",
             repl_id |-> id
@@ -447,16 +456,23 @@ slaveDoWrite(id) ==
         when_write_completed ==
             /\ replicas[id].slave_status = "SlaveWriteCompleted"
             /\ inc_action
+
+        when_fully_deleted ==
+            /\ repl.delete_status = "Deleted"
+            /\ repl.generation > replicas[id].slave_generation
+            /\ inc_action
     IN
     /\ id \in DOMAIN master_replicas
-    /\ master_replicas[id].type = "Primary"
+    /\ repl.type = "Primary"
     /\ \/ when_nil
        \/ when_write_completed
+       \/ when_fully_deleted
 
     /\ slave_events' = Append(slave_events, event)
     /\ replicas' = [replicas EXCEPT
             ![id].slave_status = "SlaveWriting",
-            ![id].slave_version = @ + 1
+            ![id].slave_version = @ + 1,
+            ![id].slave_generation = repl.generation
         ]
 
     /\ UNCHANGED next_val
