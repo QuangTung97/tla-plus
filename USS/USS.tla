@@ -47,7 +47,7 @@ Replica == [
     status: {"Empty", "Writing", "Written"},
     value: NullValue,
     delete_status: {"NoAction", "NeedDelete", "CanDelete", "Deleting", "Deleted"},
-    slave_status: {nil, "Writing", "WriteCompleted"}
+    slave_status: {nil, "SlaveWriting", "SlaveWriteCompleted", "SlaveDeleted"}
 ]
 
 SyncJobID == DOMAIN sync_jobs
@@ -249,7 +249,9 @@ HandleSlaveEvent ==
 
         handle_writing ==
             /\ e.type = "Write"
-            /\ replicas' = [replicas EXCEPT ![id].status = "Writing"]
+            /\ IF is_replica_deleted(id)
+                THEN UNCHANGED replicas
+                ELSE replicas' = [replicas EXCEPT ![id].status = "Writing"]
             /\ UNCHANGED sync_jobs
 
         handle_write_completed ==
@@ -286,7 +288,7 @@ doFinishJob(job_id) ==
     /\ UNCHANGED num_actions
 
     /\ sync_jobs' = trigger_sync_replica(dst_id, set_finished)
-    /\ replicas' = set_replica_delete_status({src_id}, updated, sync_jobs')
+    /\ replicas' = set_replica_delete_status({src_id, dst_id}, updated, sync_jobs')
 
     /\ UNCHANGED deleted_spans
     /\ core_unchanged
@@ -329,7 +331,10 @@ ApplyDeleteRule(span) ==
 
 doUpdateToDeleting(id) ==
     /\ replicas[id].delete_status = "CanDelete"
-    /\ replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
+    /\ replicas' = [replicas EXCEPT
+            ![id].delete_status = "Deleting",
+            ![id].slave_status = "SlaveDeleted" \* TODO check
+        ]
 
     /\ UNCHANGED sync_jobs
     /\ UNCHANGED deleted_spans
@@ -376,7 +381,7 @@ slaveDoWrite(id) ==
             /\ UNCHANGED num_actions
 
         when_write_completed ==
-            /\ replicas[id].slave_status = "WriteCompleted"
+            /\ replicas[id].slave_status = "SlaveWriteCompleted"
             /\ inc_action
     IN
     /\ id \in DOMAIN master_replicas
@@ -385,7 +390,7 @@ slaveDoWrite(id) ==
         \/ when_write_completed
 
     /\ slave_events' = Append(slave_events, event)
-    /\ replicas' = [replicas EXCEPT ![id].slave_status = "Writing"]
+    /\ replicas' = [replicas EXCEPT ![id].slave_status = "SlaveWriting"]
 
     /\ UNCHANGED next_val
     /\ slave_unchanged
@@ -404,11 +409,11 @@ SlaveWriteComplete ==
             ]
         IN
         /\ master_replicas[id].type = "Primary"
-        /\ replicas[id].slave_status = "Writing"
+        /\ replicas[id].slave_status = "SlaveWriting"
 
         /\ next_val' = next_val + 1
         /\ slave_events' = Append(slave_events, event)
-        /\ replicas' = [replicas EXCEPT ![id].slave_status = "WriteCompleted"]
+        /\ replicas' = [replicas EXCEPT ![id].slave_status = "SlaveWriteCompleted"]
 
         /\ UNCHANGED num_actions
         /\ slave_unchanged
@@ -429,13 +434,19 @@ MasterSync ==
 
 --------------------------------------------------------------------------
 
+replicaTerminateCond(repl) ==
+    repl.type = "Primary" =>
+        \/ repl.slave_status = "SlaveWriteCompleted"
+        \/ repl.slave_status = "SlaveDeleted"
+
+syncJobTerminateCond(job) ==
+    \/ job.status = "Succeeded"
+    \/ job.status = "Pending"
+
 TerminateCond ==
     /\ slave_events = <<>>
-    /\ \A id \in ReplicaID:
-        replicas[id].type = "Primary" =>
-            replicas[id].slave_status = "WriteCompleted"
-    /\ \A job_id \in SyncJobID:
-        sync_jobs[job_id].status = "Succeeded"
+    /\ \A id \in ReplicaID: replicaTerminateCond(replicas[id])
+    /\ \A job_id \in SyncJobID: syncJobTerminateCond(sync_jobs[job_id])
     /\ \A id \in ReplicaID:
         \/ replicas[id].delete_status = "NoAction"
         \/ replicas[id].delete_status = "Deleted"
@@ -493,10 +504,21 @@ ReadonlyReplicaAlwaysHaveSyncJob ==
 
 WhenTerminatedAllReplicasWritten ==
     LET
-        when_no_deletion(repl) ==
+        fully_written(repl) ==
             /\ repl.status = "Written"
             /\ repl.value = next_val
             /\ repl.delete_status = "NoAction"
+
+        is_still_empty(repl) ==
+            /\ repl.status = "Empty"
+            /\ repl.value = nil
+            /\ repl.delete_status = "NoAction"
+
+        when_no_deletion(repl) ==
+            IF deleted_spans = {}
+                THEN fully_written(repl)
+                ELSE \/ fully_written(repl)
+                     \/ is_still_empty(repl)
 
         when_has_delete_rule(repl) ==
             /\ repl.delete_status = "Deleted"
