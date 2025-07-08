@@ -200,13 +200,19 @@ AddReplica(span) ==
 
 trigger_sync_from_replica(id, input_jobs) ==
     LET
-        get_dst_id(job_id) == input_jobs[job_id].dst_id
-
         allow_trigger(job_id) ==
             /\ input_jobs[job_id].src_id = id
 
+        is_replica_deleting(job_id) ==
+            LET
+                dst_id == input_jobs[job_id].dst_id
+                dst_repl == replicas[dst_id]
+            IN
+            \/ dst_repl.delete_status = "CanDelete"
+            \/ dst_repl.delete_status = "Deleting"
+
         updated_status(job_id) ==
-            IF is_replica_deleted(get_dst_id(job_id))
+            IF is_replica_deleting(job_id)
                 THEN "Waiting"
                 ELSE "Ready"
 
@@ -247,13 +253,13 @@ set_replica_delete_status(ids, input_replicas, input_jobs) ==
         [id \in DOMAIN input_replicas |-> update(id, input_replicas[id])]
 
 
+new_delete_status(old) ==
+    IF old = "NoAction"
+        THEN old
+        ELSE "NeedDelete"
+
 updatePrimary(id, version) ==
     LET
-        new_delete_status(old) ==
-            IF old = "NoAction"
-                THEN old
-                ELSE "NeedDelete"
-
         updated == [replicas EXCEPT
                 ![id].status = "Written",
                 ![id].write_version = version,
@@ -298,7 +304,8 @@ doFinishJob(job_id) ==
 
         updated == [replicas EXCEPT
             ![dst_id].status = "Written",
-            ![dst_id].value = replicas[src_id].value
+            ![dst_id].value = replicas[src_id].value,
+            ![dst_id].delete_status = new_delete_status(@)
         ]
 
         set_finished == [sync_jobs EXCEPT ![job_id].status = "Succeeded"]
@@ -588,6 +595,7 @@ WhenTerminatedAllReplicasWritten ==
         fully_deleted(repl) ==
             /\ repl.delete_status = "Deleted"
             /\ repl.status = "Written"
+            /\ repl.value = nil
 
         when_has_delete_rule(repl) ==
             IF repl.type = "Primary" THEN
