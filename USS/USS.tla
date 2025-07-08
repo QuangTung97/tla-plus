@@ -67,8 +67,7 @@ SlaveEvent ==
 
         write_completed_event == [
             type: {"WriteComplete"},
-            repl_id: ReplicaID,
-            value: Value
+            repl_id: ReplicaID
         ]
     IN
     write_event \union write_completed_event
@@ -192,8 +191,11 @@ AddReplica(span) ==
 
 trigger_sync_replica(id, input_jobs) ==
     LET
+        get_dst_id(job_id) == input_jobs[job_id].dst_id
+
         allow_trigger(job_id) ==
             /\ input_jobs[job_id].src_id = id
+            /\ ~is_replica_deleted(get_dst_id(job_id))
 
         update_job(job_id, old) ==
             IF allow_trigger(job_id)
@@ -232,15 +234,16 @@ set_replica_delete_status(ids, input_replicas, input_jobs) ==
         [id \in DOMAIN input_replicas |-> update(id, input_replicas[id])]
 
 
-updatePrimary(id, val) ==
+updatePrimary(id) ==
     LET
-        updated == [replicas EXCEPT
-            ![id].status = "Written",
-            ![id].value = val
-        ]
+        updated == [replicas EXCEPT ![id].status = "Written"]
     IN
-    /\ sync_jobs' = trigger_sync_replica(id, sync_jobs)
-    /\ replicas' = set_replica_delete_status({id}, updated, sync_jobs')
+    IF is_replica_deleted(id) THEN
+        /\ UNCHANGED sync_jobs
+        /\ UNCHANGED replicas
+    ELSE
+        /\ sync_jobs' = trigger_sync_replica(id, sync_jobs)
+        /\ replicas' = set_replica_delete_status({id}, updated, sync_jobs')
 
 HandleSlaveEvent ==
     LET
@@ -256,7 +259,7 @@ HandleSlaveEvent ==
 
         handle_write_completed ==
             /\ e.type = "WriteComplete"
-            /\ updatePrimary(id, e.value)
+            /\ updatePrimary(id)
     IN
     /\ slave_events # <<>>
     /\ slave_events' = Tail(slave_events)
@@ -404,8 +407,7 @@ SlaveWriteComplete ==
         LET
             event == [
                 type |-> "WriteComplete",
-                repl_id |-> id,
-                value |-> next_val'
+                repl_id |-> id
             ]
         IN
         /\ master_replicas[id].type = "Primary"
@@ -413,7 +415,10 @@ SlaveWriteComplete ==
 
         /\ next_val' = next_val + 1
         /\ slave_events' = Append(slave_events, event)
-        /\ replicas' = [replicas EXCEPT ![id].slave_status = "SlaveWriteCompleted"]
+        /\ replicas' = [replicas EXCEPT
+                ![id].slave_status = "SlaveWriteCompleted",
+                ![id].value = next_val'
+            ]
 
         /\ UNCHANGED num_actions
         /\ slave_unchanged
@@ -435,9 +440,14 @@ MasterSync ==
 --------------------------------------------------------------------------
 
 replicaTerminateCond(repl) ==
-    repl.type = "Primary" =>
+    /\ repl.type = "Primary" =>
         \/ repl.slave_status = "SlaveWriteCompleted"
         \/ repl.slave_status = "SlaveDeleted"
+
+    /\ \/ repl.delete_status = "NoAction"
+       \/ repl.delete_status = "Deleted"
+       \/ /\ repl.status = "Empty"
+          /\ repl.delete_status = "NeedDelete"
 
 syncJobTerminateCond(job) ==
     \/ job.status = "Succeeded"
@@ -447,9 +457,6 @@ TerminateCond ==
     /\ slave_events = <<>>
     /\ \A id \in ReplicaID: replicaTerminateCond(replicas[id])
     /\ \A job_id \in SyncJobID: syncJobTerminateCond(sync_jobs[job_id])
-    /\ \A id \in ReplicaID:
-        \/ replicas[id].delete_status = "NoAction"
-        \/ replicas[id].delete_status = "Deleted"
     /\ \A span \in SpanID: ~(ENABLED ApplyDeleteRule(span))
 
 
@@ -512,7 +519,8 @@ WhenTerminatedAllReplicasWritten ==
         is_still_empty(repl) ==
             /\ repl.status = "Empty"
             /\ repl.value = nil
-            /\ repl.delete_status = "NoAction"
+            /\ \/ repl.delete_status = "NoAction"
+               \/ repl.delete_status = "NeedDelete"
 
         when_no_deletion(repl) ==
             IF deleted_spans = {}
@@ -520,9 +528,16 @@ WhenTerminatedAllReplicasWritten ==
                 ELSE \/ fully_written(repl)
                      \/ is_still_empty(repl)
 
-        when_has_delete_rule(repl) ==
+        fully_deleted(repl) ==
             /\ repl.delete_status = "Deleted"
             /\ repl.status = "Written"
+
+        when_has_delete_rule(repl) ==
+            IF repl.type = "Primary" THEN
+                fully_deleted(repl)
+            ELSE
+                \/ fully_deleted(repl)
+                \/ is_still_empty(repl)
     IN
     TerminateCond =>
         \A id \in ReplicaID:
