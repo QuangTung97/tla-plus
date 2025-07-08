@@ -46,7 +46,7 @@ Replica == [
     type: {"Primary", "Readonly"},
     status: {"Empty", "Writing", "Written"},
     value: NullValue,
-    delete_status: {"NoAction", "NeedDelete", "CanDelete", "Deleted"},
+    delete_status: {"NoAction", "NeedDelete", "CanDelete", "Deleting", "Deleted"},
     slave_status: {nil, "Writing", "WriteCompleted"}
 ]
 
@@ -134,6 +134,10 @@ core_unchanged ==
     /\ UNCHANGED slave_events
     /\ UNCHANGED master_replicas
 
+is_replica_deleted(id) ==
+    /\ replicas[id].delete_status # "NoAction"
+    /\ replicas[id].delete_status # "NeedDelete"
+
 
 AddReplica(span) ==
     LET
@@ -157,9 +161,13 @@ AddReplica(span) ==
         src_id == find_source_replica(span)
 
         job_status ==
-            IF replicas[src_id].status = "Written"
-                THEN "Ready"
-                ELSE "Pending"
+            IF replicas[src_id].status = "Written" THEN
+                IF is_replica_deleted(src_id) THEN
+                    "Pending"
+                ELSE
+                    "Ready"
+            ELSE
+                "Pending"
 
         new_job == [
             src_id |-> src_id,
@@ -199,7 +207,8 @@ trigger_sync_replica(id, input_jobs) ==
 num_non_finished_sync_job(repl_id, input_jobs) ==
     LET
         job_cond(job_id) ==
-            /\ input_jobs[job_id].src_id = repl_id
+            /\ \/ input_jobs[job_id].src_id = repl_id
+               \/ input_jobs[job_id].dst_id = repl_id
             /\ input_jobs[job_id].status # "Succeeded"
 
         job_set == {job_id \in SyncJobID: job_cond(job_id)}
@@ -211,6 +220,7 @@ set_replica_delete_status(ids, input_replicas, input_jobs) ==
     LET
         allow_update(id, old) ==
             /\ id \in ids
+            /\ old.status = "Written"
             /\ old.delete_status = "NeedDelete"
             /\ num_non_finished_sync_job(id, input_jobs) = 0
 
@@ -317,9 +327,25 @@ ApplyDeleteRule(span) ==
     /\ core_unchanged
 
 
-doDeleteReplica(id) ==
+doUpdateToDeleting(id) ==
     /\ replicas[id].delete_status = "CanDelete"
-    /\ replicas' = [replicas EXCEPT ![id].delete_status = "Deleted"]
+    /\ replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
+
+    /\ UNCHANGED sync_jobs
+    /\ UNCHANGED deleted_spans
+    /\ UNCHANGED num_actions
+    /\ core_unchanged
+
+UpdateToDeleting ==
+    \E id \in ReplicaID: doUpdateToDeleting(id)
+
+
+doDeleteReplica(id) ==
+    /\ replicas[id].delete_status = "Deleting"
+    /\ replicas' = [replicas EXCEPT
+            ![id].delete_status = "Deleted",
+            ![id].value = nil
+        ]
 
     /\ UNCHANGED sync_jobs
     /\ UNCHANGED deleted_spans
@@ -337,31 +363,35 @@ slave_unchanged ==
     /\ UNCHANGED master_replicas
     /\ UNCHANGED deleted_spans
 
+
+slaveDoWrite(id) ==
+    LET
+        event == [
+            type |-> "Write",
+            repl_id |-> id
+        ]
+
+        when_nil ==
+            /\ replicas[id].slave_status = nil
+            /\ UNCHANGED num_actions
+
+        when_write_completed ==
+            /\ replicas[id].slave_status = "WriteCompleted"
+            /\ inc_action
+    IN
+    /\ id \in DOMAIN master_replicas
+    /\ master_replicas[id].type = "Primary"
+    /\ \/ when_nil
+        \/ when_write_completed
+
+    /\ slave_events' = Append(slave_events, event)
+    /\ replicas' = [replicas EXCEPT ![id].slave_status = "Writing"]
+
+    /\ UNCHANGED next_val
+    /\ slave_unchanged
+
 SlaveWrite ==
-    \E id \in DOMAIN master_replicas:
-        LET
-            event == [
-                type |-> "Write",
-                repl_id |-> id
-            ]
-
-            when_nil ==
-                /\ replicas[id].slave_status = nil
-                /\ UNCHANGED num_actions
-
-            when_write_completed ==
-                /\ replicas[id].slave_status = "WriteCompleted"
-                /\ inc_action
-        IN
-        /\ master_replicas[id].type = "Primary"
-        /\ \/ when_nil
-           \/ when_write_completed
-
-        /\ slave_events' = Append(slave_events, event)
-        /\ replicas' = [replicas EXCEPT ![id].slave_status = "Writing"]
-
-        /\ UNCHANGED next_val
-        /\ slave_unchanged
+    \E id \in ReplicaID: slaveDoWrite(id)
 
 
 SlaveWriteComplete ==
@@ -422,6 +452,8 @@ Next ==
         \/ AddReplica(span)
         \/ AddDeleteRule(span)
         \/ ApplyDeleteRule(span)
+
+    \/ UpdateToDeleting
     \/ DeleteReplica
 
     \/ SlaveWrite
@@ -486,8 +518,12 @@ SyncJobAndDeleteJobConcurrently ==
                 /\ sync_jobs[job_id].status = "Ready"
 
             job_set == {job_id \in SyncJobID: job_cond(job_id)}
+
+            cond1 == ENABLED doDeleteReplica(id)
+            cond2 == job_set # {}
+            cond3 == ENABLED slaveDoWrite(id)
         IN
-        \/ ~(ENABLED doDeleteReplica(id))
-        \/ job_set = {}
+            /\ ~(cond1 /\ cond2)
+            /\ ~(cond1 /\ cond3)
 
 ====
