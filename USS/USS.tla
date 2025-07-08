@@ -5,13 +5,13 @@ CONSTANTS nil, max_actions
 
 VARIABLES
     replicas, sync_jobs, next_val, num_actions,
-    master_replicas, slave_events, source_map
+    master_replicas, slave_events, deleted_spans, source_map
 
 const_vars == <<source_map>>
 
 vars == <<
     replicas, sync_jobs, next_val, num_actions,
-    master_replicas, slave_events, const_vars
+    master_replicas, slave_events, deleted_spans, const_vars
 >>
 
 --------------------------------------------------------------------------
@@ -83,6 +83,7 @@ TypeOK ==
     /\ num_actions \in 0..max_actions
     /\ master_replicas \in Seq(Replica)
     /\ slave_events \in Seq(SlaveEvent)
+    /\ deleted_spans \subseteq SpanID
 
 
 Init ==
@@ -93,6 +94,7 @@ Init ==
     /\ num_actions = 0
     /\ master_replicas = <<>>
     /\ slave_events = <<>>
+    /\ deleted_spans = {}
 
 --------------------------------------------------------------------------
 
@@ -176,6 +178,7 @@ AddReplica(span) ==
         THEN UNCHANGED sync_jobs
         ELSE add_new_job
 
+    /\ UNCHANGED deleted_spans
     /\ core_unchanged
 
 
@@ -223,6 +226,7 @@ HandleSlaveEvent ==
     /\ UNCHANGED num_actions
     /\ UNCHANGED master_replicas
     /\ UNCHANGED const_vars
+    /\ UNCHANGED deleted_spans
 
 --------------------------------------------------------------------------
 
@@ -243,6 +247,7 @@ doFinishJob(job_id) ==
         ]
     /\ sync_jobs' = trigger_sync_replica(dst_id, set_finished)
 
+    /\ UNCHANGED deleted_spans
     /\ core_unchanged
 
 FinishJob ==
@@ -256,6 +261,7 @@ slave_unchanged ==
     /\ UNCHANGED sync_jobs
     /\ UNCHANGED const_vars
     /\ UNCHANGED master_replicas
+    /\ UNCHANGED deleted_spans
 
 SlaveWrite ==
     \E id \in DOMAIN master_replicas:
@@ -305,6 +311,7 @@ MasterSync ==
     /\ UNCHANGED num_actions
     /\ UNCHANGED const_vars
     /\ UNCHANGED slave_events
+    /\ UNCHANGED deleted_spans
 
 --------------------------------------------------------------------------
 
