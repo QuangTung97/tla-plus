@@ -126,6 +126,12 @@ inc_action ==
     /\ num_actions < max_actions
     /\ num_actions' = num_actions + 1
 
+core_unchanged ==
+    /\ UNCHANGED next_val
+    /\ UNCHANGED const_vars
+    /\ UNCHANGED slave_events
+    /\ UNCHANGED master_replicas
+
 
 AddReplica(span) ==
     LET
@@ -146,10 +152,17 @@ AddReplica(span) ==
             slave_status |-> nil
         ]
 
+        src_id == find_source_replica(span)
+
+        job_status ==
+            IF replicas[src_id].status = "Written"
+                THEN "Ready"
+                ELSE "Pending"
+
         new_job == [
-            src_id |-> find_source_replica(span),
+            src_id |-> src_id,
             dst_id |-> new_id,
-            status |-> "Pending"
+            status |-> job_status
         ]
 
         add_new_job ==
@@ -163,11 +176,26 @@ AddReplica(span) ==
         THEN UNCHANGED sync_jobs
         ELSE add_new_job
 
-    /\ UNCHANGED next_val
-    /\ UNCHANGED const_vars
-    /\ UNCHANGED master_replicas
-    /\ UNCHANGED slave_events
+    /\ core_unchanged
 
+
+trigger_sync_replica(id, input_jobs) ==
+    LET
+        allow_trigger(job_id) ==
+            /\ input_jobs[job_id].src_id = id
+
+        update_job(job_id, old) ==
+            IF allow_trigger(job_id)
+                THEN [old EXCEPT !.status = "Ready"]
+                ELSE old
+    IN
+        [job_id \in SyncJobID |->
+            update_job(job_id, input_jobs[job_id])]
+
+
+updatePrimary(id) ==
+    /\ replicas' = [replicas EXCEPT ![id].status = "Written"]
+    /\ sync_jobs' = trigger_sync_replica(id, sync_jobs)
 
 HandleSlaveEvent ==
     LET
@@ -178,10 +206,15 @@ HandleSlaveEvent ==
             /\ e.type = "Write"
             /\ replicas' = [replicas EXCEPT ![id].status = "Writing"]
             /\ UNCHANGED sync_jobs
+
+        handle_write_completed ==
+            /\ e.type = "WriteComplete"
+            /\ updatePrimary(id)
     IN
     /\ slave_events # <<>>
     /\ slave_events' = Tail(slave_events)
     /\ \/ handle_writing
+       \/ handle_write_completed
 
     /\ UNCHANGED next_val
     /\ UNCHANGED num_actions
@@ -189,6 +222,33 @@ HandleSlaveEvent ==
     /\ UNCHANGED const_vars
 
 --------------------------------------------------------------------------
+
+doFinishJob(job_id) ==
+    LET
+        job == sync_jobs[job_id]
+        dst_id == job.dst_id
+
+        set_finished == [sync_jobs EXCEPT ![job_id].status = "Succeeded"]
+    IN
+    /\ sync_jobs[job_id].status = "Ready"
+    /\ UNCHANGED num_actions
+
+    /\ replicas' = [replicas EXCEPT ![dst_id].status = "Written"]
+    /\ sync_jobs' = trigger_sync_replica(dst_id, set_finished)
+
+    /\ core_unchanged
+
+FinishJob ==
+    \E job_id \in SyncJobID:
+        doFinishJob(job_id)
+
+--------------------------------------------------------------------------
+
+slave_unchanged ==
+    /\ UNCHANGED num_actions
+    /\ UNCHANGED sync_jobs
+    /\ UNCHANGED const_vars
+    /\ UNCHANGED master_replicas
 
 SlaveWrite ==
     \E id \in DOMAIN master_replicas:
@@ -199,15 +259,13 @@ SlaveWrite ==
             ]
         IN
         /\ master_replicas[id].type = "Primary"
-        /\ inc_action
+        /\ replicas[id].slave_status = nil
 
         /\ slave_events' = Append(slave_events, event)
         /\ replicas' = [replicas EXCEPT ![id].slave_status = "Writing"]
 
         /\ UNCHANGED next_val
-        /\ UNCHANGED sync_jobs
-        /\ UNCHANGED const_vars
-        /\ UNCHANGED master_replicas
+        /\ slave_unchanged
 
 
 SlaveWriteComplete ==
@@ -226,10 +284,7 @@ SlaveWriteComplete ==
         /\ slave_events' = Append(slave_events, event)
         /\ replicas' = [replicas EXCEPT ![id].slave_status = "WriteCompleted"]
 
-        /\ UNCHANGED num_actions
-        /\ UNCHANGED sync_jobs
-        /\ UNCHANGED const_vars
-        /\ UNCHANGED master_replicas
+        /\ slave_unchanged
 
 --------------------------------------------------------------------------
 
@@ -248,6 +303,11 @@ MasterSync ==
 
 TerminateCond ==
     /\ slave_events = <<>>
+    /\ \A id \in ReplicaID:
+        replicas[id].type = "Primary" =>
+            replicas[id].slave_status = "WriteCompleted"
+    /\ \A job_id \in SyncJobID:
+        sync_jobs[job_id].status = "Succeeded"
 
 Terminated ==
     /\ TerminateCond
@@ -263,6 +323,7 @@ Next ==
     \/ HandleSlaveEvent
 
     \/ MasterSync
+    \/ FinishJob
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -283,5 +344,10 @@ ReadonlyReplicaAlwaysHaveSyncJob ==
     IN
         \A id \in ReplicaID:
             replicas[id].type = "Readonly" <=> exist_job_dst_id(id)
+
+
+WhenTerminatedAllReplicasWritten ==
+    TerminateCond =>
+        \A id \in ReplicaID: replicas[id].status = "Written"
 
 ====
