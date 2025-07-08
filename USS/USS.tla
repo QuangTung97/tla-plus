@@ -218,7 +218,12 @@ AddReplica(span) ==
 trigger_sync_from_replica(id, input_jobs) ==
     LET
         allow_trigger(job_id) ==
+            LET
+                dst_id == input_jobs[job_id].dst_id
+                dst_repl == replicas[dst_id]
+            IN
             /\ input_jobs[job_id].src_id = id
+            /\ ~(dst_repl.hard_deleted /\ is_replica_deleted(dst_id))
 
         is_replica_deleting(job_id) ==
             LET
@@ -464,13 +469,32 @@ DeleteReplica ==
 doRemoveExtraReplica(r) ==
     LET
         id == r.id
+
+        when_empty ==
+            /\ replicas' = [replicas EXCEPT
+                    ![id].delete_status = "Deleted",
+                    ![id].status = "Written",
+                    ![id].hard_deleted = TRUE
+                ]
+        
+        new_status ==
+            IF is_replica_deleted(id)
+                THEN r.delete_status
+                ELSE "NeedDelete"
+
+        updated == [replicas EXCEPT
+                ![id].delete_status = new_status,
+                ![id].hard_deleted = TRUE
+            ]
+
+        when_written ==
+            /\ replicas' = set_replica_delete_status({id}, updated, sync_jobs)
     IN
     /\ r.type = "Readonly" \* TODO allow primary too
     /\ inc_action
-    /\ replicas' = [replicas EXCEPT
-            ![id].delete_status = "NeedDelete",
-            ![id].hard_deleted = TRUE
-        ]
+    /\ IF r.status = "Empty"
+        THEN when_empty
+        ELSE when_written
 
     /\ UNCHANGED deleted_spans
     /\ UNCHANGED sync_jobs
@@ -706,5 +730,24 @@ SyncJobAndDeleteJobConcurrently ==
         IN
             /\ ~(cond1 /\ cond2)
             /\ ~(cond1 /\ cond3)
+
+
+ShouldNotSyncToHardDeleted ==
+    \A id \in ReplicaID:
+        LET
+            r == replicas[id]
+
+            pre_cond ==
+                /\ r.delete_status = "Deleted"
+                /\ r.hard_deleted
+
+            job_id == get_sync_job_of(r.id)
+            job == sync_jobs[job_id]
+
+            cond ==
+                \/ job.status = "Succeeded"
+                \/ job.status = "Pending"
+        IN
+            pre_cond => cond
 
 ====
