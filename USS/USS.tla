@@ -4,15 +4,14 @@ EXTENDS TLC, Sequences, Naturals, FiniteSets
 CONSTANTS nil, max_actions
 
 VARIABLES
-    replicas, sync_jobs, source_map,
-    next_val, num_actions,
-    master_replicas
+    replicas, sync_jobs, next_val, num_actions,
+    master_replicas, slave_events, source_map
 
 const_vars == <<source_map>>
 
 vars == <<
     replicas, sync_jobs, next_val, num_actions,
-    master_replicas, const_vars
+    master_replicas, slave_events, const_vars
 >>
 
 --------------------------------------------------------------------------
@@ -45,9 +44,10 @@ Replica == [
     id: ReplicaID,
     span: SpanID,
     type: {"Primary", "Readonly"},
-    status: {"Empty", "Writting", "Written"},
+    status: {"Empty", "Writing", "Written"},
     value: NullValue,
-    delete_status: {"NoAction", "NeedDelete", "CanDelete", "Ready", "Deleted"}
+    delete_status: {"NoAction", "NeedDelete", "CanDelete", "Ready", "Deleted"},
+    slave_status: {nil, "Writing", "WriteCompleted"}
 ]
 
 SyncJobID == DOMAIN sync_jobs
@@ -58,6 +58,21 @@ SyncJob == [
     status: {"Pending", "Ready", "Succeeded"}
 ]
 
+SlaveEvent ==
+    LET
+        write_event == [
+            type: {"Write"},
+            repl_id: ReplicaID
+        ]
+
+        write_completed_event == [
+            type: {"WriteComplete"},
+            repl_id: ReplicaID,
+            value: Value
+        ]
+    IN
+    write_event \union write_completed_event
+
 --------------------------------------------------------------------------
 
 TypeOK ==
@@ -67,6 +82,7 @@ TypeOK ==
     /\ next_val \in Value
     /\ num_actions \in 0..max_actions
     /\ master_replicas \in Seq(Replica)
+    /\ slave_events \in Seq(SlaveEvent)
 
 
 Init ==
@@ -76,6 +92,7 @@ Init ==
     /\ next_val = 30
     /\ num_actions = 0
     /\ master_replicas = <<>>
+    /\ slave_events = <<>>
 
 --------------------------------------------------------------------------
 
@@ -105,6 +122,11 @@ find_source_replica(span) ==
         nil
 
 
+inc_action ==
+    /\ num_actions < max_actions
+    /\ num_actions' = num_actions + 1
+
+
 AddReplica(span) ==
     LET
         repl_type ==
@@ -120,7 +142,8 @@ AddReplica(span) ==
             type |-> repl_type,
             status |-> "Empty",
             value |-> nil,
-            delete_status |-> "NoAction"
+            delete_status |-> "NoAction",
+            slave_status |-> nil
         ]
 
         new_job == [
@@ -133,8 +156,7 @@ AddReplica(span) ==
             sync_jobs' = Append(sync_jobs, new_job)
     IN
     /\ allow_to_add_span(span)
-    /\ num_actions < max_actions
-    /\ num_actions' = num_actions + 1
+    /\ inc_action
 
     /\ replicas' = Append(replicas, new_repl)
     /\ IF repl_type = "Primary"
@@ -144,6 +166,70 @@ AddReplica(span) ==
     /\ UNCHANGED next_val
     /\ UNCHANGED const_vars
     /\ UNCHANGED master_replicas
+    /\ UNCHANGED slave_events
+
+
+HandleSlaveEvent ==
+    LET
+        e == slave_events[1]
+        id == e.repl_id
+
+        handle_writing ==
+            /\ e.type = "Write"
+            /\ replicas' = [replicas EXCEPT ![id].status = "Writing"]
+            /\ UNCHANGED sync_jobs
+    IN
+    /\ slave_events # <<>>
+    /\ slave_events' = Tail(slave_events)
+    /\ \/ handle_writing
+
+    /\ UNCHANGED next_val
+    /\ UNCHANGED num_actions
+    /\ UNCHANGED master_replicas
+    /\ UNCHANGED const_vars
+
+--------------------------------------------------------------------------
+
+SlaveWrite ==
+    \E id \in DOMAIN master_replicas:
+        LET
+            event == [
+                type |-> "Write",
+                repl_id |-> id
+            ]
+        IN
+        /\ master_replicas[id].type = "Primary"
+        /\ inc_action
+
+        /\ slave_events' = Append(slave_events, event)
+        /\ replicas' = [replicas EXCEPT ![id].slave_status = "Writing"]
+
+        /\ UNCHANGED next_val
+        /\ UNCHANGED sync_jobs
+        /\ UNCHANGED const_vars
+        /\ UNCHANGED master_replicas
+
+
+SlaveWriteComplete ==
+    \E id \in DOMAIN master_replicas:
+        LET
+            event == [
+                type |-> "WriteComplete",
+                repl_id |-> id,
+                value |-> next_val'
+            ]
+        IN
+        /\ master_replicas[id].type = "Primary"
+        /\ replicas[id].slave_status = "Writing"
+
+        /\ next_val' = next_val + 1
+        /\ slave_events' = Append(slave_events, event)
+        /\ replicas' = [replicas EXCEPT ![id].slave_status = "WriteCompleted"]
+
+        /\ UNCHANGED num_actions
+        /\ UNCHANGED sync_jobs
+        /\ UNCHANGED const_vars
+        /\ UNCHANGED master_replicas
 
 --------------------------------------------------------------------------
 
@@ -156,11 +242,12 @@ MasterSync ==
     /\ UNCHANGED sync_jobs
     /\ UNCHANGED num_actions
     /\ UNCHANGED const_vars
+    /\ UNCHANGED slave_events
 
 --------------------------------------------------------------------------
 
 TerminateCond ==
-    /\ TRUE
+    /\ slave_events = <<>>
 
 Terminated ==
     /\ TerminateCond
@@ -170,6 +257,11 @@ Terminated ==
 Next ==
     \/ \E span \in SpanID:
         \/ AddReplica(span)
+
+    \/ SlaveWrite
+    \/ SlaveWriteComplete
+    \/ HandleSlaveEvent
+
     \/ MasterSync
     \/ Terminated
 
