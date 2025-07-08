@@ -193,8 +193,11 @@ trigger_sync_replica(id, input_jobs) ==
             update_job(job_id, input_jobs[job_id])]
 
 
-updatePrimary(id) ==
-    /\ replicas' = [replicas EXCEPT ![id].status = "Written"]
+updatePrimary(id, val) ==
+    /\ replicas' = [replicas EXCEPT
+            ![id].status = "Written",
+            ![id].value = val
+        ]
     /\ sync_jobs' = trigger_sync_replica(id, sync_jobs)
 
 HandleSlaveEvent ==
@@ -209,7 +212,7 @@ HandleSlaveEvent ==
 
         handle_write_completed ==
             /\ e.type = "WriteComplete"
-            /\ updatePrimary(id)
+            /\ updatePrimary(id, e.value)
     IN
     /\ slave_events # <<>>
     /\ slave_events' = Tail(slave_events)
@@ -226,6 +229,7 @@ HandleSlaveEvent ==
 doFinishJob(job_id) ==
     LET
         job == sync_jobs[job_id]
+        src_id == job.src_id
         dst_id == job.dst_id
 
         set_finished == [sync_jobs EXCEPT ![job_id].status = "Succeeded"]
@@ -233,7 +237,10 @@ doFinishJob(job_id) ==
     /\ sync_jobs[job_id].status = "Ready"
     /\ UNCHANGED num_actions
 
-    /\ replicas' = [replicas EXCEPT ![dst_id].status = "Written"]
+    /\ replicas' = [replicas EXCEPT
+            ![dst_id].status = "Written",
+            ![dst_id].value = replicas[src_id].value
+        ]
     /\ sync_jobs' = trigger_sync_replica(dst_id, set_finished)
 
     /\ core_unchanged
@@ -337,6 +344,13 @@ AtMostOnePrimary ==
         Cardinality(primary_set) <= 1
 
 
+getPrimaryRepl ==
+    LET
+        primary_set == {id \in ReplicaID: replicas[id].type = "Primary"}
+    IN
+        CHOOSE id \in primary_set: TRUE
+
+
 ReadonlyReplicaAlwaysHaveSyncJob ==
     LET
         exist_job_dst_id(dst_id) ==
@@ -348,6 +362,8 @@ ReadonlyReplicaAlwaysHaveSyncJob ==
 
 WhenTerminatedAllReplicasWritten ==
     TerminateCond =>
-        \A id \in ReplicaID: replicas[id].status = "Written"
+        \A id \in ReplicaID:
+            /\ replicas[id].status = "Written"
+            /\ replicas[id].value = replicas[getPrimaryRepl].value
 
 ====
