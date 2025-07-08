@@ -256,6 +256,18 @@ FinishJob ==
 
 --------------------------------------------------------------------------
 
+AddDeleteRule(span) ==
+    /\ span \notin deleted_spans
+    /\ inc_action
+
+    /\ deleted_spans' = deleted_spans \union {span}
+    /\ UNCHANGED replicas
+    /\ UNCHANGED sync_jobs
+
+    /\ core_unchanged
+
+--------------------------------------------------------------------------
+
 slave_unchanged ==
     /\ UNCHANGED num_actions
     /\ UNCHANGED sync_jobs
@@ -331,6 +343,7 @@ Terminated ==
 Next ==
     \/ \E span \in SpanID:
         \/ AddReplica(span)
+        \/ AddDeleteRule(span)
 
     \/ SlaveWrite
     \/ SlaveWriteComplete
@@ -368,9 +381,18 @@ ReadonlyReplicaAlwaysHaveSyncJob ==
 
 
 WhenTerminatedAllReplicasWritten ==
+    LET
+        when_no_deletion(repl) ==
+            /\ repl.status = "Written"
+            /\ repl.value = next_val
+
+        when_has_delete_rule(repl) ==
+            /\ repl.delete_status = "Deleted"
+    IN
     TerminateCond =>
         \A id \in ReplicaID:
-            /\ replicas[id].status = "Written"
-            /\ replicas[id].value = replicas[getPrimaryRepl].value
+            IF replicas[id].span \in deleted_spans
+                THEN when_has_delete_rule(replicas[id])
+                ELSE when_no_deletion(replicas[id])
 
 ====
