@@ -1,17 +1,23 @@
 ------ MODULE USS ----
 EXTENDS TLC, Sequences, Naturals, FiniteSets
 
+Range(f) == {f[x]: x \in DOMAIN f}
+
+--------------------------------------------------------------------------
+
 CONSTANTS nil, max_actions
 
 VARIABLES
     replicas, sync_jobs, next_val, num_actions,
-    master_replicas, slave_events, deleted_spans, source_map
+    master_replicas, slave_events, deleted_spans,
+    source_map
 
 const_vars == <<source_map>>
 
 vars == <<
     replicas, sync_jobs, next_val, num_actions,
-    master_replicas, slave_events, deleted_spans, const_vars
+    master_replicas, slave_events, deleted_spans,
+    const_vars
 >>
 
 --------------------------------------------------------------------------
@@ -53,6 +59,7 @@ Replica == [
     delete_status: {"NoAction", "NeedDelete", "CanDelete", "Deleting", "Deleted"},
     write_version: Version,
     generation: Generation,
+    hard_deleted: BOOLEAN,
 
     slave_status: {nil, "SlaveWriting", "SlaveWriteCompleted", "SlaveDeleted"},
     slave_version: Version,
@@ -107,9 +114,16 @@ Init ==
 
 --------------------------------------------------------------------------
 
+is_replica_deleted(id) ==
+    /\ replicas[id].delete_status # "NoAction"
+    /\ replicas[id].delete_status # "NeedDelete"
+
+
 get_replicas_with_span(span) ==
     LET
-        filter_fn(r) == r.span = span
+        filter_fn(r) ==
+            /\ r.span = span
+            /\ ~(is_replica_deleted(r.id) /\ r.hard_deleted)
     IN
     SelectSeq(replicas, filter_fn)
 
@@ -143,10 +157,6 @@ core_unchanged ==
     /\ UNCHANGED slave_events
     /\ UNCHANGED master_replicas
 
-is_replica_deleted(id) ==
-    /\ replicas[id].delete_status # "NoAction"
-    /\ replicas[id].delete_status # "NeedDelete"
-
 
 AddReplica(span) ==
     LET
@@ -166,6 +176,7 @@ AddReplica(span) ==
             delete_status |-> "NoAction",
             write_version |-> 0,
             generation |-> 1,
+            hard_deleted |-> FALSE,
 
             slave_status |-> nil,
             slave_version |-> 0,
@@ -450,6 +461,31 @@ DeleteReplica ==
 
 --------------------------------------------------------------------------
 
+doRemoveExtraReplica(r) ==
+    LET
+        id == r.id
+    IN
+    /\ r.type = "Readonly" \* TODO allow primary too
+    /\ inc_action
+    /\ replicas' = [replicas EXCEPT
+            ![id].delete_status = "NeedDelete",
+            ![id].hard_deleted = TRUE
+        ]
+
+    /\ UNCHANGED deleted_spans
+    /\ UNCHANGED sync_jobs
+    /\ core_unchanged
+
+RemoveExtraReplica(span) ==
+    LET
+        repl_list == get_replicas_with_span(span)
+        repl_set == Range(repl_list)
+    IN
+    /\ Len(repl_list) > 1
+    /\ \E r \in repl_set: doRemoveExtraReplica(r)
+
+--------------------------------------------------------------------------
+
 slave_unchanged ==
     /\ UNCHANGED sync_jobs
     /\ UNCHANGED const_vars
@@ -569,6 +605,7 @@ Next ==
         \/ AddReplica(span)
         \/ AddDeleteRule(span)
         \/ ApplyDeleteRule(span)
+        \/ RemoveExtraReplica(span)
 
     \/ UpdateToDeleting
     \/ DeleteReplica
@@ -638,12 +675,19 @@ WhenTerminatedAllReplicasWritten ==
             ELSE
                 \/ fully_deleted(repl)
                 \/ is_still_empty(repl)
+
+        cond(r) ==
+            IF r.hard_deleted THEN
+                /\ r.status = "Written"
+                /\ r.delete_status = "Deleted"
+                /\ r.value = nil
+            ELSE IF r.span \in deleted_spans THEN
+                when_has_delete_rule(r)
+            ELSE
+                when_no_deletion(r)
     IN
     TerminateCond =>
-        \A id \in ReplicaID:
-            IF replicas[id].span \in deleted_spans
-                THEN when_has_delete_rule(replicas[id])
-                ELSE when_no_deletion(replicas[id])
+        \A id \in ReplicaID: cond(replicas[id])
 
 
 SyncJobAndDeleteJobConcurrently ==
