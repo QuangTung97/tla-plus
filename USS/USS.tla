@@ -364,7 +364,9 @@ doUpdateToDeleting(id) ==
                 ]
 
         when_is_writing ==
-            /\ replicas' = [replicas EXCEPT ![id].delete_status = "NeedDelete"]
+            /\ replicas' = [replicas EXCEPT
+                    ![id].delete_status = new_delete_status(@)
+                ]
 
         when_is_primary ==
             IF replicas[id].slave_version = replicas[id].write_version
@@ -405,7 +407,7 @@ doDeleteReplica(id) ==
         when_waiting ==
             /\ sync_jobs' = [sync_jobs EXCEPT ![job_id].status = "Ready"]
             /\ replicas' = [replicas EXCEPT
-                    ![id].delete_status = "NeedDelete",
+                    ![id].delete_status = new_delete_status(@),
                     ![id].status = "Empty",
                     ![id].value = nil
                 ]
