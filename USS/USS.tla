@@ -469,6 +469,12 @@ DeleteReplica ==
 doRemoveExtraReplica(r) ==
     LET
         id == r.id
+        job_id == get_sync_job_of(id)
+        job == sync_jobs[job_id]
+
+        is_empty_cond ==
+            /\ r.status = "Empty"
+            /\ job.status = "Pending"
 
         when_empty ==
             /\ replicas' = [replicas EXCEPT
@@ -492,7 +498,7 @@ doRemoveExtraReplica(r) ==
     IN
     /\ r.type = "Readonly" \* TODO allow primary too
     /\ inc_action
-    /\ IF r.status = "Empty"
+    /\ IF is_empty_cond
         THEN when_empty
         ELSE when_written
 
