@@ -60,7 +60,7 @@ SyncJobID == DOMAIN sync_jobs
 SyncJob == [
     src_id: ReplicaID,
     dst_id: ReplicaID,
-    status: {"Pending", "Ready", "Succeeded"}
+    status: {"Pending", "Ready", "Succeeded", "Waiting"}
 ]
 
 SlaveEvent ==
@@ -198,17 +198,21 @@ AddReplica(span) ==
     /\ core_unchanged
 
 
-trigger_sync_replica(id, input_jobs) ==
+trigger_sync_from_replica(id, input_jobs) ==
     LET
         get_dst_id(job_id) == input_jobs[job_id].dst_id
 
         allow_trigger(job_id) ==
             /\ input_jobs[job_id].src_id = id
-            /\ ~is_replica_deleted(get_dst_id(job_id))
+
+        updated_status(job_id) ==
+            IF is_replica_deleted(get_dst_id(job_id))
+                THEN "Waiting"
+                ELSE "Ready"
 
         update_job(job_id, old) ==
             IF allow_trigger(job_id)
-                THEN [old EXCEPT !.status = "Ready"]
+                THEN [old EXCEPT !.status = updated_status(job_id)]
                 ELSE old
     IN
         [job_id \in SyncJobID |->
@@ -256,7 +260,7 @@ updatePrimary(id, version) ==
                 ![id].delete_status = new_delete_status(@)
             ]
     IN
-        /\ sync_jobs' = trigger_sync_replica(id, sync_jobs)
+        /\ sync_jobs' = trigger_sync_from_replica(id, sync_jobs)
         /\ replicas' = set_replica_delete_status({id}, updated, sync_jobs')
 
 HandleSlaveEvent ==
@@ -302,7 +306,7 @@ doFinishJob(job_id) ==
     /\ sync_jobs[job_id].status = "Ready"
     /\ UNCHANGED num_actions
 
-    /\ sync_jobs' = trigger_sync_replica(dst_id, set_finished)
+    /\ sync_jobs' = trigger_sync_from_replica(dst_id, set_finished)
     /\ replicas' = set_replica_delete_status({src_id, dst_id}, updated, sync_jobs')
 
     /\ UNCHANGED deleted_spans
@@ -375,13 +379,35 @@ UpdateToDeleting ==
 
 
 doDeleteReplica(id) ==
-    /\ replicas[id].delete_status = "Deleting"
-    /\ replicas' = [replicas EXCEPT
-            ![id].delete_status = "Deleted",
-            ![id].value = nil
-        ]
+    LET
+        waiting_set == {
+            job_id \in SyncJobID:
+                /\ sync_jobs[job_id].dst_id = id
+                /\ sync_jobs[job_id].status = "Waiting"
+        }
 
-    /\ UNCHANGED sync_jobs
+        when_normal ==
+            /\ replicas' = [replicas EXCEPT
+                    ![id].delete_status = "Deleted",
+                    ![id].value = nil
+                ]
+            /\ UNCHANGED sync_jobs
+
+        job_id == CHOOSE job_id \in waiting_set: TRUE
+
+        when_waiting ==
+            /\ sync_jobs' = [sync_jobs EXCEPT ![job_id].status = "Ready"]
+            /\ replicas' = [replicas EXCEPT
+                    ![id].delete_status = "NeedDelete",
+                    ![id].status = "Empty",
+                    ![id].value = nil
+                ]
+    IN
+    /\ replicas[id].delete_status = "Deleting"
+    /\ IF waiting_set # {}
+        THEN when_waiting
+        ELSE when_normal
+
     /\ UNCHANGED deleted_spans
     /\ UNCHANGED num_actions
     /\ core_unchanged
@@ -416,7 +442,7 @@ slaveDoWrite(id) ==
     /\ id \in DOMAIN master_replicas
     /\ master_replicas[id].type = "Primary"
     /\ \/ when_nil
-        \/ when_write_completed
+       \/ when_write_completed
 
     /\ slave_events' = Append(slave_events, event)
     /\ replicas' = [replicas EXCEPT
