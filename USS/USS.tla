@@ -480,12 +480,20 @@ get_sync_job_of(id) ==
             THEN nil
             ELSE CHOOSE job_id \in job_set: TRUE
 
-sync_job_is_waiting(job_id) ==
+update_sync_job_after_when_delete(r, input_jobs) ==
     LET
-        job == sync_jobs[job_id]
+        job_id == get_sync_job_of(r.id)
+
+        is_waiting ==
+            /\ job_id # nil
+            /\ input_jobs[job_id].status = "Waiting"
     IN
-    /\ job_id # nil
-    /\ job.status = "Waiting"
+    IF r.hard_deleted THEN
+        [input_jobs EXCEPT ![job_id].status = "Succeeded"]
+    ELSE IF is_waiting THEN
+        [input_jobs EXCEPT ![job_id].status = "Ready"]
+    ELSE
+        input_jobs
 
 
 doUpdateToDeleting(id) ==
@@ -495,11 +503,13 @@ doUpdateToDeleting(id) ==
                     ![id].delete_status = "Deleting",
                     ![id].slave_status = "SlaveDeleted"
                 ]
+            /\ UNCHANGED sync_jobs
 
         update_to_need_delete ==
             /\ replicas' = [replicas EXCEPT
                     ![id].delete_status = new_delete_status(@, replicas[id])
                 ]
+            /\ UNCHANGED sync_jobs \* TODO
 
         when_is_primary ==
             IF replicas[id].slave_version = replicas[id].write_version
@@ -509,17 +519,20 @@ doUpdateToDeleting(id) ==
         job_id == get_sync_job_of(id)
         job == sync_jobs[job_id]
 
+        update_to_deleting ==
+            /\ replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
+            /\ UNCHANGED sync_jobs
+
         when_is_readonly ==
             IF job.status # "Succeeded" \* TODO check can remove?
                 THEN update_to_need_delete
-                ELSE replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
+                ELSE update_to_deleting
     IN
     /\ replicas[id].delete_status = "ReadyToDelete"
     /\ IF replicas[id].type = "Primary"
         THEN when_is_primary
         ELSE when_is_readonly
 
-    /\ UNCHANGED sync_jobs
     /\ UNCHANGED deleted_spans
     /\ UNCHANGED hist_deleted_spans
     /\ UNCHANGED num_actions
@@ -531,29 +544,13 @@ UpdateToDeleting ==
 ----------------------------
 
 doDeleteReplica(id) ==
-    LET
-        when_normal ==
-            /\ replicas' = [replicas EXCEPT
-                    ![id].delete_status = "Deleted",
-                    ![id].value = nil,
-                    ![id].generation = @ + 1
-                ]
-            /\ UNCHANGED sync_jobs
-
-        job_id == get_sync_job_of(id)
-
-        when_waiting ==
-            /\ sync_jobs' = [sync_jobs EXCEPT ![job_id].status = "Ready"]
-            /\ replicas' = [replicas EXCEPT
-                    ![id].delete_status = new_delete_status(@, replicas[id]),
-                    ![id].status = "Empty",
-                    ![id].value = nil
-                ]
-    IN
     /\ replicas[id].delete_status = "Deleting"
-    /\ IF sync_job_is_waiting(job_id)
-        THEN when_waiting
-        ELSE when_normal
+    /\ replicas' = [replicas EXCEPT
+            ![id].delete_status = "Deleted",
+            ![id].value = nil,
+            ![id].generation = @ + 1
+        ]
+    /\ sync_jobs' = update_sync_job_after_when_delete(replicas'[id], sync_jobs)
 
     /\ UNCHANGED deleted_spans
     /\ UNCHANGED hist_deleted_spans
@@ -571,7 +568,7 @@ doRemoveExtraReplicaReadonly(r) ==
         job_id == get_sync_job_of(id)
         job == sync_jobs[job_id]
 
-        is_empty_cond ==
+        can_delete_right_away ==
             \/ /\ r.status = "Empty"
                /\ job.status = "Pending"
             \/ /\ r.delete_status = "Deleted"
@@ -589,7 +586,7 @@ doRemoveExtraReplicaReadonly(r) ==
                     {id}, replicas', update_job_to_succeeded)
 
         new_status ==
-            IF is_replica_deleted(r)
+            IF is_replica_deleted(r) /\ r.delete_status # "Deleted"
                 THEN r.delete_status
                 ELSE "NeedDelete"
 
@@ -603,7 +600,7 @@ doRemoveExtraReplicaReadonly(r) ==
     IN
     /\ r.type = "Readonly"
     /\ inc_action
-    /\ IF is_empty_cond
+    /\ IF can_delete_right_away
         THEN when_empty
         ELSE when_written
 
@@ -915,6 +912,15 @@ EveryReplicaReachableByPrimary ==
             /\ get_reachable_replicas_from({primary_repl.id}) = all_replicas
     IN
         pre_cond => cond
+
+
+ReplicaDeleteStatusInv ==
+    \A r \in Range(replicas):
+        r.delete_status = "Deleted" => r.status \in {"Writing", "Written"}
+
+
+NoSyncJobShouldSourceFromHardDeleted ==
+    \A j \in Range(sync_jobs): ~is_hard_deleted(replicas[j.src_id])
 
 
 InverseHardDeletedInv ==
