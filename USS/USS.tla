@@ -488,13 +488,11 @@ doUpdateToDeleting(id) ==
                     ![id].delete_status = "Deleting",
                     ![id].slave_status = "SlaveDeleted"
                 ]
-            /\ UNCHANGED sync_jobs
 
         update_to_need_delete ==
             /\ replicas' = [replicas EXCEPT
                     ![id].delete_status = new_delete_status(@, replicas[id])
                 ]
-            /\ UNCHANGED sync_jobs \* TODO
 
         when_is_primary ==
             IF replicas[id].slave_version = replicas[id].write_version
@@ -503,13 +501,13 @@ doUpdateToDeleting(id) ==
         
         when_is_readonly ==
             /\ replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
-            /\ UNCHANGED sync_jobs
     IN
     /\ replicas[id].delete_status = "ReadyToDelete"
     /\ IF replicas[id].type = "Primary"
         THEN when_is_primary
         ELSE when_is_readonly
 
+    /\ UNCHANGED sync_jobs
     /\ UNCHANGED deleted_spans
     /\ UNCHANGED hist_deleted_spans
     /\ UNCHANGED num_actions
@@ -528,9 +526,7 @@ update_sync_job_after_delete(r, input_jobs) ==
             /\ job_id # nil
             /\ input_jobs[job_id].status = "Waiting"
     IN
-    IF r.hard_deleted THEN
-        [input_jobs EXCEPT ![job_id].status = "Succeeded"]
-    ELSE IF is_waiting THEN
+    IF is_waiting THEN
         [input_jobs EXCEPT ![job_id].status = "Ready"]
     ELSE
         input_jobs
@@ -760,6 +756,7 @@ Spec == Init /\ [][Next]_vars
 FairSpec == Spec /\ WF_vars(Next)
 
 --------------------------------------------------------------------------
+
 AlwaysTerminated == []<> TerminateCond
 
 
@@ -914,6 +911,16 @@ ReplicaDeleteStatusInv ==
 NoSyncJobShouldSourceFromHardDeleted ==
     \A j \in Range(sync_jobs): ~is_hard_deleted(replicas[j.src_id])
 
+
+syncJobAlwaysFromReadyToSucceededStep ==
+    \A job_id \in SyncJobID:
+        sync_jobs[job_id].status = "Ready"
+            => sync_jobs'[job_id].status \in {"Ready", "Succeeded"}
+
+SyncJobAlwaysFromReadyToSucceeded ==
+    [][syncJobAlwaysFromReadyToSucceededStep]_sync_jobs
+
+--------------------------------------------------------------------------
 
 InverseHardDeletedInv ==
     \A r \in Range(replicas): ~r.hard_deleted
