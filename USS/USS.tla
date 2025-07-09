@@ -54,7 +54,7 @@ Generation == 0..10
 
 DeleteStatus == {
     "NoAction", "NeedDelete", "CanDelete",
-    "Deleting", "Deleted"
+    "ReadyToDelete", "Deleting", "Deleted"
 }
 
 Replica == [
@@ -237,6 +237,7 @@ AddReplica(span) ==
 
 is_replica_deleting(r) ==
     \/ r.delete_status = "Deleting"
+    \/ r.delete_status = "ReadyToDelete"
 
 
 trigger_sync_from_replica(id, input_jobs) ==
@@ -460,6 +461,21 @@ ApplyDeleteRule(span) ==
 
 ----------------------------
 
+doUpdateToReadyDelete(id) ==
+    /\ replicas[id].delete_status = "CanDelete"
+    /\ replicas' = [replicas EXCEPT ![id].delete_status = "ReadyToDelete"]
+
+    /\ UNCHANGED sync_jobs
+    /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
+    /\ UNCHANGED num_actions
+    /\ core_unchanged
+
+UpdateToReadyDelete ==
+    \E id \in ReplicaID: doUpdateToReadyDelete(id)
+
+----------------------------
+
 get_sync_job_of(id) ==
     LET
         job_set == {job_id \in SyncJobID: sync_jobs[job_id].dst_id = id}
@@ -491,7 +507,7 @@ doUpdateToDeleting(id) ==
                         ![id].delete_status = "Deleting"]
                 ELSE replicas' = update_to_need_delete(id, replicas)
     IN
-    /\ replicas[id].delete_status = "CanDelete"
+    /\ replicas[id].delete_status = "ReadyToDelete"
     /\ IF replicas[id].type = "Primary"
         THEN when_is_primary
         ELSE when_is_readonly
@@ -568,7 +584,8 @@ doRemoveExtraReplicaReadonly(r) ==
                     {id}, replicas', update_job_to_succeeded)
 
         new_status ==
-            IF is_replica_deleted(r) /\ r.delete_status # "Deleted"
+            \* IF is_replica_deleted(r) /\ r.delete_status # "Deleted" TODO
+            IF is_replica_deleting(r)
                 THEN r.delete_status
                 ELSE "NeedDelete"
 
@@ -733,6 +750,7 @@ Next ==
         \/ ApplyDeleteRule(span)
         \/ RemoveExtraReplica(span)
 
+    \/ UpdateToReadyDelete
     \/ UpdateToDeleting
     \/ DeleteReplica
 
@@ -860,6 +878,7 @@ ShouldNotSyncToHardDeleted ==
         IN
             pre_cond => cond
 
+------------------------
 
 compute_sync_job_closure(repl_ids) ==
     LET
@@ -879,7 +898,6 @@ get_reachable_replicas_from(repl_ids) ==
         THEN repl_ids
         ELSE get_reachable_replicas_from(new_set)
 
-
 EveryReplicaReachableByPrimary ==
     LET
         pre_cond == Len(replicas) > 0
@@ -895,6 +913,7 @@ EveryReplicaReachableByPrimary ==
     IN
         pre_cond => cond
 
+------------------------
 
 ReplicaDeleteStatusInv ==
     \A r \in Range(replicas):
@@ -904,6 +923,7 @@ ReplicaDeleteStatusInv ==
 NoSyncJobShouldSourceFromHardDeleted ==
     \A j \in Range(sync_jobs): ~is_hard_deleted(replicas[j.src_id])
 
+------------------------
 
 syncJobAlwaysFromReadyToSucceededStep ==
     \A job_id \in SyncJobID:
@@ -912,6 +932,15 @@ syncJobAlwaysFromReadyToSucceededStep ==
 
 SyncJobAlwaysFromReadyToSucceeded ==
     [][syncJobAlwaysFromReadyToSucceededStep]_sync_jobs
+
+------------------------
+
+deletingAlwaysToDeletedStep ==
+    \A id \in ReplicaID:
+        replicas[id].delete_status = "Deleting"
+            => replicas'[id].delete_status \in {"Deleting", "Deleted"}
+
+DeletingAlwaysToDeleted == [][deletingAlwaysToDeletedStep]_replicas
 
 --------------------------------------------------------------------------
 
