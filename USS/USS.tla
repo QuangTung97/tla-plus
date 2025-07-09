@@ -124,12 +124,12 @@ is_replica_deleted(r) ==
     /\ r.delete_status # "NeedDelete"
 
 
-do_get_replicas_with_span(span, input_replicas, repl_id) ==
+do_get_replicas_with_span(span, input_replicas, ignored_id) ==
     LET
         filter_fn(r) ==
             /\ r.span = span
             /\ ~(is_replica_deleted(r) /\ r.hard_deleted)
-            /\ repl_id # nil => r.id < repl_id
+            /\ ignored_id # nil => r.id < ignored_id
     IN
     SelectSeq(input_replicas, filter_fn)
 
@@ -143,7 +143,7 @@ allow_to_add_span(span) ==
        /\ get_replicas_with_span(span - 1) # <<>>
 
 
-do_find_source_replica(span, input_replicas, repl_id) ==
+find_source_replica(span, input_replicas, repl_id) ==
     LET
         list01 == do_get_replicas_with_span(span, input_replicas, repl_id)
         list02 == do_get_replicas_with_span(source_map[span], input_replicas, nil)
@@ -154,9 +154,6 @@ do_find_source_replica(span, input_replicas, repl_id) ==
         list02[1].id
     ELSE
         nil
-
-find_source_replica(span, repl_id) ==
-    do_find_source_replica(span, replicas, repl_id)
 
 
 inc_action ==
@@ -195,7 +192,7 @@ AddReplica(span) ==
             slave_generation |-> 1
         ]
 
-        src_id == find_source_replica(span, new_id)
+        src_id == find_source_replica(span, replicas', new_id)
         src == replicas[src_id]
 
         job_status ==
@@ -298,7 +295,7 @@ rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
             LET
                 dst_repl == input_replicas[old.dst_id]
 
-                new_src_id == do_find_source_replica(
+                new_src_id == find_source_replica(
                         dst_repl.span, input_replicas, dst_repl.id
                     )
             IN
