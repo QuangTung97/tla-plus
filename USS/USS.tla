@@ -480,21 +480,6 @@ get_sync_job_of(id) ==
             THEN nil
             ELSE CHOOSE job_id \in job_set: TRUE
 
-update_sync_job_after_when_delete(r, input_jobs) ==
-    LET
-        job_id == get_sync_job_of(r.id)
-
-        is_waiting ==
-            /\ job_id # nil
-            /\ input_jobs[job_id].status = "Waiting"
-    IN
-    IF r.hard_deleted THEN
-        [input_jobs EXCEPT ![job_id].status = "Succeeded"]
-    ELSE IF is_waiting THEN
-        [input_jobs EXCEPT ![job_id].status = "Ready"]
-    ELSE
-        input_jobs
-
 
 doUpdateToDeleting(id) ==
     LET
@@ -516,17 +501,9 @@ doUpdateToDeleting(id) ==
                 THEN normal_flow
                 ELSE update_to_need_delete
         
-        job_id == get_sync_job_of(id)
-        job == sync_jobs[job_id]
-
-        update_to_deleting ==
+        when_is_readonly ==
             /\ replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
             /\ UNCHANGED sync_jobs
-
-        when_is_readonly ==
-            IF job.status # "Succeeded" \* TODO check can remove?
-                THEN update_to_need_delete
-                ELSE update_to_deleting
     IN
     /\ replicas[id].delete_status = "ReadyToDelete"
     /\ IF replicas[id].type = "Primary"
@@ -543,6 +520,21 @@ UpdateToDeleting ==
 
 ----------------------------
 
+update_sync_job_after_delete(r, input_jobs) ==
+    LET
+        job_id == get_sync_job_of(r.id)
+
+        is_waiting ==
+            /\ job_id # nil
+            /\ input_jobs[job_id].status = "Waiting"
+    IN
+    IF r.hard_deleted THEN
+        [input_jobs EXCEPT ![job_id].status = "Succeeded"]
+    ELSE IF is_waiting THEN
+        [input_jobs EXCEPT ![job_id].status = "Ready"]
+    ELSE
+        input_jobs
+
 doDeleteReplica(id) ==
     /\ replicas[id].delete_status = "Deleting"
     /\ replicas' = [replicas EXCEPT
@@ -550,7 +542,7 @@ doDeleteReplica(id) ==
             ![id].value = nil,
             ![id].generation = @ + 1
         ]
-    /\ sync_jobs' = update_sync_job_after_when_delete(replicas'[id], sync_jobs)
+    /\ sync_jobs' = update_sync_job_after_delete(replicas'[id], sync_jobs)
 
     /\ UNCHANGED deleted_spans
     /\ UNCHANGED hist_deleted_spans
