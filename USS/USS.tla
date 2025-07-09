@@ -114,18 +114,22 @@ Init ==
 
 --------------------------------------------------------------------------
 
-is_replica_deleted(id) ==
-    /\ replicas[id].delete_status # "NoAction"
-    /\ replicas[id].delete_status # "NeedDelete"
+is_replica_deleted(r) ==
+    /\ r.delete_status # "NoAction"
+    /\ r.delete_status # "NeedDelete"
 
 
-get_replicas_with_span(span) ==
+do_get_replicas_with_span(span, input_replicas, repl_id) ==
     LET
         filter_fn(r) ==
             /\ r.span = span
-            /\ ~(is_replica_deleted(r.id) /\ r.hard_deleted)
+            /\ ~(is_replica_deleted(r) /\ r.hard_deleted)
+            /\ repl_id # nil /\ r.id < repl_id
     IN
-    SelectSeq(replicas, filter_fn)
+    SelectSeq(input_replicas, filter_fn)
+
+get_replicas_with_span(span) ==
+    do_get_replicas_with_span(span, replicas, nil)
 
 
 allow_to_add_span(span) ==
@@ -134,10 +138,10 @@ allow_to_add_span(span) ==
        /\ get_replicas_with_span(span - 1) # <<>>
 
 
-find_source_replica(span) ==
+do_find_source_replica(span, input_replicas, repl_id) ==
     LET
-        list01 == get_replicas_with_span(span)
-        list02 == get_replicas_with_span(source_map[span])
+        list01 == do_get_replicas_with_span(span, input_replicas, repl_id)
+        list02 == do_get_replicas_with_span(source_map[span], input_replicas, nil)
     IN
     IF list01 # <<>> THEN
         list01[1].id
@@ -145,6 +149,9 @@ find_source_replica(span) ==
         list02[1].id
     ELSE
         nil
+
+find_source_replica(span, repl_id) ==
+    do_find_source_replica(span, replicas, repl_id)
 
 
 inc_action ==
@@ -183,11 +190,12 @@ AddReplica(span) ==
             slave_generation |-> 1
         ]
 
-        src_id == find_source_replica(span)
+        src_id == find_source_replica(span, new_id)
+        src == replicas[src_id]
 
         job_status ==
             IF replicas[src_id].status = "Written" THEN
-                IF is_replica_deleted(src_id) THEN
+                IF is_replica_deleted(src) THEN
                     "Pending"
                 ELSE
                     "Ready"
@@ -223,7 +231,7 @@ trigger_sync_from_replica(id, input_jobs) ==
                 dst_repl == replicas[dst_id]
             IN
             /\ input_jobs[job_id].src_id = id
-            /\ ~(dst_repl.hard_deleted /\ is_replica_deleted(dst_id))
+            /\ ~(dst_repl.hard_deleted /\ is_replica_deleted(dst_repl))
 
         is_replica_deleting(job_id) ==
             LET
@@ -272,6 +280,28 @@ set_replica_delete_status(ids, input_replicas, input_jobs) ==
                 ELSE old
     IN
         [id \in DOMAIN input_replicas |-> update(id, input_replicas[id])]
+
+
+rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
+    LET
+        need_rewire(id) ==
+            /\ id \in repl_ids
+            \* /\ is_replica_deleted(input_replicas[id])
+            \* /\ input_replicas[id].hard_deleted
+
+        update(old) ==
+            LET
+                dst_repl == input_replicas[old.dst_id]
+
+                new_src_id == do_find_source_replica(
+                        dst_repl.span, input_replicas, dst_repl.id
+                    )
+            IN
+            IF need_rewire(old.src_id)
+                THEN [old EXCEPT !.src_id = new_src_id]
+                ELSE old
+    IN
+        [job_id \in DOMAIN input_jobs |-> update(input_jobs[job_id])]
 
 
 new_delete_status(old) ==
@@ -482,9 +512,10 @@ doRemoveExtraReplica(r) ==
                     ![id].status = "Written",
                     ![id].hard_deleted = TRUE
                 ]
+            /\ sync_jobs' = rewire_job_of_hard_deleted({id}, replicas', sync_jobs)
         
         new_status ==
-            IF is_replica_deleted(id)
+            IF is_replica_deleted(r)
                 THEN r.delete_status
                 ELSE "NeedDelete"
 
@@ -495,6 +526,7 @@ doRemoveExtraReplica(r) ==
 
         when_written ==
             /\ replicas' = set_replica_delete_status({id}, updated, sync_jobs)
+            /\ sync_jobs' = rewire_job_of_hard_deleted({id}, replicas', sync_jobs)
     IN
     /\ r.type = "Readonly" \* TODO allow primary too
     /\ inc_action
@@ -503,7 +535,6 @@ doRemoveExtraReplica(r) ==
         ELSE when_written
 
     /\ UNCHANGED deleted_spans
-    /\ UNCHANGED sync_jobs
     /\ core_unchanged
 
 RemoveExtraReplica(span) ==
@@ -755,5 +786,40 @@ ShouldNotSyncToHardDeleted ==
                 \/ job.status = "Pending"
         IN
             pre_cond => cond
+
+
+compute_sync_job_closure(repl_ids) ==
+    LET
+        job_set == {j \in Range(sync_jobs): j.src_id \in repl_ids}
+        new_set == {j.dst_id: j \in job_set}
+    IN
+        repl_ids \union new_set
+
+
+RECURSIVE get_reachable_replicas_from(_)
+
+get_reachable_replicas_from(repl_ids) ==
+    LET
+        new_set == compute_sync_job_closure(repl_ids)
+    IN
+    IF new_set = repl_ids
+        THEN repl_ids
+        ELSE get_reachable_replicas_from(new_set)
+
+
+EveryReplicaReachableByPrimary ==
+    LET
+        pre_cond == Len(replicas) > 0
+
+        filter_fn(r) == r.type = "Primary"
+        primary_repl == SelectSeq(replicas, filter_fn)[1]
+
+        all_replicas == {r.id: r \in Range(replicas)}
+
+        cond ==
+            /\ primary_repl.type = "Primary"
+            /\ get_reachable_replicas_from({primary_repl.id}) = all_replicas
+    IN
+        pre_cond => cond
 
 ====
