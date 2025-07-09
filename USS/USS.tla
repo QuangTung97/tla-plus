@@ -288,8 +288,8 @@ rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
     LET
         need_rewire(id) ==
             /\ id \in repl_ids
-            \* /\ is_replica_deleted(input_replicas[id]) TODO
-            \* /\ input_replicas[id].hard_deleted
+            /\ input_replicas[id].hard_deleted
+            /\ is_replica_deleted(input_replicas[id])
 
         update(old) ==
             LET
@@ -477,7 +477,7 @@ doUpdateToDeleting(id) ==
         job == sync_jobs[job_id]
 
         when_is_readonly ==
-            IF job.status # "Succeeded" \* TODO
+            IF job.status # "Succeeded" \* TODO check can remove?
                 THEN update_to_need_delete
                 ELSE replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
     IN
@@ -596,7 +596,7 @@ RemoveExtraReplica(span) ==
     /\ Len(repl_list) > 1
     /\ \E r \in repl_set:
         \/ doRemoveExtraReplicaReadonly(r)
-        \* \/ doRemoveExtraReplicaPrimary(r)
+        \* \/ doRemoveExtraReplicaPrimary(r) TODO
 
 --------------------------------------------------------------------------
 
