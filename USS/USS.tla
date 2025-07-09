@@ -135,10 +135,15 @@ is_hard_deleted(r) ==
 
 do_get_replicas_with_span(span, input_replicas, ignored_id) ==
     LET
-        filter_fn(r) ==
+        filter_non_primary(r) ==
             /\ r.span = span
             /\ ~is_hard_deleted(r)
             /\ ignored_id # nil => r.id < ignored_id
+
+        filter_fn(r) ==
+            IF r.span = primary_span
+                THEN r.type = "Primary"
+                ELSE filter_non_primary(r)
     IN
         SelectSeq(input_replicas, filter_fn)
 
@@ -298,7 +303,7 @@ private_set_replica_delete_status(ids, input_replicas, input_jobs) ==
     IN
         [id \in DOMAIN input_replicas |-> update(id, input_replicas[id])]
 
-\* TODO
+\* TODO move around
 rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
     LET
         need_rewire(id) ==
@@ -322,7 +327,6 @@ do_set_delete_status(ids, input_replicas, input_jobs) ==
     /\ replicas' = private_set_replica_delete_status(
             ids, input_replicas, input_jobs
         )
-    \* /\ sync_jobs' = rewire_job_of_hard_deleted(ids, replicas', input_jobs)
     /\ sync_jobs' = input_jobs
 
 
@@ -535,7 +539,14 @@ switch_primary_from(old_id, new_id, input_replicas) ==
 handle_hard_delete_primary(id, updated) ==
     LET
         span == replicas[id].span
-        new_primary_id == do_get_replicas_with_span(span, updated, nil)[1].id
+
+        filter_fn(r) ==
+            /\ r.span = span
+            /\ ~is_hard_deleted(r)
+
+        new_primary_replicas == SelectSeq(updated, filter_fn)
+
+        new_primary_id == new_primary_replicas[1].id
 
         switched == switch_primary_from(id, new_primary_id, updated)
 
@@ -649,9 +660,12 @@ doRemoveExtraReplicaPrimary(r) ==
         id == r.id
 
         new_status ==
-            IF is_replica_deleting(r)
-                THEN r.delete_status
-                ELSE "NeedDelete"
+            IF r.delete_status = "Deleted" THEN
+                "CanDelete"
+            ELSE IF is_replica_deleting(r) THEN
+                r.delete_status
+            ELSE
+                "NeedDelete"
 
         updated == [replicas EXCEPT
             ![id].delete_status = new_status,
@@ -1003,6 +1017,12 @@ deleteStatusStepInv ==
                 }
 
 DeleteStatusProperty == [][deleteStatusStepInv]_replicas
+
+------------------------
+
+PrimaryReplicaInv ==
+    \A r \in Range(replicas):
+        r.type = "Primary" => r.span = primary_span
 
 --------------------------------------------------------------------------
 
