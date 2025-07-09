@@ -9,14 +9,16 @@ CONSTANTS nil, max_actions
 
 VARIABLES
     replicas, sync_jobs, next_val, num_actions,
-    master_replicas, slave_events, deleted_spans,
+    master_replicas, slave_events,
+    deleted_spans, hist_deleted_spans,
     source_map
 
 const_vars == <<source_map>>
 
 vars == <<
     replicas, sync_jobs, next_val, num_actions,
-    master_replicas, slave_events, deleted_spans,
+    master_replicas, slave_events,
+    deleted_spans, hist_deleted_spans,
     const_vars
 >>
 
@@ -100,6 +102,8 @@ TypeOK ==
     /\ master_replicas \in Seq(Replica)
     /\ slave_events \in Seq(SlaveEvent)
     /\ deleted_spans \subseteq SpanID
+    /\ hist_deleted_spans \subseteq SpanID
+    /\ deleted_spans \subseteq hist_deleted_spans
 
 
 Init ==
@@ -111,6 +115,7 @@ Init ==
     /\ master_replicas = <<>>
     /\ slave_events = <<>>
     /\ deleted_spans = {}
+    /\ hist_deleted_spans = {}
 
 --------------------------------------------------------------------------
 
@@ -220,6 +225,7 @@ AddReplica(span) ==
         ELSE add_new_job
 
     /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
     /\ core_unchanged
 
 
@@ -344,6 +350,7 @@ HandleSlaveEvent ==
     /\ UNCHANGED master_replicas
     /\ UNCHANGED const_vars
     /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
 
 --------------------------------------------------------------------------
 
@@ -368,6 +375,7 @@ doFinishJob(job_id) ==
     /\ replicas' = set_replica_delete_status({src_id, dst_id}, updated, sync_jobs')
 
     /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
     /\ core_unchanged
 
 FinishJob ==
@@ -381,9 +389,22 @@ AddDeleteRule(span) ==
     /\ inc_action
 
     /\ deleted_spans' = deleted_spans \union {span}
+    /\ hist_deleted_spans' = hist_deleted_spans \union {span}
     /\ UNCHANGED replicas
     /\ UNCHANGED sync_jobs
 
+    /\ core_unchanged
+
+
+RemoveDeleteRule(span) ==
+    /\ span \in deleted_spans
+    /\ inc_action
+
+    /\ deleted_spans' = deleted_spans \ {span}
+    /\ UNCHANGED replicas
+    /\ UNCHANGED sync_jobs
+
+    /\ UNCHANGED hist_deleted_spans
     /\ core_unchanged
 
 
@@ -402,7 +423,9 @@ doApplyDeleteRule(span, id) ==
 ApplyDeleteRule(span) ==
     /\ span \in deleted_spans
     /\ \E id \in ReplicaID: doApplyDeleteRule(span, id)
+
     /\ UNCHANGED num_actions
+    /\ UNCHANGED hist_deleted_spans
     /\ core_unchanged
 
 
@@ -455,6 +478,7 @@ doUpdateToDeleting(id) ==
 
     /\ UNCHANGED sync_jobs
     /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
     /\ UNCHANGED num_actions
     /\ core_unchanged
 
@@ -488,6 +512,7 @@ doDeleteReplica(id) ==
         ELSE when_normal
 
     /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
     /\ UNCHANGED num_actions
     /\ core_unchanged
 
@@ -552,6 +577,7 @@ slave_unchanged ==
     /\ UNCHANGED const_vars
     /\ UNCHANGED master_replicas
     /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
 
 
 slaveDoWrite(id) ==
@@ -632,6 +658,7 @@ MasterSync ==
     /\ UNCHANGED const_vars
     /\ UNCHANGED slave_events
     /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
 
 --------------------------------------------------------------------------
 
@@ -665,6 +692,7 @@ Next ==
     \/ \E span \in SpanID:
         \/ AddReplica(span)
         \/ AddDeleteRule(span)
+        \/ RemoveDeleteRule(span)
         \/ ApplyDeleteRule(span)
         \/ RemoveExtraReplica(span)
 
@@ -681,7 +709,11 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 --------------------------------------------------------------------------
+AlwaysTerminated == []<> TerminateCond
+
 
 AtMostOnePrimary ==
     LET
@@ -719,16 +751,17 @@ WhenTerminatedAllReplicasWritten ==
             /\ \/ repl.delete_status = "NoAction"
                \/ repl.delete_status = "NeedDelete"
 
-        when_no_deletion(repl) ==
-            IF deleted_spans = {}
-                THEN fully_written(repl)
-                ELSE \/ fully_written(repl)
-                     \/ is_still_empty(repl)
-
         fully_deleted(repl) ==
             /\ repl.delete_status = "Deleted"
             /\ repl.status = "Written"
             /\ repl.value = nil
+
+        when_no_deletion(repl) ==
+            IF hist_deleted_spans = {}
+                THEN fully_written(repl)
+                ELSE \/ fully_written(repl)
+                     \/ is_still_empty(repl)
+                     \/ fully_deleted(repl)
 
         when_has_delete_rule(repl) ==
             IF repl.type = "Primary" THEN
