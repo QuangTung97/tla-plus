@@ -308,7 +308,6 @@ rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
         update(old) ==
             LET
                 dst_repl == input_replicas[old.dst_id]
-
                 new_src_id == find_source_replica(
                         dst_repl.span, input_replicas, dst_repl.id
                     )
@@ -323,7 +322,8 @@ do_set_delete_status(ids, input_replicas, input_jobs) ==
     /\ replicas' = private_set_replica_delete_status(
             ids, input_replicas, input_jobs
         )
-    /\ sync_jobs' = rewire_job_of_hard_deleted(ids, replicas', input_jobs)
+    \* /\ sync_jobs' = rewire_job_of_hard_deleted(ids, replicas', input_jobs)
+    /\ sync_jobs' = input_jobs
 
 
 new_delete_status(old, repl) ==
@@ -520,6 +520,34 @@ UpdateToDeleting ==
 
 ----------------------------
 
+switch_primary_from(old_id, new_id, input_replicas) ==
+    LET
+        update(r) ==
+            IF r.id = old_id THEN
+                [r EXCEPT !.type = "Readonly"]
+            ELSE IF r.id = new_id THEN
+                [r EXCEPT !.type = "Primary"]
+            ELSE
+                r
+    IN
+        [id \in DOMAIN input_replicas |-> update(input_replicas[id])]
+
+handle_hard_delete_primary(id, updated) ==
+    LET
+        span == replicas[id].span
+        new_primary_id == do_get_replicas_with_span(span, updated, nil)[1].id
+
+        switched == switch_primary_from(id, new_primary_id, updated)
+
+        new_job_id == get_sync_job_of(new_primary_id)
+        jobs_switched == [sync_jobs EXCEPT
+            ![new_job_id].src_id = new_primary_id,
+            ![new_job_id].dst_id = id
+        ]
+    IN
+    /\ replicas' = switched
+    /\ sync_jobs' = rewire_job_of_hard_deleted({id}, replicas', jobs_switched)
+
 doDeleteReplica(id) ==
     LET
         updated == [replicas EXCEPT
@@ -537,20 +565,22 @@ doDeleteReplica(id) ==
             /\ sync_jobs' = [sync_jobs EXCEPT ![job_id].status = "Ready"]
             /\ replicas' = update_to_need_delete(id, updated)
 
-        when_primary_hard_deleted ==
-            /\ TRUE
+        hard_delete_readonly ==
+            /\ replicas' = updated
+            /\ sync_jobs' = rewire_job_of_hard_deleted({id}, replicas', sync_jobs)
+
+        when_hard_deleted ==
+            IF replicas[id].type = "Primary"
+                THEN handle_hard_delete_primary(id, updated)
+                ELSE hard_delete_readonly
 
         when_delete_fully ==
             /\ replicas' = updated
             /\ UNCHANGED sync_jobs
 
-        is_primary_hard_deleted ==
-            /\ updated[id].type = "Primary"
-            /\ is_hard_deleted(updated[id])
-
         when_normal ==
-            IF is_primary_hard_deleted
-                THEN when_primary_hard_deleted
+            IF is_hard_deleted(updated[id])
+                THEN when_hard_deleted
                 ELSE when_delete_fully
     IN
     /\ replicas[id].delete_status = "Deleting"
