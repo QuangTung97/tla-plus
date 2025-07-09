@@ -537,9 +537,11 @@ doRemoveExtraReplicaReadonly(r) ==
         job_id == get_sync_job_of(id)
         job == sync_jobs[job_id]
 
-        is_empty_cond == \* TODO add deleted
-            /\ r.status = "Empty"
-            /\ job.status = "Pending"
+        is_empty_cond ==
+            \/ /\ r.status = "Empty"
+               /\ job.status = "Pending"
+            \/ /\ r.delete_status = "Deleted"
+               /\ job.status = "Succeeded"
 
         update_job_to_succeeded == [sync_jobs EXCEPT ![job_id].status = "Succeeded"]
 
