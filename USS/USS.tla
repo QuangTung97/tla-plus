@@ -495,7 +495,8 @@ doUpdateToDeleting(id) ==
         primary_normal ==
             replicas' = [replicas EXCEPT
                 ![id].delete_status = "Deleting",
-                ![id].slave_status = "SlaveDeleted"
+                ![id].slave_status = "SlaveDeleted",
+                ![id].slave_generation = replicas[id].generation
             ]
 
         when_is_primary ==
@@ -707,7 +708,7 @@ slave_unchanged ==
 
 slaveDoWrite(id) ==
     LET
-        repl == master_replicas[id]
+        repl == master_replicas[id] \* from USS master instead of core DB
 
         event == [
             type |-> "Write",
