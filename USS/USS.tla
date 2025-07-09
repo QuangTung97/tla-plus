@@ -554,7 +554,8 @@ handle_hard_delete_primary(id, updated) ==
         new_job_id == get_sync_job_of(new_primary_id)
         jobs_switched == [sync_jobs EXCEPT
             ![new_job_id].src_id = new_primary_id,
-            ![new_job_id].dst_id = id
+            ![new_job_id].dst_id = id,
+            ![new_job_id].status = "Succeeded"
         ]
     IN
     /\ replicas' = switched
@@ -730,6 +731,7 @@ slaveDoWrite(id) ==
     IN
     /\ id \in DOMAIN master_replicas
     /\ repl.type = "Primary"
+    /\ repl.delete_status # "Deleting"
     /\ \/ when_nil
        \/ when_write_completed
        \/ when_fully_deleted
