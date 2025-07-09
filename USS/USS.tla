@@ -599,10 +599,26 @@ doRemoveExtraReplicaReadonly(r) ==
     /\ core_unchanged
 
 doRemoveExtraReplicaPrimary(r) ==
+    LET
+        id == r.id
+
+        new_status ==
+            IF is_replica_deleting(r)
+                THEN r.delete_status
+                ELSE "NeedDelete"
+
+        updated == [replicas EXCEPT
+            ![id].delete_status = new_status,
+            ![id].hard_deleted = TRUE
+        ]
+    IN
     /\ r.type = "Primary"
     /\ inc_action
 
+    /\ do_set_delete_status({id}, updated, sync_jobs)
+
     /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
     /\ core_unchanged
 
 RemoveExtraReplica(span) ==
@@ -613,7 +629,7 @@ RemoveExtraReplica(span) ==
     /\ Len(repl_list) > 1
     /\ \E r \in repl_set:
         \/ doRemoveExtraReplicaReadonly(r)
-        \* \/ doRemoveExtraReplicaPrimary(r) TODO
+        \/ doRemoveExtraReplicaPrimary(r)
 
 --------------------------------------------------------------------------
 
