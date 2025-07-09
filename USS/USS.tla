@@ -130,7 +130,7 @@ is_replica_deleted(r) ==
 
 is_hard_deleted(r) ==
     /\ r.hard_deleted
-    /\ is_replica_deleted(r)
+    /\ r.delete_status = "Deleted"
 
 
 do_get_replicas_with_span(span, input_replicas, ignored_id) ==
@@ -140,16 +140,20 @@ do_get_replicas_with_span(span, input_replicas, ignored_id) ==
             /\ ~is_hard_deleted(r)
             /\ ignored_id # nil => r.id < ignored_id
     IN
-    SelectSeq(input_replicas, filter_fn)
+        SelectSeq(input_replicas, filter_fn)
 
-get_replicas_with_span(span) ==
-    do_get_replicas_with_span(span, replicas, nil)
 
+get_replicas_by_span_raw(span) ==
+    LET
+        filter_fn(r) ==
+            r.span = span
+    IN
+        SelectSeq(replicas, filter_fn)
 
 allow_to_add_span(span) ==
     \/ span = primary_span
     \/ /\ span # primary_span
-       /\ get_replicas_with_span(span - 1) # <<>>
+       /\ get_replicas_by_span_raw(span - 1) # <<>>
 
 
 find_source_replica(span, input_replicas, repl_id) ==
@@ -294,6 +298,7 @@ private_set_replica_delete_status(ids, input_replicas, input_jobs) ==
     IN
         [id \in DOMAIN input_replicas |-> update(id, input_replicas[id])]
 
+\* TODO
 rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
     LET
         need_rewire(id) ==
@@ -527,20 +532,31 @@ doDeleteReplica(id) ==
         is_waiting ==
             /\ job_id # nil
             /\ sync_jobs[job_id].status = "Waiting"
-
-        jobs_updated ==
-            IF is_waiting
-                THEN [sync_jobs EXCEPT ![job_id].status = "Ready"]
-                ELSE sync_jobs
         
-        final_updated ==
-            IF is_waiting
-                THEN update_to_need_delete(id, updated)
-                ELSE updated
+        when_waiting ==
+            /\ sync_jobs' = [sync_jobs EXCEPT ![job_id].status = "Ready"]
+            /\ replicas' = update_to_need_delete(id, updated)
+
+        when_primary_hard_deleted ==
+            /\ TRUE
+
+        when_delete_fully ==
+            /\ replicas' = updated
+            /\ UNCHANGED sync_jobs
+
+        is_primary_hard_deleted ==
+            /\ updated[id].type = "Primary"
+            /\ is_hard_deleted(updated[id])
+
+        when_normal ==
+            IF is_primary_hard_deleted
+                THEN when_primary_hard_deleted
+                ELSE when_delete_fully
     IN
     /\ replicas[id].delete_status = "Deleting"
-    /\ sync_jobs' = jobs_updated
-    /\ replicas' = final_updated
+    /\ IF is_waiting
+        THEN when_waiting
+        ELSE when_normal
 
     /\ UNCHANGED deleted_spans
     /\ UNCHANGED hist_deleted_spans
@@ -623,7 +639,11 @@ doRemoveExtraReplicaPrimary(r) ==
 
 RemoveExtraReplica(span) ==
     LET
-        repl_list == get_replicas_with_span(span)
+        filter_fn(r) ==
+            /\ r.span = span
+            /\ ~r.hard_deleted
+
+        repl_list == SelectSeq(replicas, filter_fn)
         repl_set == Range(repl_list)
     IN
     /\ Len(repl_list) > 1
@@ -872,12 +892,13 @@ ShouldNotSyncToHardDeleted ==
         LET
             r == replicas[id]
 
-            pre_cond ==
-                /\ r.delete_status = "Deleted"
-                /\ r.hard_deleted
-
             job_id == get_sync_job_of(r.id)
             job == sync_jobs[job_id]
+
+            pre_cond ==
+                /\ job_id # nil
+                /\ r.delete_status = "Deleted"
+                /\ r.hard_deleted
 
             cond ==
                 \/ job.status = "Succeeded"
