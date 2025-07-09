@@ -54,7 +54,7 @@ Generation == 0..10
 
 DeleteStatus == {
     "NoAction", "NeedDelete", "CanDelete",
-    "ReadyToDelete", "Deleting", "Deleted"
+    "Deleting", "Deleted"
 }
 
 Replica == [
@@ -236,9 +236,7 @@ AddReplica(span) ==
 
 
 is_replica_deleting(r) ==
-    /\ is_replica_deleted(r)
-    /\ r.delete_status # "CanDelete"
-    /\ r.delete_status # "Deleted"
+    \/ r.delete_status = "Deleting"
 
 
 trigger_sync_from_replica(id, input_jobs) ==
@@ -339,13 +337,19 @@ new_delete_status(old, repl) ==
     ELSE
         "NoAction"
 
+update_to_need_delete(id, input_replicas) ==
+    [input_replicas EXCEPT
+        ![id].delete_status = new_delete_status(@, input_replicas[id])]
+
+
 updatePrimary(id, version) ==
     LET
-        updated == [replicas EXCEPT
-                ![id].status = "Written",
-                ![id].write_version = version,
-                ![id].delete_status = new_delete_status(@, replicas[id])
-            ]
+        updated01 == [replicas EXCEPT
+            ![id].status = "Written",
+            ![id].write_version = version
+        ]
+
+        updated == update_to_need_delete(id, updated01)
 
         jobs_updated == trigger_sync_from_replica(id, sync_jobs)
     IN
@@ -385,11 +389,12 @@ doFinishJob(job_id) ==
         src_id == job.src_id
         dst_id == job.dst_id
 
-        updated == [replicas EXCEPT
+        updated01 == [replicas EXCEPT
             ![dst_id].status = "Written",
-            ![dst_id].value = replicas[src_id].value,
-            ![dst_id].delete_status = new_delete_status(@, replicas[dst_id])
+            ![dst_id].value = replicas[src_id].value
         ]
+
+        updated == update_to_need_delete(dst_id, updated01)
 
         set_finished == [sync_jobs EXCEPT ![job_id].status = "Succeeded"]
         jobs_updated == trigger_sync_from_replica(dst_id, set_finished)
@@ -455,23 +460,6 @@ ApplyDeleteRule(span) ==
 
 ----------------------------
 
-doUpdateToReadyDelete(id) ==
-    LET
-        r == replicas[id]
-    IN
-    /\ r.delete_status = "CanDelete"
-    /\ replicas' = [replicas EXCEPT ![id].delete_status = "ReadyToDelete"]
-    /\ UNCHANGED sync_jobs
-    /\ UNCHANGED deleted_spans
-    /\ UNCHANGED hist_deleted_spans
-    /\ UNCHANGED num_actions
-    /\ core_unchanged
-
-UpdateToReadyDelete ==
-    \E id \in ReplicaID: doUpdateToReadyDelete(id)
-
-----------------------------
-
 get_sync_job_of(id) ==
     LET
         job_set == {job_id \in SyncJobID: sync_jobs[job_id].dst_id = id}
@@ -489,20 +477,21 @@ doUpdateToDeleting(id) ==
                     ![id].slave_status = "SlaveDeleted"
                 ]
 
-        update_to_need_delete ==
-            /\ replicas' = [replicas EXCEPT
-                    ![id].delete_status = new_delete_status(@, replicas[id])
-                ]
-
         when_is_primary ==
             IF replicas[id].slave_version = replicas[id].write_version
                 THEN normal_flow
-                ELSE update_to_need_delete
+                ELSE replicas' = update_to_need_delete(id, replicas)
         
+        job_id == get_sync_job_of(id)
+        job == sync_jobs[job_id]
+
         when_is_readonly ==
-            /\ replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
+            IF job.status = "Succeeded"
+                THEN replicas' = [replicas EXCEPT
+                        ![id].delete_status = "Deleting"]
+                ELSE replicas' = update_to_need_delete(id, replicas)
     IN
-    /\ replicas[id].delete_status = "ReadyToDelete"
+    /\ replicas[id].delete_status = "CanDelete"
     /\ IF replicas[id].type = "Primary"
         THEN when_is_primary
         ELSE when_is_readonly
@@ -518,27 +507,32 @@ UpdateToDeleting ==
 
 ----------------------------
 
-update_sync_job_after_delete(r, input_jobs) ==
-    LET
-        job_id == get_sync_job_of(r.id)
-
-        is_waiting ==
-            /\ job_id # nil
-            /\ input_jobs[job_id].status = "Waiting"
-    IN
-    IF is_waiting THEN
-        [input_jobs EXCEPT ![job_id].status = "Ready"]
-    ELSE
-        input_jobs
-
 doDeleteReplica(id) ==
-    /\ replicas[id].delete_status = "Deleting"
-    /\ replicas' = [replicas EXCEPT
+    LET
+        updated == [replicas EXCEPT
             ![id].delete_status = "Deleted",
             ![id].value = nil,
             ![id].generation = @ + 1
         ]
-    /\ sync_jobs' = update_sync_job_after_delete(replicas'[id], sync_jobs)
+
+        job_id == get_sync_job_of(id)
+        is_waiting ==
+            /\ job_id # nil
+            /\ sync_jobs[job_id].status = "Waiting"
+
+        jobs_updated ==
+            IF is_waiting
+                THEN [sync_jobs EXCEPT ![job_id].status = "Ready"]
+                ELSE sync_jobs
+        
+        final_updated ==
+            IF is_waiting
+                THEN update_to_need_delete(id, updated)
+                ELSE updated
+    IN
+    /\ replicas[id].delete_status = "Deleting"
+    /\ sync_jobs' = jobs_updated
+    /\ replicas' = final_updated
 
     /\ UNCHANGED deleted_spans
     /\ UNCHANGED hist_deleted_spans
@@ -739,7 +733,6 @@ Next ==
         \/ ApplyDeleteRule(span)
         \/ RemoveExtraReplica(span)
 
-    \/ UpdateToReadyDelete
     \/ UpdateToDeleting
     \/ DeleteReplica
 
