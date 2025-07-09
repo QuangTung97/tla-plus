@@ -236,39 +236,35 @@ AddReplica(span) ==
 
 
 is_replica_deleting(r) ==
-    \/ r.delete_status = "Deleting"
-    \/ r.delete_status = "ReadyToDelete"
+    /\ is_replica_deleted(r)
+    /\ r.delete_status # "Deleted"
 
 
 trigger_sync_from_replica(id, input_jobs) ==
     LET
-        allow_trigger(job_id) ==
+        allow_trigger(job) ==
             LET
-                dst_id == input_jobs[job_id].dst_id
+                dst_id == job.dst_id
                 dst_repl == replicas[dst_id]
             IN
-            /\ input_jobs[job_id].src_id = id
+            /\ job.src_id = id
             /\ ~is_hard_deleted(dst_repl)
 
-        is_replica_deleting_of_job(job_id) ==
+        updated_status(job) ==
             LET
-                dst_id == input_jobs[job_id].dst_id
+                dst_id == job.dst_id
                 dst_repl == replicas[dst_id]
             IN
-                is_replica_deleting(dst_repl)
-
-        updated_status(job_id) ==
-            IF is_replica_deleting_of_job(job_id)
+            IF is_replica_deleting(dst_repl)
                 THEN "Waiting"
                 ELSE "Ready"
 
-        update_job(job_id, old) ==
-            IF allow_trigger(job_id)
-                THEN [old EXCEPT !.status = updated_status(job_id)]
+        update_job(old) ==
+            IF allow_trigger(old)
+                THEN [old EXCEPT !.status = updated_status(old)]
                 ELSE old
     IN
-        [job_id \in SyncJobID |->
-            update_job(job_id, input_jobs[job_id])]
+        [job_id \in SyncJobID |-> update_job(input_jobs[job_id])]
 
 
 num_non_finished_sync_job(repl_id, input_jobs) ==
@@ -487,25 +483,21 @@ get_sync_job_of(id) ==
 
 doUpdateToDeleting(id) ==
     LET
-        normal_flow ==
-            /\ replicas' = [replicas EXCEPT
-                    ![id].delete_status = "Deleting",
-                    ![id].slave_status = "SlaveDeleted"
-                ]
+        primary_normal ==
+            replicas' = [replicas EXCEPT
+                ![id].delete_status = "Deleting",
+                ![id].slave_status = "SlaveDeleted"
+            ]
 
         when_is_primary ==
             IF replicas[id].slave_version = replicas[id].write_version
-                THEN normal_flow
+                THEN primary_normal
                 ELSE replicas' = update_to_need_delete(id, replicas)
-        
-        job_id == get_sync_job_of(id)
-        job == sync_jobs[job_id]
 
         when_is_readonly ==
-            IF job.status = "Succeeded"
-                THEN replicas' = [replicas EXCEPT
-                        ![id].delete_status = "Deleting"]
-                ELSE replicas' = update_to_need_delete(id, replicas)
+            replicas' = [replicas EXCEPT
+                ![id].delete_status = "Deleting"
+            ]
     IN
     /\ replicas[id].delete_status = "ReadyToDelete"
     /\ IF replicas[id].type = "Primary"
@@ -584,7 +576,6 @@ doRemoveExtraReplicaReadonly(r) ==
                     {id}, replicas', update_job_to_succeeded)
 
         new_status ==
-            \* IF is_replica_deleted(r) /\ r.delete_status # "Deleted" TODO
             IF is_replica_deleting(r)
                 THEN r.delete_status
                 ELSE "NeedDelete"
@@ -925,22 +916,26 @@ NoSyncJobShouldSourceFromHardDeleted ==
 
 ------------------------
 
-syncJobAlwaysFromReadyToSucceededStep ==
+syncJobStatusStepInv ==
     \A job_id \in SyncJobID:
-        sync_jobs[job_id].status = "Ready"
-            => sync_jobs'[job_id].status \in {"Ready", "Succeeded"}
+        /\ sync_jobs[job_id].status = "Ready"
+            => sync_jobs'[job_id].status \in {"Ready", "Succeeded", "Waiting"}
+        /\ sync_jobs[job_id].status = "Waiting"
+            => sync_jobs'[job_id].status \in {"Waiting", "Ready"}
 
-SyncJobAlwaysFromReadyToSucceeded ==
-    [][syncJobAlwaysFromReadyToSucceededStep]_sync_jobs
+SyncJobStatusProperty ==
+    [][syncJobStatusStepInv]_sync_jobs
 
 ------------------------
 
-deletingAlwaysToDeletedStep ==
+deleteStatusStepInv ==
     \A id \in ReplicaID:
         replicas[id].delete_status = "Deleting"
-            => replicas'[id].delete_status \in {"Deleting", "Deleted"}
+            => replicas'[id].delete_status \in {
+                    "Deleting", "Deleted", "NeedDelete", "NoAction"
+                }
 
-DeletingAlwaysToDeleted == [][deletingAlwaysToDeletedStep]_replicas
+DeleteStatusProperty == [][deleteStatusStepInv]_replicas
 
 --------------------------------------------------------------------------
 
