@@ -52,13 +52,18 @@ Version == 0..10
 
 Generation == 0..10
 
+DeleteStatus == {
+    "NoAction", "NeedDelete", "CanDelete",
+    "ReadyToDelete", "Deleting", "Deleted"
+}
+
 Replica == [
     id: ReplicaID,
     span: SpanID,
     type: {"Primary", "Readonly"},
     status: {"Empty", "Writing", "Written"},
     value: NullValue,
-    delete_status: {"NoAction", "NeedDelete", "CanDelete", "Deleting", "Deleted"},
+    delete_status: DeleteStatus,
     write_version: Version,
     generation: Generation,
     hard_deleted: BOOLEAN,
@@ -123,12 +128,16 @@ is_replica_deleted(r) ==
     /\ r.delete_status # "NoAction"
     /\ r.delete_status # "NeedDelete"
 
+is_hard_deleted(r) ==
+    /\ r.hard_deleted
+    /\ is_replica_deleted(r)
+
 
 do_get_replicas_with_span(span, input_replicas, ignored_id) ==
     LET
         filter_fn(r) ==
             /\ r.span = span
-            /\ ~(is_replica_deleted(r) /\ r.hard_deleted)
+            /\ ~is_hard_deleted(r)
             /\ ignored_id # nil => r.id < ignored_id
     IN
     SelectSeq(input_replicas, filter_fn)
@@ -226,6 +235,12 @@ AddReplica(span) ==
     /\ core_unchanged
 
 
+is_replica_deleting(r) ==
+    /\ is_replica_deleted(r)
+    /\ r.delete_status # "CanDelete"
+    /\ r.delete_status # "Deleted"
+
+
 trigger_sync_from_replica(id, input_jobs) ==
     LET
         allow_trigger(job_id) ==
@@ -234,17 +249,17 @@ trigger_sync_from_replica(id, input_jobs) ==
                 dst_repl == replicas[dst_id]
             IN
             /\ input_jobs[job_id].src_id = id
-            /\ ~(dst_repl.hard_deleted /\ is_replica_deleted(dst_repl))
+            /\ ~is_hard_deleted(dst_repl)
 
-        is_replica_deleting(job_id) ==
+        is_replica_deleting_of_job(job_id) ==
             LET
                 dst_id == input_jobs[job_id].dst_id
                 dst_repl == replicas[dst_id]
             IN
-                dst_repl.delete_status = "Deleting"
+                is_replica_deleting(dst_repl)
 
         updated_status(job_id) ==
-            IF is_replica_deleting(job_id)
+            IF is_replica_deleting_of_job(job_id)
                 THEN "Waiting"
                 ELSE "Ready"
 
@@ -288,8 +303,7 @@ rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
     LET
         need_rewire(id) ==
             /\ id \in repl_ids
-            /\ input_replicas[id].hard_deleted
-            /\ is_replica_deleted(input_replicas[id])
+            /\ is_hard_deleted(input_replicas[id])
 
         update(old) ==
             LET
@@ -418,6 +432,7 @@ RemoveDeleteRule(span) ==
     /\ UNCHANGED hist_deleted_spans
     /\ core_unchanged
 
+----------------------------
 
 doApplyDeleteRule(span, id) ==
     LET
@@ -438,6 +453,24 @@ ApplyDeleteRule(span) ==
     /\ UNCHANGED hist_deleted_spans
     /\ core_unchanged
 
+----------------------------
+
+doUpdateToReadyDelete(id) ==
+    LET
+        r == replicas[id]
+    IN
+    /\ r.delete_status = "CanDelete"
+    /\ replicas' = [replicas EXCEPT ![id].delete_status = "ReadyToDelete"]
+    /\ UNCHANGED sync_jobs
+    /\ UNCHANGED deleted_spans
+    /\ UNCHANGED hist_deleted_spans
+    /\ UNCHANGED num_actions
+    /\ core_unchanged
+
+UpdateToReadyDelete ==
+    \E id \in ReplicaID: doUpdateToReadyDelete(id)
+
+----------------------------
 
 get_sync_job_of(id) ==
     LET
@@ -481,7 +514,7 @@ doUpdateToDeleting(id) ==
                 THEN update_to_need_delete
                 ELSE replicas' = [replicas EXCEPT ![id].delete_status = "Deleting"]
     IN
-    /\ replicas[id].delete_status = "CanDelete"
+    /\ replicas[id].delete_status = "ReadyToDelete"
     /\ IF replicas[id].type = "Primary"
         THEN when_is_primary
         ELSE when_is_readonly
@@ -495,6 +528,7 @@ doUpdateToDeleting(id) ==
 UpdateToDeleting ==
     \E id \in ReplicaID: doUpdateToDeleting(id)
 
+----------------------------
 
 doDeleteReplica(id) ==
     LET
@@ -554,12 +588,8 @@ doRemoveExtraReplicaReadonly(r) ==
             /\ sync_jobs' = rewire_job_of_hard_deleted(
                     {id}, replicas', update_job_to_succeeded)
 
-        is_replica_deleting ==
-            /\ is_replica_deleted(r)
-            /\ r.delete_status # "Deleted"
-
         new_status ==
-            IF is_replica_deleting
+            IF is_replica_deleted(r)
                 THEN r.delete_status
                 ELSE "NeedDelete"
 
@@ -724,6 +754,7 @@ Next ==
         \/ ApplyDeleteRule(span)
         \/ RemoveExtraReplica(span)
 
+    \/ UpdateToReadyDelete
     \/ UpdateToDeleting
     \/ DeleteReplica
 
