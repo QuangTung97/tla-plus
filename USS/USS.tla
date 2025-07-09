@@ -310,17 +310,20 @@ rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
         [job_id \in DOMAIN input_jobs |-> update(input_jobs[job_id])]
 
 
-new_delete_status(old) ==
-    IF old = "NoAction"
-        THEN old
-        ELSE "NeedDelete"
+new_delete_status(old, span) ==
+    IF old = "NoAction" THEN
+        "NoAction"
+    ELSE IF span \notin deleted_spans THEN
+        "NoAction"
+    ELSE
+        "NeedDelete"
 
 updatePrimary(id, version) ==
     LET
         updated == [replicas EXCEPT
                 ![id].status = "Written",
                 ![id].write_version = version,
-                ![id].delete_status = new_delete_status(@)
+                ![id].delete_status = new_delete_status(@, replicas[id].span)
             ]
     IN
         /\ sync_jobs' = trigger_sync_from_replica(id, sync_jobs)
@@ -363,7 +366,7 @@ doFinishJob(job_id) ==
         updated == [replicas EXCEPT
             ![dst_id].status = "Written",
             ![dst_id].value = replicas[src_id].value,
-            ![dst_id].delete_status = new_delete_status(@)
+            ![dst_id].delete_status = new_delete_status(@, replicas[dst_id].span)
         ]
 
         set_finished == [sync_jobs EXCEPT ![job_id].status = "Succeeded"]
@@ -455,7 +458,7 @@ doUpdateToDeleting(id) ==
 
         update_to_need_delete ==
             /\ replicas' = [replicas EXCEPT
-                    ![id].delete_status = new_delete_status(@)
+                    ![id].delete_status = new_delete_status(@, replicas[id].span)
                 ]
 
         when_is_primary ==
@@ -501,7 +504,7 @@ doDeleteReplica(id) ==
         when_waiting ==
             /\ sync_jobs' = [sync_jobs EXCEPT ![job_id].status = "Ready"]
             /\ replicas' = [replicas EXCEPT
-                    ![id].delete_status = new_delete_status(@),
+                    ![id].delete_status = new_delete_status(@, replicas[id].span),
                     ![id].status = "Empty",
                     ![id].value = nil
                 ]
