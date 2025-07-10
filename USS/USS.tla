@@ -518,9 +518,15 @@ rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
                 new_src_id == find_source_replica(
                         dst_repl.span, input_replicas, dst_repl.id
                     )
+                new_src == input_replicas[new_src_id]
+
+                update_status ==
+                    IF old.status = "Empty"
+                        THEN "Ready"
+                        ELSE old.status
             IN
             IF need_rewire(old.src_id)
-                THEN [old EXCEPT !.src_id = new_src_id]
+                THEN [old EXCEPT !.src_id = new_src_id, !.status = update_status]
                 ELSE old
     IN
         [job_id \in DOMAIN input_jobs |-> update(input_jobs[job_id])]
@@ -1026,6 +1032,14 @@ DeleteStatusProperty == [][deleteStatusStepInv]_replicas
 PrimaryReplicaInv ==
     \A r \in Range(replicas):
         r.type = "Primary" => r.span = primary_span
+
+------------------------
+
+SyncJobsAlwaysSyncFromWritten ==
+    \A j \in Range(sync_jobs):
+        j.status \in {"Ready", "Waiting"} =>
+            /\ replicas[j.src_id].status \in {"Written", "Writing"}
+            /\ replicas[j.src_id].delete_status # "Deleted"
 
 --------------------------------------------------------------------------
 
