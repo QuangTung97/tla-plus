@@ -185,6 +185,15 @@ core_unchanged ==
     /\ UNCHANGED master_replicas
 
 
+compute_new_job_status(src) ==
+    IF src.status = "Written" THEN
+        IF is_replica_deleted(src) THEN
+            "Pending"
+        ELSE
+            "Ready"
+    ELSE
+        "Pending"
+
 AddReplica(span) ==
     LET
         repl_type ==
@@ -211,21 +220,12 @@ AddReplica(span) ==
         ]
 
         src_id == find_source_replica(span, replicas', new_id)
-        src == replicas[src_id]
-
-        job_status ==
-            IF replicas[src_id].status = "Written" THEN
-                IF is_replica_deleted(src) THEN
-                    "Pending"
-                ELSE
-                    "Ready"
-            ELSE
-                "Pending"
+        src == replicas'[src_id]
 
         new_job == [
             src_id |-> src_id,
             dst_id |-> new_id,
-            status |-> job_status
+            status |-> compute_new_job_status(src)
         ]
 
         add_new_job ==
@@ -521,8 +521,8 @@ rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
                 new_src == input_replicas[new_src_id]
 
                 update_status ==
-                    IF old.status = "Empty"
-                        THEN "Ready"
+                    IF old.status = "Pending"
+                        THEN compute_new_job_status(new_src)
                         ELSE old.status
             IN
             IF need_rewire(old.src_id)
