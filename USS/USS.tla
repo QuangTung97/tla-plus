@@ -42,15 +42,15 @@ possible_source_map ==
     {m \in [SpanID -> NullSpanID]: cond(m)}
 
 
-Value == 30..39
+Value == 30..59
 
 NullValue == Value \union {nil}
 
 ReplicaID == DOMAIN replicas
 
-Version == 0..10
+Version == 0..20
 
-Generation == 0..10
+Generation == 0..20
 
 DeleteStatus == {
     "NoAction", "NeedDelete", "CanDelete",
