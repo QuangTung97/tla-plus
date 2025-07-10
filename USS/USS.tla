@@ -133,15 +133,15 @@ is_hard_deleted(r) ==
     /\ r.delete_status = "Deleted"
 
 
-do_get_replicas_with_span(span, input_replicas, ignored_id) ==
+do_get_replicas_with_span(input_span, input_replicas, ignored_id) ==
     LET
         filter_non_primary(r) ==
-            /\ r.span = span
-            /\ ~is_hard_deleted(r)
+            /\ r.span = input_span
+            /\ ~(r.hard_deleted /\ is_replica_deleted(r))
             /\ ignored_id # nil => r.id < ignored_id
 
         filter_fn(r) ==
-            IF r.span = primary_span
+            IF input_span = primary_span
                 THEN r.type = "Primary"
                 ELSE filter_non_primary(r)
     IN
@@ -275,6 +275,7 @@ trigger_sync_from_replica(id, input_jobs) ==
     IN
         [job_id \in SyncJobID |-> update_job(input_jobs[job_id])]
 
+----------------------------
 
 num_non_finished_sync_job(repl_id, input_jobs) ==
     LET
@@ -286,7 +287,6 @@ num_non_finished_sync_job(repl_id, input_jobs) ==
         job_set == {job_id \in SyncJobID: job_cond(job_id)}
     IN
         Cardinality(job_set)
-
 
 private_set_replica_delete_status(ids, input_replicas, input_jobs) ==
     LET
@@ -303,32 +303,13 @@ private_set_replica_delete_status(ids, input_replicas, input_jobs) ==
     IN
         [id \in DOMAIN input_replicas |-> update(id, input_replicas[id])]
 
-\* TODO move around
-rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
-    LET
-        need_rewire(id) ==
-            /\ id \in repl_ids
-            /\ is_hard_deleted(input_replicas[id])
-
-        update(old) ==
-            LET
-                dst_repl == input_replicas[old.dst_id]
-                new_src_id == find_source_replica(
-                        dst_repl.span, input_replicas, dst_repl.id
-                    )
-            IN
-            IF need_rewire(old.src_id)
-                THEN [old EXCEPT !.src_id = new_src_id]
-                ELSE old
-    IN
-        [job_id \in DOMAIN input_jobs |-> update(input_jobs[job_id])]
-
 do_set_delete_status(ids, input_replicas, input_jobs) ==
     /\ replicas' = private_set_replica_delete_status(
             ids, input_replicas, input_jobs
         )
     /\ sync_jobs' = input_jobs
 
+----------------------------
 
 new_delete_status(old, repl) ==
     LET
@@ -524,6 +505,25 @@ UpdateToDeleting ==
     \E id \in ReplicaID: doUpdateToDeleting(id)
 
 ----------------------------
+
+rewire_job_of_hard_deleted(repl_ids, input_replicas, input_jobs) ==
+    LET
+        need_rewire(id) ==
+            /\ id \in repl_ids
+            /\ is_hard_deleted(input_replicas[id])
+
+        update(old) ==
+            LET
+                dst_repl == input_replicas[old.dst_id]
+                new_src_id == find_source_replica(
+                        dst_repl.span, input_replicas, dst_repl.id
+                    )
+            IN
+            IF need_rewire(old.src_id)
+                THEN [old EXCEPT !.src_id = new_src_id]
+                ELSE old
+    IN
+        [job_id \in DOMAIN input_jobs |-> update(input_jobs[job_id])]
 
 switch_primary_from(old_id, new_id, input_replicas) ==
     LET
