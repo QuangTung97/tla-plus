@@ -1009,7 +1009,7 @@ NoSyncJobShouldSourceFromHardDeleted ==
 syncJobStatusStepInv ==
     \A job_id \in SyncJobID:
         /\ sync_jobs[job_id].status = "Ready"
-            => sync_jobs'[job_id].status \in {"Ready", "Succeeded", "Waiting"}
+            => sync_jobs'[job_id].status \in {"Ready", "Succeeded"}
         /\ sync_jobs[job_id].status = "Waiting"
             => sync_jobs'[job_id].status \in {"Waiting", "Ready"}
 
@@ -1040,6 +1040,13 @@ SyncJobsAlwaysSyncFromWritten ==
         j.status \in {"Ready", "Waiting"} =>
             /\ replicas[j.src_id].status \in {"Written", "Writing"}
             /\ replicas[j.src_id].delete_status # "Deleted"
+
+------------------------
+
+SyncJobReadyAlwaysPointToNonDeleting ==
+    \A j \in Range(sync_jobs):
+        j.status = "Ready" =>
+            ~is_replica_deleting(replicas[j.dst_id])
 
 --------------------------------------------------------------------------
 
