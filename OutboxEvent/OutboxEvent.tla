@@ -113,6 +113,8 @@ GetLastSeq(n) ==
 
 -------------------
 
+invalidSeq == 999
+
 RECURSIVE updateSeqByNullEvents(_, _, _)
 
 updateSeqByNullEvents(input_events, null_events, next_seq) ==
@@ -123,7 +125,7 @@ updateSeqByNullEvents(input_events, null_events, next_seq) ==
             IF ev.id = first.id THEN
                 IF ev.seq = nil
                     THEN [ev EXCEPT !.seq = next_seq]
-                    ELSE [ev EXCEPT !.seq = 999]
+                    ELSE [ev EXCEPT !.seq = invalidSeq]
             ELSE
                 ev
 
@@ -158,15 +160,12 @@ SetSeqNum(n) ==
 
         updated_err ==
             \E idx \in DOMAIN updated_events:
-                updated_events[idx].seq = 999
+                updated_events[idx].seq = invalidSeq
 
         do_update ==
-            IF updated_err THEN
-                UNCHANGED events
-            ELSE IF withNoSeqDuplication(updated_events) THEN
-                events' = updated_events
-            ELSE
-                UNCHANGED events
+            IF updated_err
+                THEN UNCHANGED events
+                ELSE events' = updated_events
     IN
     /\ pc[n] = "SetSeqNum"
     /\ goto(n, "Init")
