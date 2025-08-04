@@ -120,9 +120,12 @@ updateSeqByNullEvents(input_events, null_events, next_seq) ==
         first == null_events[1]
 
         update_fn(ev) ==
-            IF ev.id = first.id
-                THEN [ev EXCEPT !.seq = next_seq]
-                ELSE ev
+            IF ev.id = first.id THEN
+                IF ev.seq = nil
+                    THEN [ev EXCEPT !.seq = next_seq]
+                    ELSE [ev EXCEPT !.seq = 999]
+            ELSE
+                ev
 
         updated == [idx \in DOMAIN input_events |->
                 update_fn(input_events[idx])
@@ -152,13 +155,23 @@ SetSeqNum(n) ==
         last_seq == local_last_seq[n]
 
         updated_events == updateSeqByNullEvents(events, list, last_seq + 1)
+
+        updated_err ==
+            \E idx \in DOMAIN updated_events:
+                updated_events[idx].seq = 999
+
+        do_update ==
+            IF updated_err THEN
+                UNCHANGED events
+            ELSE IF withNoSeqDuplication(updated_events) THEN
+                events' = updated_events
+            ELSE
+                UNCHANGED events
     IN
     /\ pc[n] = "SetSeqNum"
     /\ goto(n, "Init")
 
-    /\ IF withNoSeqDuplication(updated_events)
-        THEN events' = updated_events
-        ELSE UNCHANGED events
+    /\ do_update
 
     /\ local_last_seq' = [local_last_seq EXCEPT ![n] = nil]
     /\ local_null_events' = [local_null_events EXCEPT ![n] = <<>>]
@@ -186,7 +199,11 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 --------------------------------------------------------
+AlwaysTerminate == []<> TerminateCond
+
 
 NoDuplicatedSeq ==
     withNoSeqDuplication(events)
