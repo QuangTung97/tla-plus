@@ -37,7 +37,7 @@ Event == [
     seq: NullSeq
 ]
 
-PC == {"Init", "GetLastSeq", "SetSeqNum"}
+PC == {"Init", "GetNullEvents", "SetSeqNum"}
 
 last_event_id ==
     IF events = <<>>
@@ -77,22 +77,6 @@ goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
 
 
-GetNullEvents(n) ==
-    LET
-        filter_fn(e) == e.seq = nil
-        tmp == SelectSeq(events, filter_fn)
-        null_events == tmp
-    IN
-    /\ pc[n] = "Init"
-    /\ Len(null_events) > 0
-
-    /\ goto(n, "GetLastSeq")
-    /\ local_null_events' = [local_null_events EXCEPT ![n] = null_events]
-
-    /\ UNCHANGED local_last_seq
-    /\ UNCHANGED events
-
-
 GetLastSeq(n) ==
     LET
         filter_fn(e) == e.seq # nil
@@ -103,17 +87,32 @@ GetLastSeq(n) ==
                 THEN 20
                 ELSE tmp[Len(tmp)].seq
     IN
-    /\ pc[n] = "GetLastSeq"
-    /\ goto(n, "SetSeqNum")
+    /\ pc[n] = "Init"
+    /\ goto(n, "GetNullEvents")
 
     /\ local_last_seq' = [local_last_seq EXCEPT ![n] = last_seq]
 
     /\ UNCHANGED local_null_events
     /\ UNCHANGED events
 
--------------------
 
-invalidSeq == 999
+GetNullEvents(n) ==
+    LET
+        filter_fn(e) == e.seq = nil
+        tmp == SelectSeq(events, filter_fn)
+        null_events == tmp
+    IN
+    /\ pc[n] = "GetNullEvents"
+    /\ Len(null_events) > 0
+
+    /\ goto(n, "SetSeqNum")
+    /\ local_null_events' = [local_null_events EXCEPT ![n] = null_events]
+
+    /\ UNCHANGED local_last_seq
+    /\ UNCHANGED events
+
+
+-------------------
 
 RECURSIVE updateSeqByNullEvents(_, _, _)
 
@@ -122,12 +121,9 @@ updateSeqByNullEvents(input_events, null_events, next_seq) ==
         first == null_events[1]
 
         update_fn(ev) ==
-            IF ev.id = first.id THEN
-                IF ev.seq = nil
-                    THEN [ev EXCEPT !.seq = next_seq]
-                    ELSE [ev EXCEPT !.seq = invalidSeq]
-            ELSE
-                ev
+            IF ev.id = first.id
+                THEN [ev EXCEPT !.seq = next_seq]
+                ELSE ev
 
         updated == [idx \in DOMAIN input_events |->
                 update_fn(input_events[idx])
@@ -158,14 +154,10 @@ SetSeqNum(n) ==
 
         updated_events == updateSeqByNullEvents(events, list, last_seq + 1)
 
-        updated_err ==
-            \E idx \in DOMAIN updated_events:
-                updated_events[idx].seq = invalidSeq
-
         do_update ==
-            IF updated_err
-                THEN UNCHANGED events
-                ELSE events' = updated_events
+            IF withNoSeqDuplication(updated_events)
+                THEN events' = updated_events
+                ELSE UNCHANGED events
     IN
     /\ pc[n] = "SetSeqNum"
     /\ goto(n, "Init")
@@ -180,7 +172,7 @@ SetSeqNum(n) ==
 TerminateCond ==
     /\ last_event_id >= StartEventID + max_event
     /\ \A n \in Node:
-        /\ pc[n] = "Init"
+        /\ pc[n] = "GetNullEvents"
         /\ ~(ENABLED GetNullEvents(n))
 
 Terminated ==
@@ -190,8 +182,8 @@ Terminated ==
 Next ==
     \/ NewEvent
     \/ \E n \in Node:
-        \/ GetNullEvents(n)
         \/ GetLastSeq(n)
+        \/ GetNullEvents(n)
         \/ SetSeqNum(n)
     \/ Terminated
 
