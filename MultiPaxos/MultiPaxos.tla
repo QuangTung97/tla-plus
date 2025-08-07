@@ -6,18 +6,16 @@ CONSTANTS Node, nil, infinity, max_start_election
 ---------------------------------------------------------------
 
 VARIABLES
-    num_start_election,
     members, log, state, last_committed,
     global_last_term, last_propose_term, last_term,
-    candidate_remain_pos, mem_log,
+    candidate_remain_pos, mem_log, log_voted,
     msgs, last_cmd_num
 
 leader_vars == <<
-    num_start_election,
     global_last_term,
     members, state, last_committed,
     last_propose_term,
-    candidate_remain_pos, mem_log
+    candidate_remain_pos, mem_log, log_voted
 >>
 
 acceptor_vars == <<log, last_term>>
@@ -31,7 +29,8 @@ vars == <<
 
 ---------------------------------------------------------------
 
-TermNum == 20..25
+max_term_num == 20 + max_start_election
+TermNum == 20..max_term_num
 NullTerm == TermNum \union {nil}
 
 LogPos == (0..20)
@@ -102,8 +101,15 @@ Message ==
             from: Node,
             to: Node
         ]
+
+        accept_failed == [
+            type: {"AcceptFailed"},
+            term: TermNum,
+            to: Node
+        ]
     IN
-        UNION {request_vote, vote_response, accept_entry, accept_resp}
+        UNION {request_vote, vote_response,
+                accept_entry, accept_resp, accept_failed}
 
 
 IsQuorum(n, set) ==
@@ -118,7 +124,6 @@ RemainPosition ==
     [Node -> NullLogPos] \union {nil}
 
 TypeOK ==
-    /\ num_start_election \in 0..max_start_election
     /\ members \in [Node -> SUBSET Node]
     /\ log \in [Node -> Seq(NullLogEntry)]
     /\ last_committed \in [Node -> LogPos]
@@ -128,6 +133,8 @@ TypeOK ==
     /\ last_term \in [Node -> TermNum]
     /\ candidate_remain_pos \in [Node -> RemainPosition]
     /\ mem_log \in [Node -> Seq(LogEntry)]
+    /\ log_voted \in [Node -> Seq(SUBSET Node)]
+
     /\ msgs \subseteq Message
     /\ last_cmd_num \in CmdNum
 
@@ -162,7 +169,6 @@ init_members ==
         /\ last_committed = [n \in Node |-> init_last_committed(n)]
 
 Init ==
-    /\ num_start_election = 0
     /\ init_members
     /\ state = [n \in Node |-> "Follower"]
     /\ global_last_term = 20
@@ -170,6 +176,8 @@ Init ==
     /\ last_term = [n \in Node |-> 20]
     /\ candidate_remain_pos = [n \in Node |-> nil]
     /\ mem_log = [n \in Node |-> <<>>]
+    /\ log_voted = [n \in Node |-> <<>>]
+
     /\ msgs = {}
     /\ last_cmd_num = 30
 
@@ -193,17 +201,17 @@ StartElection(n) ==
     IN
     /\ n \in members[n]
     /\ state[n] = "Follower"
-    /\ num_start_election < max_start_election
-    /\ num_start_election' = num_start_election + 1
 
+    /\ global_last_term < max_term_num
     /\ global_last_term' = global_last_term + 1
+
     /\ state' = [state EXCEPT ![n] = "Candidate"]
     /\ last_propose_term' = [last_propose_term EXCEPT ![n] = global_last_term']
     /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = init_remain_pos]
 
     /\ msgs' = msgs \union {req}
 
-    /\ UNCHANGED mem_log
+    /\ UNCHANGED <<mem_log, log_voted>>
     /\ UNCHANGED last_committed
     /\ UNCHANGED members
     /\ UNCHANGED acceptor_vars
@@ -282,7 +290,9 @@ doHandleVoteResponse(n, resp) ==
 
     /\ update_remain
     /\ IF resp.entry = nil
-        THEN UNCHANGED mem_log
+        THEN
+            /\ UNCHANGED mem_log
+            /\ UNCHANGED log_voted
         ELSE update_mem_log
 
     /\ IF entry_achieve_quorum /\ resp.more
@@ -293,7 +303,6 @@ doHandleVoteResponse(n, resp) ==
         THEN state' = [state EXCEPT ![n] = "Leader"]
         ELSE UNCHANGED state
 
-    /\ UNCHANGED num_start_election
     /\ UNCHANGED last_propose_term
     /\ UNCHANGED global_last_term
     /\ UNCHANGED last_committed
@@ -332,10 +341,10 @@ NewCommand(n) ==
     /\ last_cmd_num' = last_cmd_num + 1
 
     /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, log_entry)]
+    /\ log_voted' = [log_voted EXCEPT ![n] = Append(@, {})]
     /\ msgs' = msgs \union {accept_req}
 
     /\ UNCHANGED state
-    /\ UNCHANGED num_start_election
     /\ UNCHANGED candidate_remain_pos
     /\ UNCHANGED last_propose_term
     /\ UNCHANGED global_last_term
@@ -374,15 +383,30 @@ doAcceptEntry(n, req) ==
             to |-> req.from,
             log_pos |-> req.log_pos
         ]
+
+        on_success ==
+            /\ last_term' = [last_term EXCEPT ![n] = req.term]
+            /\ msgs' = msgs \union {resp}
+            /\ log' = putToLog(n, req.entry, req.log_pos)
+
+        fail_resp == [
+            type |-> "AcceptFailed",
+            term |-> last_term[n],
+            to |-> req.from
+        ]
+
+        on_fail ==
+            /\ fail_resp \notin msgs
+            /\ msgs' = msgs \union {fail_resp}
+            /\ UNCHANGED last_term
+            /\ UNCHANGED log
     IN
     /\ req.type = "AcceptEntry"
     /\ n \in req.recv
-    /\ req.term >= last_term[n]
 
-    /\ last_term' = [last_term EXCEPT ![n] = req.term]
-    /\ msgs' = msgs \union {resp}
-    /\ log' = putToLog(n, req.entry, req.log_pos)
-
+    /\ IF req.term >= last_term[n]
+        THEN on_success
+        ELSE on_fail
 
     /\ UNCHANGED leader_vars
     /\ UNCHANGED last_cmd_num
@@ -392,8 +416,52 @@ AcceptEntry(n) ==
 
 ---------------------------------------------------------------
 
+doHandleAcceptResponse(n, resp) ==
+    LET
+        pos == resp.log_pos - last_committed[n]
+        old_votes == log_voted[n][pos]
+        new_votes == old_votes \union {resp.from}
+
+        is_quorum == IsQuorum(n, new_votes)
+
+        update_voted ==
+            IF is_quorum
+                THEN [log_voted EXCEPT ![n][pos] = {}]
+                ELSE [log_voted EXCEPT ![n][pos] = new_votes]
+
+        update_log_committed ==
+            IF is_quorum
+                THEN [mem_log EXCEPT
+                        ![n][pos].committed = TRUE,
+                        ![n][pos].term = nil
+                    ]
+                ELSE mem_log
+    IN
+    /\ resp.type = "AcceptResponse"
+    /\ resp.to = n
+    /\ state[n] = "Leader"
+    /\ resp.term = last_propose_term[n]
+
+    /\ log_voted' = update_voted
+    /\ mem_log' = update_log_committed
+
+    /\ UNCHANGED msgs
+
+    /\ UNCHANGED state
+    /\ UNCHANGED members
+    /\ UNCHANGED last_propose_term
+    /\ UNCHANGED last_cmd_num
+    /\ UNCHANGED global_last_term
+    /\ UNCHANGED candidate_remain_pos
+    /\ UNCHANGED acceptor_vars
+
+HandleAcceptResponse(n) ==
+    \E resp \in msgs: doHandleAcceptResponse(n, resp)
+
+---------------------------------------------------------------
+
 TerminateCond ==
-    /\ num_start_election = max_start_election
+    /\ global_last_term = max_term_num
     /\ \A n \in Node: mem_log[n] = <<>>
 
 Terminated ==
@@ -408,6 +476,7 @@ Next ==
         \/ HandleVoteResponse(n)
         \/ NewCommand(n)
         \/ AcceptEntry(n)
+        \/ HandleAcceptResponse(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
