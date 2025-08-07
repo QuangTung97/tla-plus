@@ -64,6 +64,8 @@ LogEntry ==
     IN
         UNION {membership, null_entry, cmd_entry}
 
+NullLogEntry == LogEntry \union {nil}
+
 Message ==
     LET
         request_vote == [
@@ -80,19 +82,28 @@ Message ==
             to: Node,
             term: TermNum,
             log_pos: LogPos,
-            entry: LogEntry \union {nil},
+            entry: NullLogEntry,
             more: BOOLEAN
         ]
 
         accept_entry == [
             type: {"AcceptEntry"},
             term: TermNum,
+            from: Node,
             log_pos: LogPos,
             entry: LogEntry,
             recv: SUBSET Node
         ]
+
+        accept_resp == [
+            type: {"AcceptResponse"},
+            term: TermNum,
+            log_pos: LogPos,
+            from: Node,
+            to: Node
+        ]
     IN
-        UNION {request_vote, vote_response, accept_entry}
+        UNION {request_vote, vote_response, accept_entry, accept_resp}
 
 
 IsQuorum(n, set) ==
@@ -109,7 +120,7 @@ RemainPosition ==
 TypeOK ==
     /\ num_start_election \in 0..max_start_election
     /\ members \in [Node -> SUBSET Node]
-    /\ log \in [Node -> Seq(LogEntry)]
+    /\ log \in [Node -> Seq(NullLogEntry)]
     /\ last_committed \in [Node -> LogPos]
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
     /\ global_last_term \in TermNum
@@ -260,6 +271,8 @@ doHandleVoteResponse(n, resp) ==
             term |-> resp.term, \* TODO
             recv |-> members[n]
         ]
+
+        inf_set == {n1 \in DOMAIN new_pos_map: new_pos_map[n1] = infinity}
     IN
     /\ resp.type = "VoteResponse"
     /\ state[n] = "Candidate"
@@ -276,7 +289,9 @@ doHandleVoteResponse(n, resp) ==
         THEN msgs' = msgs \union {accept_req}
         ELSE UNCHANGED msgs
 
-    /\ state' = [state EXCEPT ![n] = "Leader"] \* TODO
+    /\ IF IsQuorum(n, inf_set)
+        THEN state' = [state EXCEPT ![n] = "Leader"]
+        ELSE UNCHANGED state
 
     /\ UNCHANGED num_start_election
     /\ UNCHANGED last_propose_term
@@ -305,6 +320,7 @@ NewCommand(n) ==
         accept_req == [
             type |-> "AcceptEntry",
             term |-> last_propose_term[n],
+            from |-> n,
             log_pos |-> log_pos,
             entry |-> log_entry,
             recv |-> members[n]
@@ -328,10 +344,35 @@ NewCommand(n) ==
     /\ UNCHANGED acceptor_vars
 
 
+putToLog(n, entry, pos) ==
+    LET
+        old_len == Len(log[n])
+        new_len ==
+            IF pos > old_len
+                THEN pos
+                ELSE old_len
+
+        update_log(i) ==
+            IF i = pos THEN
+                entry
+            ELSE IF i > old_len THEN
+                nil
+            ELSE
+                log[n][i]
+
+        new_log == [i \in 1..new_len |-> update_log(i)]
+    IN
+        [log EXCEPT ![n] = new_log]
+
+
 doAcceptEntry(n, req) ==
     LET
         resp == [
-            type |-> "AcceptResponse"
+            type |-> "AcceptResponse",
+            term |-> req.term,
+            from |-> n,
+            to |-> req.from,
+            log_pos |-> req.log_pos
         ]
     IN
     /\ req.type = "AcceptEntry"
@@ -340,6 +381,8 @@ doAcceptEntry(n, req) ==
 
     /\ last_term' = [last_term EXCEPT ![n] = req.term]
     /\ msgs' = msgs \union {resp}
+    /\ log' = putToLog(n, req.entry, req.log_pos)
+
 
     /\ UNCHANGED leader_vars
     /\ UNCHANGED last_cmd_num
