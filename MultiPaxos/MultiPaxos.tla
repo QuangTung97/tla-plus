@@ -482,9 +482,34 @@ HandleAcceptResponse(n) ==
 
 ---------------------------------------------------------------
 
+doHandleAcceptFailed(n, resp) ==
+    /\ resp.type = "AcceptFailed"
+    /\ resp.term > last_propose_term[n]
+    /\ state[n] \in {"Candidate", "Leader"}
+
+    /\ last_propose_term' = [last_propose_term EXCEPT ![n] = resp.term]
+    /\ state' = [state EXCEPT ![n] = "Follower"]
+    /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
+    /\ mem_log' = [mem_log EXCEPT ![n] = <<>>]
+    /\ log_voted' = [log_voted EXCEPT ![n] = <<>>]
+
+    /\ UNCHANGED global_last_term
+    /\ UNCHANGED last_cmd_num
+    /\ UNCHANGED last_committed
+    /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED members
+    /\ UNCHANGED msgs
+
+HandleAcceptFailed(n) ==
+    \E resp \in msgs: doHandleAcceptFailed(n, resp)
+
+---------------------------------------------------------------
+
 TerminateCond ==
     /\ global_last_term = max_term_num
-    /\ \A n \in Node: mem_log[n] = <<>>
+    /\ \A n \in Node:
+        /\ mem_log[n] = <<>>
+        /\ state[n] \in {"Follower", "Candidate"}
 
 Terminated ==
     /\ TerminateCond
@@ -499,6 +524,7 @@ Next ==
         \/ NewCommand(n)
         \/ AcceptEntry(n)
         \/ HandleAcceptResponse(n)
+        \/ HandleAcceptFailed(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
