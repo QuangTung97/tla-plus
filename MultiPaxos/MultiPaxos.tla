@@ -393,18 +393,26 @@ putToLog(n, entry, pos) ==
 
 doAcceptEntry(n, req) ==
     LET
+        pos == req.log_pos
+        prev_entry ==
+            IF Len(log[n]) >= pos
+                THEN log[n][pos]
+                ELSE nil
+
         resp == [
             type |-> "AcceptResponse",
             term |-> req.term,
             from |-> n,
             to |-> req.from,
-            log_pos |-> req.log_pos
+            log_pos |-> pos
         ]
 
         on_success ==
             /\ last_term' = [last_term EXCEPT ![n] = req.term]
             /\ msgs' = msgs \union {resp}
-            /\ log' = putToLog(n, req.entry, req.log_pos)
+            /\ IF prev_entry # nil /\ prev_entry.committed
+                THEN UNCHANGED log
+                ELSE log' = putToLog(n, req.entry, pos)
 
         fail_resp == [
             type |-> "AcceptFailed",
@@ -649,7 +657,8 @@ GodLogNoLost ==
     IN
     \E n \in Node:
         /\ Len(log[n]) >= god_len
-        /\ log[n][god_len] # nil
-        /\ log[n][god_len].committed
+        /\ god_log[god_len] # nil =>
+            /\ log[n][god_len] # nil
+            /\ log[n][god_len].committed
 
 ====
