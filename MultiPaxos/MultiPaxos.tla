@@ -248,19 +248,17 @@ doHandleVoteResponse(n, resp) ==
         remain_pos == candidate_remain_pos[n][from]
 
         inc_pos ==
-            candidate_remain_pos' = [
-                candidate_remain_pos EXCEPT ![n][from] = @ + 1]
+            [candidate_remain_pos EXCEPT ![n][from] = @ + 1]
 
         set_pos_inf ==
-            candidate_remain_pos' = [
-                candidate_remain_pos EXCEPT ![n][from] = infinity]
+            [candidate_remain_pos EXCEPT ![n][from] = infinity]
 
-        update_remain ==
+        update_remain_pos ==
             IF resp.more
                 THEN inc_pos
                 ELSE set_pos_inf
 
-        new_pos_map == candidate_remain_pos'[n]
+        new_pos_map == update_remain_pos[n]
 
         is_non_inf(n1) ==
             /\ new_pos_map[n1] # nil
@@ -288,7 +286,6 @@ doHandleVoteResponse(n, resp) ==
     /\ remain_pos # nil
     /\ remain_pos = resp.log_pos
 
-    /\ update_remain
     /\ IF resp.entry = nil
         THEN
             /\ UNCHANGED mem_log
@@ -300,8 +297,12 @@ doHandleVoteResponse(n, resp) ==
         ELSE UNCHANGED msgs
 
     /\ IF IsQuorum(n, inf_set)
-        THEN state' = [state EXCEPT ![n] = "Leader"]
-        ELSE UNCHANGED state
+        THEN
+            /\ state' = [state EXCEPT ![n] = "Leader"]
+            /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
+        ELSE
+            /\ UNCHANGED state
+            /\ candidate_remain_pos' = update_remain_pos
 
     /\ UNCHANGED last_propose_term
     /\ UNCHANGED global_last_term
@@ -416,6 +417,16 @@ AcceptEntry(n) ==
 
 ---------------------------------------------------------------
 
+RECURSIVE computeMaxCommitted(_)
+
+computeMaxCommitted(input_log) ==
+    IF Len(input_log) = 0 THEN
+        0
+    ELSE IF input_log[1].committed THEN
+        1 + computeMaxCommitted(Tail(input_log))
+    ELSE
+        0
+
 doHandleAcceptResponse(n, resp) ==
     LET
         pos == resp.log_pos - last_committed[n]
@@ -436,14 +447,25 @@ doHandleAcceptResponse(n, resp) ==
                         ![n][pos].term = nil
                     ]
                 ELSE mem_log
+
+        move_forward == computeMaxCommitted(update_log_committed[n])
+
+        update_last_committed ==
+            last_committed' = [last_committed EXCEPT ![n] = @ + move_forward]
+
+        truncate_seq(seq) ==
+            [seq EXCEPT ![n] = SubSeq(@, move_forward + 1, Len(@))]
     IN
     /\ resp.type = "AcceptResponse"
     /\ resp.to = n
     /\ state[n] = "Leader"
     /\ resp.term = last_propose_term[n]
+    /\ resp.log_pos > last_committed[n]
+    /\ resp.from \notin old_votes
 
-    /\ log_voted' = update_voted
-    /\ mem_log' = update_log_committed
+    /\ update_last_committed
+    /\ mem_log' = truncate_seq(update_log_committed)
+    /\ log_voted' = truncate_seq(update_voted)
 
     /\ UNCHANGED msgs
 
@@ -481,5 +503,32 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+---------------------------------------------------------------
+
+MemLogMatchLogVoted ==
+    \A n \in Node:
+        Len(mem_log[n]) = Len(log_voted[n])
+
+
+checkLogEntryCommittedInv(input_log) ==
+    \A n \in Node:
+        \A i \in DOMAIN input_log[n]:
+            LET
+                e == input_log[n][i]
+            IN
+            \/ e = nil
+            \/ /\ ~e.committed
+               /\ e.term # nil
+            \/ /\ e.committed
+               /\ e.term = nil
+
+LogEntryCommittedInv ==
+    /\ checkLogEntryCommittedInv(log)
+    /\ checkLogEntryCommittedInv(mem_log)
+
+
+CandidateRemainPosInv ==
+    \A n \in Node:
+        candidate_remain_pos[n] # nil <=> state[n] = "Candidate"
 
 ====
