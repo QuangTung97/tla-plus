@@ -321,14 +321,12 @@ doHandleVoteResponse(n, resp) ==
 
         new_pos_map == update_remain_pos[n]
 
-        is_non_inf(n1) ==
+        pass_current_pos(n1) ==
             /\ new_pos_map[n1] # nil
-            /\ new_pos_map[n1] # infinity
+            /\ \/ new_pos_map[n1] = infinity
+               \/ new_pos_map[n1] > remain_pos
 
-        entry_checked_set == {n1 \in DOMAIN new_pos_map:
-                is_non_inf(n1) => (new_pos_map[n1] >= remain_pos)
-            }
-        entry_achieve_quorum == IsQuorum(n, entry_checked_set)
+        entry_checked_set == {n1 \in DOMAIN new_pos_map: pass_current_pos(n1)}
 
         mem_pos == resp.log_pos - last_committed[n]
 
@@ -341,7 +339,7 @@ doHandleVoteResponse(n, resp) ==
             recv |-> members[n]
         ]
         send_accept_req ==
-            IF entry_achieve_quorum
+            IF IsQuorum(n, entry_checked_set)
                 THEN msgs' = msgs \union {accept_req}
                 ELSE UNCHANGED msgs
 
