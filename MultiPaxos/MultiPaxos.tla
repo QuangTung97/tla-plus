@@ -330,32 +330,54 @@ doHandleVoteResponse(n, resp) ==
             }
         entry_achieve_quorum == IsQuorum(n, entry_checked_set)
 
-        update_mem_log ==
-            /\ TRUE \* TODO
+        mem_pos == resp.log_pos - last_committed[n]
 
         accept_req == [
             type |-> "AcceptEntry",
-            term |-> resp.term, \* TODO
+            term |-> resp.term,
+            from |-> n,
+            log_pos |-> resp.log_pos,
+            entry |-> mem_log'[n][mem_pos],
             recv |-> members[n]
         ]
+        send_accept_req ==
+            IF entry_achieve_quorum
+                THEN msgs' = msgs \union {accept_req}
+                ELSE UNCHANGED msgs
+
+        null_entry == [
+            type |-> "Null",
+            committed |-> FALSE,
+            term |-> 20
+        ]
+
+        put_entry == \* TODO handle term compare
+            IF resp.entry = nil
+                THEN null_entry
+                ELSE resp.entry
+
+        update_mem_log ==
+            /\ mem_log' = [mem_log EXCEPT
+                    ![n] = putToSequence(mem_log[n], mem_pos, put_entry)
+                ]
+            /\ log_voted' = [log_voted EXCEPT
+                    ![n] = putToSequence(log_voted[n], mem_pos, {})
+                ]
+            /\ send_accept_req
 
         inf_set == {n1 \in DOMAIN new_pos_map: new_pos_map[n1] = infinity}
     IN
     /\ resp.type = "VoteResponse"
     /\ state[n] = "Candidate"
     /\ last_propose_term[n] = resp.term
-    /\ remain_pos # nil
     /\ remain_pos = resp.log_pos
 
-    /\ IF resp.entry = nil
-        THEN
+    /\ IF resp.more
+        THEN update_mem_log
+        ELSE
             /\ UNCHANGED mem_log
             /\ UNCHANGED log_voted
-        ELSE update_mem_log
-
-    /\ IF entry_achieve_quorum /\ resp.more
-        THEN msgs' = msgs \union {accept_req}
-        ELSE UNCHANGED msgs
+            /\ UNCHANGED msgs
 
     /\ IF IsQuorum(n, inf_set)
         THEN
@@ -668,6 +690,10 @@ checkLogEntryCommittedInv(input_log) ==
 LogEntryCommittedInv ==
     /\ checkLogEntryCommittedInv(log)
     /\ checkLogEntryCommittedInv(mem_log)
+
+
+MemLogNonNilInv ==
+    \A n \in Node: \A i \in DOMAIN mem_log[n]: mem_log[n][i] # nil
 
 
 CandidateRemainPosInv ==
