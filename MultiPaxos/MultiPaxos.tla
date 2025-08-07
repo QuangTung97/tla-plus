@@ -247,25 +247,56 @@ StartElection(n) ==
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED last_cmd_num
 
+---------------------------------------------------------------
+
+RECURSIVE buildVoteResponses(_, _, _, _)
+
+buildVoteResponses(input_log, n, req, pos) ==
+    LET
+        resp == [
+            type |-> "VoteResponse",
+            from |-> n,
+            to |-> req.from,
+            term |-> req.term,
+            log_pos |-> pos,
+            entry |-> input_log[1],
+            more |-> TRUE
+        ]
+
+        final_resp == [
+            type |-> "VoteResponse",
+            from |-> n,
+            to |-> req.from,
+            term |-> req.term,
+            log_pos |-> pos,
+            entry |-> nil,
+            more |-> FALSE
+        ]
+    IN
+    IF Len(input_log) = 0
+        THEN {final_resp}
+        ELSE {resp} \union buildVoteResponses(
+            Tail(input_log), n, req, pos + 1
+        )
+
 
 HandleRequestVote(n) ==
     \E req \in msgs:
         LET
-            resp == [
-                type |-> "VoteResponse",
-                from |-> n,
-                to |-> req.from,
-                term |-> req.term,
-                log_pos |-> req.log_pos,
-                entry |-> nil, \* TODO
-                more |-> FALSE \* TODO
-            ]
+            log_len == Len(log[n])
+            vote_logs ==
+                IF req.log_pos > log_len
+                    THEN <<>>
+                    ELSE SubSeq(log[n], req.log_pos, log_len)
         IN
         /\ req.type = "RequestVote"
         /\ n \in req.recv
         /\ last_term[n] < req.term
+
         /\ last_term' = [last_term EXCEPT ![n] = req.term]
-        /\ msgs' = msgs \union {resp}
+        /\ msgs' = msgs \union buildVoteResponses(
+                vote_logs, n, req, req.log_pos
+            )
 
         /\ UNCHANGED <<log, god_log>>
         /\ UNCHANGED leader_vars
