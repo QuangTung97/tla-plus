@@ -302,29 +302,24 @@ HandleRequestVote(n) ==
         /\ UNCHANGED leader_vars
         /\ UNCHANGED last_cmd_num
 
+---------------------------------------------------------------
 
 doHandleVoteResponse(n, resp) ==
     LET
         from == resp.from
         remain_pos == candidate_remain_pos[n][from]
 
-        inc_pos ==
-            [candidate_remain_pos EXCEPT ![n][from] = @ + 1]
-
-        set_pos_inf ==
-            [candidate_remain_pos EXCEPT ![n][from] = infinity]
-
         update_remain_pos ==
             IF resp.more
-                THEN inc_pos
-                ELSE set_pos_inf
+                THEN [candidate_remain_pos EXCEPT ![n][from] = @ + 1]
+                ELSE [candidate_remain_pos EXCEPT ![n][from] = infinity]
 
         new_pos_map == update_remain_pos[n]
 
         pass_current_pos(n1) ==
-            /\ new_pos_map[n1] # nil
-            /\ \/ new_pos_map[n1] = infinity
-               \/ new_pos_map[n1] > remain_pos
+            \/ new_pos_map[n1] = infinity
+            \/ /\ new_pos_map[n1] # nil
+               /\ new_pos_map[n1] > remain_pos
 
         entry_checked_set == {n1 \in DOMAIN new_pos_map: pass_current_pos(n1)}
 
@@ -361,7 +356,6 @@ doHandleVoteResponse(n, resp) ==
             /\ log_voted' = [log_voted EXCEPT
                     ![n] = putToSequence(log_voted[n], mem_pos, {})
                 ]
-            /\ send_accept_req
 
         inf_set == {n1 \in DOMAIN new_pos_map: new_pos_map[n1] = infinity}
     IN
@@ -376,6 +370,8 @@ doHandleVoteResponse(n, resp) ==
             /\ UNCHANGED mem_log
             /\ UNCHANGED log_voted
             /\ UNCHANGED msgs
+
+    /\ send_accept_req
 
     /\ IF IsQuorum(n, inf_set)
         THEN
