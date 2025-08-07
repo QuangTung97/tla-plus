@@ -3,13 +3,31 @@ EXTENDS TLC, Naturals, FiniteSets, Sequences
 
 CONSTANTS Node, nil, infinity, max_start_election
 
+putToSequence(seq, pos, x) ==
+    LET
+        old_len == Len(seq)
+        new_len ==
+            IF pos > old_len
+                THEN pos
+                ELSE old_len
+
+        update_fn(i) ==
+            IF i = pos THEN
+                x
+            ELSE IF i > old_len THEN
+                nil
+            ELSE
+                seq[i]
+    IN
+        [i \in 1..new_len |-> update_fn(i)]
+
 ---------------------------------------------------------------
 
 VARIABLES
     members, log, state, last_committed,
     global_last_term, last_propose_term, last_term,
     candidate_remain_pos, mem_log, log_voted,
-    msgs, last_cmd_num
+    msgs, last_cmd_num, god_log
 
 leader_vars == <<
     global_last_term,
@@ -18,7 +36,7 @@ leader_vars == <<
     candidate_remain_pos, mem_log, log_voted
 >>
 
-acceptor_vars == <<log, last_term>>
+acceptor_vars == <<log, last_term, god_log>>
 
 vars == <<
     acceptor_vars,
@@ -107,9 +125,19 @@ Message ==
             term: TermNum,
             to: Node
         ]
+
+        commit_log == [
+            type: {"CommitLog"},
+            term: TermNum,
+            log_pos: LogPos,
+            recv: SUBSET Node
+        ]
     IN
-        UNION {request_vote, vote_response,
-                accept_entry, accept_resp, accept_failed}
+        UNION {
+            request_vote, vote_response,
+            accept_entry, accept_resp, accept_failed,
+            commit_log
+        }
 
 
 IsQuorum(n, set) ==
@@ -137,6 +165,7 @@ TypeOK ==
 
     /\ msgs \subseteq Message
     /\ last_cmd_num \in CmdNum
+    /\ god_log \in Seq(NullLogEntry)
 
 init_members ==
     \E S \in SUBSET Node:
@@ -167,6 +196,7 @@ init_members ==
         /\ members = [n \in Node |-> init_nodes(n)]
         /\ log = [n \in Node |-> init_logs(n)]
         /\ last_committed = [n \in Node |-> init_last_committed(n)]
+        /\ god_log = <<init_entry>>
 
 Init ==
     /\ init_members
@@ -227,8 +257,8 @@ HandleRequestVote(n) ==
                 to |-> req.from,
                 term |-> req.term,
                 log_pos |-> req.log_pos,
-                entry |-> nil,
-                more |-> FALSE
+                entry |-> nil, \* TODO
+                more |-> FALSE \* TODO
             ]
         IN
         /\ req.type = "RequestVote"
@@ -237,7 +267,7 @@ HandleRequestVote(n) ==
         /\ last_term' = [last_term EXCEPT ![n] = req.term]
         /\ msgs' = msgs \union {resp}
 
-        /\ UNCHANGED log
+        /\ UNCHANGED <<log, god_log>>
         /\ UNCHANGED leader_vars
         /\ UNCHANGED last_cmd_num
 
@@ -356,21 +386,7 @@ NewCommand(n) ==
 
 putToLog(n, entry, pos) ==
     LET
-        old_len == Len(log[n])
-        new_len ==
-            IF pos > old_len
-                THEN pos
-                ELSE old_len
-
-        update_log(i) ==
-            IF i = pos THEN
-                entry
-            ELSE IF i > old_len THEN
-                nil
-            ELSE
-                log[n][i]
-
-        new_log == [i \in 1..new_len |-> update_log(i)]
+        new_log == putToSequence(log[n], pos, entry)
     IN
         [log EXCEPT ![n] = new_log]
 
@@ -411,6 +427,7 @@ doAcceptEntry(n, req) ==
 
     /\ UNCHANGED leader_vars
     /\ UNCHANGED last_cmd_num
+    /\ UNCHANGED god_log
 
 AcceptEntry(n) ==
     \E req \in msgs: doAcceptEntry(n, req)
@@ -455,6 +472,16 @@ doHandleAcceptResponse(n, resp) ==
 
         truncate_seq(seq) ==
             [seq EXCEPT ![n] = SubSeq(@, move_forward + 1, Len(@))]
+
+        commit_req == [
+            type |-> "CommitLog",
+            term |-> last_propose_term[n],
+            log_pos |-> last_committed'[n],
+            recv |-> members[n]
+        ]
+
+        send_commit_msg ==
+            /\ msgs' = msgs \union {commit_req}
     IN
     /\ resp.type = "AcceptResponse"
     /\ resp.to = n
@@ -467,7 +494,9 @@ doHandleAcceptResponse(n, resp) ==
     /\ mem_log' = truncate_seq(update_log_committed)
     /\ log_voted' = truncate_seq(update_voted)
 
-    /\ UNCHANGED msgs
+    /\ IF move_forward > 0
+        THEN send_commit_msg
+        ELSE UNCHANGED msgs
 
     /\ UNCHANGED state
     /\ UNCHANGED members
@@ -505,11 +534,59 @@ HandleAcceptFailed(n) ==
 
 ---------------------------------------------------------------
 
+doHandleCommitLog(n, resp) ==
+    LET
+        old_log == log[n]
+
+        update_fn(i, old) ==
+            IF i <= resp.log_pos /\ old # nil
+                THEN [old EXCEPT !.committed = TRUE, !.term = nil]
+                ELSE old
+
+        update_log ==
+            [i \in DOMAIN old_log |-> update_fn(i, old_log[i])]
+
+
+        old_len == Len(god_log)
+        new_len ==
+            IF resp.log_pos > old_len
+                THEN resp.log_pos
+                ELSE old_len
+
+        update_god_fn(i) ==
+            IF i > old_len THEN
+                update_log[i]
+            ELSE IF god_log[i] = nil THEN
+                update_log[i]
+            ELSE
+                god_log[i]
+
+        update_god_log ==
+            [i \in 1..new_len |-> update_god_fn(i)]
+    IN
+    /\ resp.type = "CommitLog"
+    /\ n \in resp.recv
+    /\ last_term[n] = resp.term
+    /\ Len(log[n]) >= resp.log_pos
+
+    /\ log' = [log EXCEPT ![n] = update_log]
+    /\ god_log' = update_god_log
+
+    /\ UNCHANGED last_term
+    /\ UNCHANGED leader_vars
+    /\ UNCHANGED msgs
+    /\ UNCHANGED last_cmd_num
+
+HandleCommitLog(n) ==
+    \E resp \in msgs: doHandleCommitLog(n, resp)
+
+---------------------------------------------------------------
+
 TerminateCond ==
     /\ global_last_term = max_term_num
     /\ \A n \in Node:
         /\ mem_log[n] = <<>>
-        /\ state[n] \in {"Follower", "Candidate"}
+        /\ state[n] \in {"Follower", "Leader"}
 
 Terminated ==
     /\ TerminateCond
@@ -525,6 +602,7 @@ Next ==
         \/ AcceptEntry(n)
         \/ HandleAcceptResponse(n)
         \/ HandleAcceptFailed(n)
+        \/ HandleCommitLog(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -556,5 +634,22 @@ LogEntryCommittedInv ==
 CandidateRemainPosInv ==
     \A n \in Node:
         candidate_remain_pos[n] # nil <=> state[n] = "Candidate"
+
+
+GodLogConsistency ==
+    \A n \in Node: \A i \in DOMAIN log[n]:
+        LET
+            e == log[n][i]
+        IN
+            e # nil /\ e.committed => god_log[i] = e
+
+GodLogNoLost ==
+    LET
+        god_len == Len(god_log)
+    IN
+    \E n \in Node:
+        /\ Len(log[n]) >= god_len
+        /\ log[n][god_len] # nil
+        /\ log[n][god_len].committed
 
 ====
