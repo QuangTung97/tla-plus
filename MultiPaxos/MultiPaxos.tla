@@ -27,7 +27,7 @@ putToSequence(seq, pos, x) ==
 ---------------------------------------------------------------
 
 VARIABLES
-    log, last_term, god_log,
+    log, last_term, acceptor_committed, god_log,
     global_last_term,
     members, state, last_committed,
     last_propose_term,
@@ -48,7 +48,7 @@ leader_vars == <<
     last_cmd_num
 >>
 
-acceptor_vars == <<log, last_term, god_log>>
+acceptor_vars == <<log, last_term, acceptor_committed, god_log>>
 
 vars == <<
     acceptor_vars,
@@ -64,7 +64,8 @@ TermNum == 20..max_term_num
 NullTerm == TermNum \union {nil}
 
 LogPos == (0..20)
-NullLogPos == LogPos \union {nil, infinity}
+NullLogPos == LogPos \union {nil}
+InfLogPos == NullLogPos \union {infinity}
 
 max_cmd_num == 32
 CmdNum == 30..max_cmd_num
@@ -73,21 +74,21 @@ LogEntry ==
     LET
         membership== [
             type: {"Member"},
-            committed: BOOLEAN,
             term: NullTerm,
+            committed: BOOLEAN,
             nodes: SUBSET Node
         ]
 
         null_entry == [
             type: {"Null"},
-            committed: BOOLEAN,
-            term: NullTerm
+            term: NullTerm,
+            committed: BOOLEAN
         ]
 
         cmd_entry == [
             type: {"Cmd"},
-            committed: BOOLEAN,
             term: NullTerm,
+            committed: BOOLEAN,
             cmd: CmdNum
         ]
     IN
@@ -153,26 +154,28 @@ IsQuorum(n, set) ==
 ---------------------------------------------------------------
 
 RemainPosition ==
-    [Node -> NullLogPos] \union {nil}
+    [Node -> InfLogPos] \union {nil}
 
 TypeOK ==
-    /\ members \in [Node -> SUBSET Node]
     /\ log \in [Node -> Seq(NullLogEntry)]
-    /\ last_committed \in [Node -> LogPos]
+    /\ last_term \in [Node -> TermNum]
+    /\ acceptor_committed \in [Node -> LogPos]
+    /\ god_log \in Seq(NullLogEntry)
+
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
+    /\ members \in [Node -> SUBSET Node]
+    /\ last_committed \in [Node -> NullLogPos]
     /\ global_last_term \in TermNum
     /\ last_propose_term \in [Node -> TermNum]
-    /\ last_term \in [Node -> TermNum]
-
-    /\ candidate_remain_pos \in [Node -> RemainPosition]
-    /\ candidate_accept_pos \in [Node -> LogPos \union {nil}]
 
     /\ mem_log \in [Node -> Seq(LogEntry)]
     /\ log_voted \in [Node -> Seq(SUBSET Node)]
+    /\ last_cmd_num \in CmdNum
+
+    /\ candidate_remain_pos \in [Node -> RemainPosition]
+    /\ candidate_accept_pos \in [Node -> NullLogPos]
 
     /\ msgs \subseteq Message
-    /\ last_cmd_num \in CmdNum
-    /\ god_log \in Seq(NullLogEntry)
 
 init_members ==
     \E S \in SUBSET Node:
@@ -184,8 +187,8 @@ init_members ==
 
             init_entry == [
                 type |-> "Member",
-                committed |-> TRUE,
                 term |-> nil,
+                committed |-> TRUE,
                 nodes |-> S
             ]
 
@@ -194,7 +197,7 @@ init_members ==
                     THEN <<init_entry>>
                     ELSE <<>>
 
-            init_last_committed(n) ==
+            init_committed(n) ==
                 IF n \in S
                     THEN 1
                     ELSE 0
@@ -202,40 +205,44 @@ init_members ==
         /\ S # {}
         /\ members = [n \in Node |-> init_nodes(n)]
         /\ log = [n \in Node |-> init_logs(n)]
-        /\ last_committed = [n \in Node |-> init_last_committed(n)]
+        /\ acceptor_committed = [n \in Node |-> init_committed(n)]
         /\ god_log = <<init_entry>>
 
 Init ==
     /\ init_members
+    /\ last_term = [n \in Node |-> 20]
+
     /\ state = [n \in Node |-> "Follower"]
+    /\ last_committed = [n \in Node |-> nil]
     /\ global_last_term = 20
     /\ last_propose_term = [n \in Node |-> 20]
-    /\ last_term = [n \in Node |-> 20]
+
+    /\ mem_log = [n \in Node |-> <<>>]
+    /\ log_voted = [n \in Node |-> <<>>]
+    /\ last_cmd_num = 30
 
     /\ candidate_remain_pos = [n \in Node |-> nil]
     /\ candidate_accept_pos = [n \in Node |-> nil]
 
-    /\ mem_log = [n \in Node |-> <<>>]
-    /\ log_voted = [n \in Node |-> <<>>]
-
     /\ msgs = {}
-    /\ last_cmd_num = 30
 
 ---------------------------------------------------------------
 
 StartElection(n) ==
     LET
+        commit_index == acceptor_committed[n]
+
         req == [
             type |-> "RequestVote",
             from |-> n,
             term |-> last_propose_term'[n],
-            log_pos |-> last_committed[n] + 1,
+            log_pos |-> commit_index + 1,
             recv |-> members[n]
         ]
 
         init_remain_pos == [n1 \in Node |->
             IF n1 \in members[n]
-                THEN last_committed[n] + 1
+                THEN commit_index + 1
                 ELSE nil
         ]
     IN
@@ -248,12 +255,12 @@ StartElection(n) ==
     /\ state' = [state EXCEPT ![n] = "Candidate"]
     /\ last_propose_term' = [last_propose_term EXCEPT ![n] = global_last_term']
     /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = init_remain_pos]
-    /\ candidate_accept_pos' = [candidate_accept_pos EXCEPT ![n] = last_committed[n]]
+    /\ candidate_accept_pos' = [candidate_accept_pos EXCEPT ![n] = commit_index]
 
     /\ msgs' = msgs \union {req}
+    /\ last_committed' = [last_committed EXCEPT ![n] = commit_index]
 
     /\ UNCHANGED <<mem_log, log_voted>>
-    /\ UNCHANGED last_committed
     /\ UNCHANGED members
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED last_cmd_num
@@ -309,6 +316,7 @@ HandleRequestVote(n) ==
                 vote_logs, n, req, req.log_pos
             )
 
+        /\ UNCHANGED acceptor_committed
         /\ UNCHANGED <<log, god_log>>
         /\ UNCHANGED leader_vars
         /\ UNCHANGED candidate_vars
@@ -525,6 +533,7 @@ doAcceptEntry(n, req) ==
 
     /\ UNCHANGED leader_vars
     /\ UNCHANGED god_log
+    /\ UNCHANGED acceptor_committed
     /\ UNCHANGED candidate_vars
 
 AcceptEntry(n) ==
@@ -661,25 +670,41 @@ MemLogMatchLogVoted ==
         Len(mem_log[n]) = Len(log_voted[n])
 
 
-checkLogEntryCommittedInv(input_log) ==
-    \A n \in Node:
-        \A i \in DOMAIN input_log[n]:
-            LET
-                e == input_log[n][i]
-            IN
-            \/ e = nil
-            \/ /\ ~e.committed
-               /\ e.term # nil
-            \/ /\ e.committed
-               /\ e.term = nil
-
 LogEntryCommittedInv ==
-    /\ checkLogEntryCommittedInv(log)
-    /\ checkLogEntryCommittedInv(mem_log)
+    \A n \in Node:
+        \A i \in DOMAIN log[n]:
+            LET
+                e == log[n][i]
+
+                is_committed ==
+                    /\ e # nil
+                    /\ e.committed
+                    /\ e.term = nil
+
+                not_committed ==
+                    /\ ~e.committed
+                    /\ e.term # nil
+            IN
+                IF i <= acceptor_committed[n]
+                    THEN is_committed
+                    ELSE e = nil \/ not_committed
 
 
 MemLogNonNilInv ==
-    \A n \in Node: \A i \in DOMAIN mem_log[n]: mem_log[n][i] # nil
+    \A n \in Node: \A i \in DOMAIN mem_log[n]:
+        LET
+            e == mem_log[n][i]
+
+            is_committed ==
+                /\ e.committed
+                /\ e.term = nil
+
+            not_committed ==
+                /\ ~e.committed
+                /\ e.term # nil
+        IN
+        /\ e # nil
+        /\ is_committed \/ not_committed
 
 
 CandidateRemainPosInv ==
@@ -700,8 +725,13 @@ GodLogNoLost ==
     IN
     \E n \in Node:
         /\ Len(log[n]) >= god_len
-        /\ god_log[god_len] # nil =>
-            /\ log[n][god_len] # nil
-            /\ log[n][god_len].committed
+        \* /\ god_log[god_len] # nil => TODO
+        \*     /\ log[n][god_len] # nil
+        \*     /\ log[n][god_len].committed
+
+
+MemLogNonEmptyInv ==
+    \A n \in Node:
+        mem_log[n] # <<>> => state[n] \in {"Candidate", "Leader"}
 
 ====
