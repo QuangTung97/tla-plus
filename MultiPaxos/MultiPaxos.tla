@@ -50,6 +50,21 @@ putToSequence(seq, pos, x) ==
     IN
         [i \in 1..new_len |-> update_fn(i)]
 
+
+lessThanWithInf(x, y) ==
+    IF x = infinity THEN
+        FALSE
+    ELSE
+        IF y = infinity
+            THEN TRUE
+            ELSE x < y
+
+ASSUME lessThanWithInf(infinity, infinity) = FALSE
+ASSUME lessThanWithInf(infinity, 70) = FALSE
+ASSUME lessThanWithInf(70, 71) = TRUE
+ASSUME lessThanWithInf(70, infinity) = TRUE
+ASSUME lessThanWithInf(72, 71) = FALSE
+
 ---------------------------------------------------------------
 
 VARIABLES
@@ -91,7 +106,7 @@ NullNode == Node \union {nil}
 
 max_term_num == 20 + max_start_election
 TermNum == 20..max_term_num
-NullTerm == TermNum \union {nil}
+TermNumInf == TermNum \union {infinity}
 
 LogPos == (0..20)
 NullLogPos == LogPos \union {nil}
@@ -104,20 +119,20 @@ LogEntry ==
     LET
         membership== [
             type: {"Member"},
-            term: NullTerm,
+            term: TermNumInf,
             committed: BOOLEAN,
             nodes: SUBSET Node
         ]
 
         null_entry == [
             type: {"Null"},
-            term: NullTerm,
+            term: TermNumInf,
             committed: BOOLEAN
         ]
 
         cmd_entry == [
             type: {"Cmd"},
-            term: NullTerm,
+            term: TermNumInf,
             committed: BOOLEAN,
             cmd: CmdNum
         ]
@@ -218,7 +233,7 @@ init_members ==
 
             init_entry == [
                 type |-> "Member",
-                term |-> nil,
+                term |-> infinity,
                 committed |-> TRUE,
                 nodes |-> S
             ]
@@ -263,11 +278,11 @@ Init ==
 setLogCommitted(input_log, n, pos) ==
     [input_log EXCEPT
             ![n][pos].committed = TRUE,
-            ![n][pos].term = nil
+            ![n][pos].term = infinity
         ]
 
 setLogCommittedEntry(entry) ==
-    [entry EXCEPT !.committed = TRUE, !.term = nil]
+    [entry EXCEPT !.committed = TRUE, !.term = infinity]
 
 getLogEntryNull(input_log, pos) ==
     LET
@@ -412,6 +427,8 @@ buildAcceptRequests(n, term, pos, max_pos, input_log) ==
                 )
             ELSE {}
 
+
+
 doHandleVoteResponse(n, resp) ==
     LET
         from == resp.from
@@ -432,10 +449,21 @@ doHandleVoteResponse(n, resp) ==
             term |-> 20
         ]
 
-        put_entry == \* TODO handle term compare
+        prev_entry == getLogEntryNull(mem_log[n], mem_pos)
+        prev_term ==
+            IF prev_entry = nil
+                THEN 19
+                ELSE prev_entry.term
+
+        put_entry_tmp ==
             IF resp.entry = nil
                 THEN null_entry
                 ELSE resp.entry
+
+        put_entry ==
+            IF lessThanWithInf(prev_term, put_entry_tmp.term)
+                THEN put_entry_tmp
+                ELSE prev_entry
 
         update_mem_log ==
             /\ mem_log' = [mem_log EXCEPT
@@ -768,11 +796,11 @@ LogEntryCommittedInv ==
 
                 is_committed ==
                     /\ e.committed
-                    /\ e.term = nil
+                    /\ e.term = infinity
 
                 not_committed ==
                     /\ ~e.committed
-                    /\ e.term # nil
+                    /\ e.term # infinity
             IN
                 e # nil =>
                     \/ is_committed
@@ -785,11 +813,11 @@ MemLogNonNilInv ==
 
             is_committed ==
                 /\ e.committed
-                /\ e.term = nil
+                /\ e.term = infinity
 
             not_committed ==
                 /\ ~e.committed
-                /\ e.term # nil
+                /\ e.term # infinity
         IN
         /\ e # nil
         /\ is_committed \/ not_committed
