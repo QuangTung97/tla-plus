@@ -1,7 +1,7 @@
 ------ MODULE MultiPaxos ----
 EXTENDS TLC, Naturals, FiniteSets, Sequences
 
-CONSTANTS Node, nil, infinity, max_start_election
+CONSTANTS Node, nil, infinity, max_start_election, total_num_cmd
 
 MinOf(S) == CHOOSE x \in S: (\A y \in S: y >= x)
 MaxOf(S) == CHOOSE x \in S: (\A y \in S: y <= x)
@@ -67,7 +67,7 @@ LogPos == (0..20)
 NullLogPos == LogPos \union {nil}
 InfLogPos == NullLogPos \union {infinity}
 
-max_cmd_num == 32
+max_cmd_num == 30 + total_num_cmd
 CmdNum == 30..max_cmd_num
 
 LogEntry ==
@@ -647,7 +647,6 @@ doSyncCommitPos(n, l) ==
             !.committed = TRUE,
             !.term = nil
         ]
-
     IN
     /\ last_committed[l] # nil
     /\ last_propose_term[l] = last_term[l]
@@ -673,7 +672,9 @@ TerminateCond ==
     /\ \A n \in Node:
         /\ mem_log[n] = <<>>
         /\ state[n] \in {"Follower", "Leader"}
-    /\ \A n \in Node: ~(ENABLED SyncCommitPosition(n))
+    /\ \A n \in Node:
+        /\ ~(ENABLED SyncCommitPosition(n))
+        /\ acceptor_committed[n] = Len(god_log)
 
 Terminated ==
     /\ TerminateCond
@@ -759,7 +760,7 @@ GodLogNoLost ==
     LET
         god_len == Len(god_log)
     IN
-    \E n \in Node: Len(log[n]) >= god_len
+        \E n \in Node: Len(log[n]) >= god_len
 
 
 GodLogInv ==
