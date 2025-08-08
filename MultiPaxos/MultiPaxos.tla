@@ -134,18 +134,10 @@ Message ==
             term: TermNum,
             to: Node
         ]
-
-        commit_log == [
-            type: {"CommitLog"},
-            term: TermNum,
-            log_pos: LogPos,
-            recv: SUBSET Node
-        ]
     IN
         UNION {
             request_vote, vote_response,
-            accept_entry, accept_resp, accept_failed,
-            commit_log
+            accept_entry, accept_resp, accept_failed
         }
 
 
@@ -390,7 +382,6 @@ doHandleVoteResponse(n, resp) ==
 
         total_log_len == Len(mem_log'[n]) + last_committed[n]
         new_accept_pos == compute_new_accept_pos(n, new_pos_map, total_log_len)
-
         begin_accept_pos == candidate_accept_pos[n] + 1
 
         send_accept_req ==
@@ -600,10 +591,7 @@ doHandleAcceptResponse(n, resp) ==
     /\ mem_log' = truncate_seq(update_log_committed)
     /\ log_voted' = truncate_seq(update_voted)
 
-    /\ IF move_forward > 0
-        THEN send_commit_msg
-        ELSE UNCHANGED msgs
-
+    /\ UNCHANGED msgs
     /\ UNCHANGED state
     /\ UNCHANGED members
     /\ UNCHANGED last_propose_term
@@ -622,13 +610,13 @@ doHandleAcceptFailed(n, resp) ==
     /\ resp.term > last_propose_term[n]
     /\ state[n] \in {"Candidate", "Leader"}
 
-    /\ last_propose_term' = [last_propose_term EXCEPT ![n] = resp.term]
     /\ state' = [state EXCEPT ![n] = "Follower"]
     /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
     /\ candidate_accept_pos' = [candidate_accept_pos EXCEPT ![n] = nil]
     /\ mem_log' = [mem_log EXCEPT ![n] = <<>>]
     /\ log_voted' = [log_voted EXCEPT ![n] = <<>>]
 
+    /\ UNCHANGED last_propose_term
     /\ UNCHANGED global_last_term
     /\ UNCHANGED last_cmd_num
     /\ UNCHANGED last_committed
@@ -638,55 +626,6 @@ doHandleAcceptFailed(n, resp) ==
 
 HandleAcceptFailed(n) ==
     \E resp \in msgs: doHandleAcceptFailed(n, resp)
-
----------------------------------------------------------------
-
-doHandleCommitLog(n, resp) ==
-    LET
-        old_log == log[n]
-
-        update_fn(i, old) ==
-            IF i <= resp.log_pos /\ old # nil
-                THEN [old EXCEPT !.committed = TRUE, !.term = nil]
-                ELSE old
-
-        update_log ==
-            [i \in DOMAIN old_log |-> update_fn(i, old_log[i])]
-
-
-        old_len == Len(god_log)
-        new_len ==
-            IF resp.log_pos > old_len
-                THEN resp.log_pos
-                ELSE old_len
-
-        update_god_fn(i) ==
-            IF i > old_len THEN
-                update_log[i]
-            ELSE IF god_log[i] = nil THEN
-                update_log[i]
-            ELSE
-                god_log[i]
-
-        update_god_log ==
-            [i \in 1..new_len |-> update_god_fn(i)]
-    IN
-    /\ resp.type = "CommitLog"
-    /\ n \in resp.recv
-    /\ last_term[n] = resp.term
-    /\ Len(log[n]) >= resp.log_pos
-
-    /\ log' = [log EXCEPT ![n] = update_log]
-    /\ god_log' = update_god_log
-
-    /\ UNCHANGED last_term
-    /\ UNCHANGED leader_vars
-    /\ UNCHANGED candidate_vars
-    /\ UNCHANGED msgs
-    /\ UNCHANGED last_cmd_num
-
-HandleCommitLog(n) ==
-    \E resp \in msgs: doHandleCommitLog(n, resp)
 
 ---------------------------------------------------------------
 
@@ -710,7 +649,6 @@ Next ==
         \/ AcceptEntry(n)
         \/ HandleAcceptResponse(n)
         \/ HandleAcceptFailed(n)
-        \/ HandleCommitLog(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
