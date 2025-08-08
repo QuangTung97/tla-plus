@@ -27,11 +27,14 @@ putToSequence(seq, pos, x) ==
 ---------------------------------------------------------------
 
 VARIABLES
-    members, log, state, last_committed,
-    global_last_term, last_propose_term, last_term,
-    candidate_remain_pos, candidate_accept_pos,
+    log, last_term, god_log,
+    global_last_term,
+    members, state, last_committed,
+    last_propose_term,
     mem_log, log_voted,
-    msgs, last_cmd_num, god_log
+    last_cmd_num,
+    candidate_remain_pos, candidate_accept_pos,
+    msgs
 
 candidate_vars == <<
     candidate_remain_pos, candidate_accept_pos
@@ -41,7 +44,8 @@ leader_vars == <<
     global_last_term,
     members, state, last_committed,
     last_propose_term,
-    mem_log, log_voted
+    mem_log, log_voted,
+    last_cmd_num
 >>
 
 acceptor_vars == <<log, last_term, god_log>>
@@ -50,8 +54,7 @@ vars == <<
     acceptor_vars,
     leader_vars,
     candidate_vars,
-    msgs,
-    last_cmd_num
+    msgs
 >>
 
 ---------------------------------------------------------------
@@ -309,7 +312,6 @@ HandleRequestVote(n) ==
         /\ UNCHANGED <<log, god_log>>
         /\ UNCHANGED leader_vars
         /\ UNCHANGED candidate_vars
-        /\ UNCHANGED last_cmd_num
 
 ---------------------------------------------------------------
 
@@ -522,7 +524,6 @@ doAcceptEntry(n, req) ==
         ELSE on_fail
 
     /\ UNCHANGED leader_vars
-    /\ UNCHANGED last_cmd_num
     /\ UNCHANGED god_log
     /\ UNCHANGED candidate_vars
 
