@@ -25,6 +25,20 @@ ASSUME AppendFrom(<<11, 12, 13>>, 4, <<14, 15>>) = <<11, 12, 13, 14, 15>>
 ASSUME AppendFrom(<<11, 12, 13>>, 2, <<14, 15>>) = <<11, 14, 15>>
 ASSUME AppendFrom(<<11, 12, 13, 14>>, 2, <<21, 22>>) = <<11, 21, 22, 14>>
 
+----------------
+
+IsQuorumOf(U, set) ==
+    LET
+        factor == Cardinality(U) \div 2 + 1
+    IN
+        Cardinality(set) >= factor
+
+ASSUME IsQuorumOf({11, 12, 13}, {11, 12}) = TRUE
+ASSUME IsQuorumOf({11, 12, 13}, {11, 12, 13}) = TRUE
+ASSUME IsQuorumOf({11, 12}, {11, 12}) = TRUE
+ASSUME IsQuorumOf({11, 12}, {11}) = FALSE
+ASSUME IsQuorumOf({11, 12, 13}, {12}) = FALSE
+
 ---------------------------------------------------------------
 
 CONSTANTS Node, nil, infinity, max_start_election, total_num_cmd
