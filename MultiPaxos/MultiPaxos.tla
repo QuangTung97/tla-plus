@@ -258,11 +258,32 @@ Init ==
 
     /\ msgs = {}
 
+----------------------
+
+setLogCommitted(input_log, n, pos) ==
+    [input_log EXCEPT
+            ![n][pos].committed = TRUE,
+            ![n][pos].term = nil
+        ]
+
+setLogCommittedEntry(entry) ==
+    [entry EXCEPT !.committed = TRUE, !.term = nil]
+
+getLogEntryNull(input_log, pos) ==
+    LET
+        cond ==
+            /\ Len(input_log) >= pos
+            /\ input_log[pos] # nil
+    IN
+        IF cond
+            THEN input_log[pos]
+            ELSE nil
+
 ---------------------------------------------------------------
 
 StartElection(n) ==
     LET
-        commit_index == committed_upper[n] \* TODO
+        commit_index == committed_upper[n]
 
         req == [
             type |-> "RequestVote",
@@ -528,10 +549,6 @@ putToLog(n, entry, pos) ==
 doAcceptEntry(n, req) ==
     LET
         pos == req.log_pos
-        prev_entry ==
-            IF Len(log[n]) >= pos
-                THEN log[n][pos]
-                ELSE nil
 
         resp == [
             type |-> "AcceptResponse",
@@ -541,13 +558,16 @@ doAcceptEntry(n, req) ==
             log_pos |-> pos
         ]
 
+        put_entry ==
+            IF pos <= committed_upper[n]
+                THEN setLogCommittedEntry(req.entry)
+                ELSE req.entry
+
         on_success ==
             /\ last_term' = [last_term EXCEPT ![n] = req.term]
             /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
             /\ msgs' = msgs \union {resp}
-            /\ IF prev_entry # nil /\ prev_entry.committed
-                THEN UNCHANGED log
-                ELSE log' = putToLog(n, req.entry, pos)
+            /\ log' = putToLog(n, put_entry, pos)
 
         fail_resp == [
             type |-> "AcceptFailed",
@@ -578,18 +598,6 @@ AcceptEntry(n) ==
     \E req \in msgs: doAcceptEntry(n, req)
 
 ---------------------------------------------------------------
-
-setLogCommitted(input_log, n, pos) ==
-    [input_log EXCEPT
-            ![n][pos].committed = TRUE,
-            ![n][pos].term = nil
-        ]
-
-isLogEntryNonNil(input_log, pos) ==
-    /\ Len(input_log) >= pos
-    /\ input_log[pos] # nil
-
-----------------------
 
 RECURSIVE computeMaxCommitted(_)
 
@@ -701,7 +709,7 @@ SyncCommitPosition(n) ==
     /\ committed_upper[n] < last_committed[l]
 
     /\ committed_upper' = [committed_upper EXCEPT ![n] = @ + 1]
-    /\ IF isLogEntryNonNil(log[n], upper)
+    /\ IF getLogEntryNull(log[n], upper) # nil
         THEN log' = setLogCommitted(log, n, upper)
         ELSE UNCHANGED log
 
@@ -770,11 +778,8 @@ LogEntryCommittedInv ==
                     \/ not_committed
             IN
                 IF i <= committed_upper[n]
-                    THEN is_committed
+                    THEN e = nil \/ is_committed
                     ELSE when_not_mark_committed
-
-\* TODO check lower + 1 => non committed
-
 
 MemLogNonNilInv ==
     \A n \in Node: \A i \in DOMAIN mem_log[n]:
