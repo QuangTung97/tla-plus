@@ -621,6 +621,7 @@ doHandleAcceptFailed(n, resp) ==
     /\ state[n] \in {"Candidate", "Leader"}
 
     /\ state' = [state EXCEPT ![n] = "Follower"]
+    /\ last_committed' = [last_committed EXCEPT ![n] = nil]
     /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
     /\ candidate_accept_pos' = [candidate_accept_pos EXCEPT ![n] = nil]
     /\ mem_log' = [mem_log EXCEPT ![n] = <<>>]
@@ -629,7 +630,6 @@ doHandleAcceptFailed(n, resp) ==
     /\ UNCHANGED last_propose_term
     /\ UNCHANGED global_last_term
     /\ UNCHANGED last_cmd_num
-    /\ UNCHANGED last_committed
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED members
     /\ UNCHANGED msgs
@@ -639,11 +639,41 @@ HandleAcceptFailed(n) ==
 
 ---------------------------------------------------------------
 
+doSyncCommitPos(n, l) ==
+    LET
+        pos == acceptor_committed'[n]
+        original_entry == log[l][pos]
+        entry == [original_entry EXCEPT
+            !.committed = TRUE,
+            !.term = nil
+        ]
+
+    IN
+    /\ last_committed[l] # nil
+    /\ last_propose_term[l] = last_term[l]
+    /\ acceptor_committed[n] < last_committed[l]
+    /\ n \in members[l]
+
+    /\ acceptor_committed' = [acceptor_committed EXCEPT ![n] = @ + 1]
+    /\ god_log' = putToSequence(god_log, pos, entry)
+    /\ log' = [log EXCEPT ![n] = putToSequence(@, pos, entry)]
+
+    /\ UNCHANGED last_term
+    /\ UNCHANGED leader_vars
+    /\ UNCHANGED candidate_vars
+    /\ UNCHANGED msgs
+
+SyncCommitPosition(n) ==
+    \E l \in Node: doSyncCommitPos(n, l)
+
+---------------------------------------------------------------
+
 TerminateCond ==
     /\ global_last_term = max_term_num
     /\ \A n \in Node:
         /\ mem_log[n] = <<>>
         /\ state[n] \in {"Follower", "Leader"}
+    /\ \A n \in Node: ~(ENABLED SyncCommitPosition(n))
 
 Terminated ==
     /\ TerminateCond
@@ -659,6 +689,7 @@ Next ==
         \/ AcceptEntry(n)
         \/ HandleAcceptResponse(n)
         \/ HandleAcceptFailed(n)
+        \/ SyncCommitPosition(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -684,10 +715,15 @@ LogEntryCommittedInv ==
                 not_committed ==
                     /\ ~e.committed
                     /\ e.term # nil
+
+                when_not_mark_committed ==
+                    \/ e = nil
+                    \/ is_committed
+                    \/ not_committed
             IN
                 IF i <= acceptor_committed[n]
                     THEN is_committed
-                    ELSE e = nil \/ not_committed
+                    ELSE when_not_mark_committed
 
 
 MemLogNonNilInv ==
@@ -723,15 +759,29 @@ GodLogNoLost ==
     LET
         god_len == Len(god_log)
     IN
-    \E n \in Node:
-        /\ Len(log[n]) >= god_len
-        \* /\ god_log[god_len] # nil => TODO
-        \*     /\ log[n][god_len] # nil
-        \*     /\ log[n][god_len].committed
+    \E n \in Node: Len(log[n]) >= god_len
+
+
+GodLogInv ==
+    \A i \in DOMAIN god_log:
+        \/ god_log[i] # nil
+        \/ god_log[i].committed
+
+
+GodLogLengthInv ==
+    LET
+        all_committed == {acceptor_committed[n]: n \in Node}
+    IN
+        MaxOf(all_committed) = Len(god_log)
 
 
 MemLogNonEmptyInv ==
+    LET
+        is_active(n) == state[n] \in {"Candidate", "Leader"}
+    IN
     \A n \in Node:
-        mem_log[n] # <<>> => state[n] \in {"Candidate", "Leader"}
+        /\ mem_log[n] # <<>> => is_active(n)
+        /\ log_voted[n] # <<>> => is_active(n)
+        /\ last_committed[n] # nil => is_active(n)
 
 ====
