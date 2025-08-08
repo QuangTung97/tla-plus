@@ -641,8 +641,12 @@ HandleAcceptFailed(n) ==
 
 doSyncCommitPos(n, l) ==
     LET
-        pos == acceptor_committed'[n]
-        original_entry == log[l][pos]
+        pos == acceptor_committed[n] + 1
+        original_entry ==
+            IF Len(log[l]) >= pos
+                THEN log[l][pos]
+                ELSE nil
+
         entry == [original_entry EXCEPT
             !.committed = TRUE,
             !.term = nil
@@ -651,6 +655,7 @@ doSyncCommitPos(n, l) ==
     /\ last_committed[l] # nil
     /\ last_propose_term[l] = last_term[l]
     /\ acceptor_committed[n] < last_committed[l]
+    /\ original_entry # nil
     /\ n \in members[l]
 
     /\ acceptor_committed' = [acceptor_committed EXCEPT ![n] = @ + 1]
@@ -674,7 +679,7 @@ TerminateCond ==
         /\ state[n] \in {"Follower", "Leader"}
     /\ \A n \in Node:
         /\ ~(ENABLED SyncCommitPosition(n))
-        /\ acceptor_committed[n] = Len(god_log)
+        /\ members[n] # {} => acceptor_committed[n] = Len(god_log)
 
 Terminated ==
     /\ TerminateCond
@@ -784,5 +789,25 @@ MemLogNonEmptyInv ==
         /\ mem_log[n] # <<>> => is_active(n)
         /\ log_voted[n] # <<>> => is_active(n)
         /\ last_committed[n] # nil => is_active(n)
+
+
+LogTermInv ==
+    \A n1, n2 \in Node:
+        LET
+            len ==
+                IF Len(log[n1]) > Len(log[n2])
+                    THEN Len(log[n2])
+                    ELSE Len(log[n1])
+        IN
+            \A i \in 1..len:
+                LET
+                    e1 == log[n1][i]
+                    e2 == log[n2][i]
+                    pre_cond ==
+                        /\ e1 # nil
+                        /\ e2 # nil
+                        /\ e1.term = e2.term
+                IN
+                    pre_cond => e1 = e2
 
 ====
