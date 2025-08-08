@@ -1,6 +1,32 @@
 ------ MODULE MultiPaxos ----
 EXTENDS TLC, Naturals, FiniteSets, Sequences
 
+AppendFrom(seq, pos, list) ==
+    LET
+        tmp_len == pos - 1 + Len(list)
+        new_len ==
+            IF tmp_len < Len(seq)
+                THEN Len(seq)
+                ELSE tmp_len
+
+        sub_index(i) == i - pos + 1
+
+        choose_fn(i) ==
+            IF i < pos THEN
+                seq[i]
+            ELSE IF sub_index(i) <= Len(list) THEN
+                list[sub_index(i)]
+            ELSE
+                seq[i]
+    IN
+        [i \in 1..new_len |-> choose_fn(i)]
+
+ASSUME AppendFrom(<<11, 12, 13>>, 4, <<14, 15>>) = <<11, 12, 13, 14, 15>>
+ASSUME AppendFrom(<<11, 12, 13>>, 2, <<14, 15>>) = <<11, 14, 15>>
+ASSUME AppendFrom(<<11, 12, 13, 14>>, 2, <<21, 22>>) = <<11, 21, 22, 14>>
+
+---------------------------------------------------------------
+
 CONSTANTS Node, nil, infinity, max_start_election, total_num_cmd
 
 MinOf(S) == CHOOSE x \in S: (\A y \in S: y >= x)
@@ -27,14 +53,14 @@ putToSequence(seq, pos, x) ==
 ---------------------------------------------------------------
 
 VARIABLES
-    log, last_term, acceptor_committed, god_log,
+    log, last_term, committed_upper, current_leader,
     global_last_term,
     members, state, last_committed,
     last_propose_term,
     mem_log, log_voted,
     last_cmd_num,
     candidate_remain_pos, candidate_accept_pos,
-    msgs
+    msgs, god_log
 
 candidate_vars == <<
     candidate_remain_pos, candidate_accept_pos
@@ -48,16 +74,20 @@ leader_vars == <<
     last_cmd_num
 >>
 
-acceptor_vars == <<log, last_term, acceptor_committed, god_log>>
+acceptor_vars == <<
+    log, last_term, committed_upper, current_leader
+>>
 
 vars == <<
     acceptor_vars,
     leader_vars,
     candidate_vars,
-    msgs
+    msgs, god_log
 >>
 
 ---------------------------------------------------------------
+
+NullNode == Node \union {nil}
 
 max_term_num == 20 + max_start_election
 TermNum == 20..max_term_num
@@ -159,7 +189,8 @@ RemainPosition ==
 TypeOK ==
     /\ log \in [Node -> Seq(NullLogEntry)]
     /\ last_term \in [Node -> TermNum]
-    /\ acceptor_committed \in [Node -> LogPos]
+    /\ committed_upper \in [Node -> LogPos]
+    /\ current_leader \in [Node -> NullNode]
     /\ god_log \in Seq(NullLogEntry)
 
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
@@ -205,12 +236,13 @@ init_members ==
         /\ S # {}
         /\ members = [n \in Node |-> init_nodes(n)]
         /\ log = [n \in Node |-> init_logs(n)]
-        /\ acceptor_committed = [n \in Node |-> init_committed(n)]
+        /\ committed_upper = [n \in Node |-> init_committed(n)]
         /\ god_log = <<init_entry>>
 
 Init ==
     /\ init_members
     /\ last_term = [n \in Node |-> 20]
+    /\ current_leader = [n \in Node |-> nil]
 
     /\ state = [n \in Node |-> "Follower"]
     /\ last_committed = [n \in Node |-> nil]
@@ -230,7 +262,7 @@ Init ==
 
 StartElection(n) ==
     LET
-        commit_index == acceptor_committed[n]
+        commit_index == committed_upper[n] \* TODO
 
         req == [
             type |-> "RequestVote",
@@ -264,6 +296,7 @@ StartElection(n) ==
     /\ UNCHANGED members
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED last_cmd_num
+    /\ UNCHANGED god_log
 
 ---------------------------------------------------------------
 
@@ -312,11 +345,12 @@ HandleRequestVote(n) ==
         /\ last_term[n] < req.term
 
         /\ last_term' = [last_term EXCEPT ![n] = req.term]
+        /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
         /\ msgs' = msgs \union buildVoteResponses(
                 vote_logs, n, req, req.log_pos
             )
 
-        /\ UNCHANGED acceptor_committed
+        /\ UNCHANGED committed_upper
         /\ UNCHANGED <<log, god_log>>
         /\ UNCHANGED leader_vars
         /\ UNCHANGED candidate_vars
@@ -438,6 +472,7 @@ doHandleVoteResponse(n, resp) ==
     /\ UNCHANGED members
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED last_cmd_num
+    /\ UNCHANGED god_log
 
 HandleVoteResponse(n) ==
     \E resp \in msgs: doHandleVoteResponse(n, resp)
@@ -480,6 +515,7 @@ NewCommand(n) ==
     /\ UNCHANGED last_committed
     /\ UNCHANGED members
     /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED god_log
 
 
 putToLog(n, entry, pos) ==
@@ -507,6 +543,7 @@ doAcceptEntry(n, req) ==
 
         on_success ==
             /\ last_term' = [last_term EXCEPT ![n] = req.term]
+            /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
             /\ msgs' = msgs \union {resp}
             /\ IF prev_entry # nil /\ prev_entry.committed
                 THEN UNCHANGED log
@@ -522,6 +559,7 @@ doAcceptEntry(n, req) ==
             /\ fail_resp \notin msgs
             /\ msgs' = msgs \union {fail_resp}
             /\ UNCHANGED last_term
+            /\ UNCHANGED current_leader
             /\ UNCHANGED log
     IN
     /\ req.type = "AcceptEntry"
@@ -533,13 +571,25 @@ doAcceptEntry(n, req) ==
 
     /\ UNCHANGED leader_vars
     /\ UNCHANGED god_log
-    /\ UNCHANGED acceptor_committed
+    /\ UNCHANGED committed_upper
     /\ UNCHANGED candidate_vars
 
 AcceptEntry(n) ==
     \E req \in msgs: doAcceptEntry(n, req)
 
 ---------------------------------------------------------------
+
+setLogCommitted(input_log, n, pos) ==
+    [input_log EXCEPT
+            ![n][pos].committed = TRUE,
+            ![n][pos].term = nil
+        ]
+
+isLogEntryNonNil(input_log, pos) ==
+    /\ Len(input_log) >= pos
+    /\ input_log[pos] # nil
+
+----------------------
 
 RECURSIVE computeMaxCommitted(_)
 
@@ -560,16 +610,11 @@ doHandleAcceptResponse(n, resp) ==
         is_quorum == IsQuorum(n, new_votes)
 
         update_voted ==
-            IF is_quorum
-                THEN [log_voted EXCEPT ![n][pos] = {}]
-                ELSE [log_voted EXCEPT ![n][pos] = new_votes]
+            [log_voted EXCEPT ![n][pos] = new_votes]
 
         update_log_committed ==
             IF is_quorum
-                THEN [mem_log EXCEPT
-                        ![n][pos].committed = TRUE,
-                        ![n][pos].term = nil
-                    ]
+                THEN setLogCommitted(mem_log, n, pos)
                 ELSE mem_log
 
         move_forward == computeMaxCommitted(update_log_committed[n])
@@ -600,6 +645,11 @@ doHandleAcceptResponse(n, resp) ==
     /\ update_last_committed
     /\ mem_log' = truncate_seq(update_log_committed)
     /\ log_voted' = truncate_seq(update_voted)
+    /\ god_log' = AppendFrom(
+            god_log,
+            last_committed[n] + 1,
+            SubSeq(update_log_committed[n], 1, move_forward)
+        )
 
     /\ UNCHANGED msgs
     /\ UNCHANGED state
@@ -633,42 +683,34 @@ doHandleAcceptFailed(n, resp) ==
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED members
     /\ UNCHANGED msgs
+    /\ UNCHANGED god_log
 
 HandleAcceptFailed(n) ==
     \E resp \in msgs: doHandleAcceptFailed(n, resp)
 
 ---------------------------------------------------------------
 
-doSyncCommitPos(n, l) ==
+SyncCommitPosition(n) ==
     LET
-        pos == acceptor_committed[n] + 1
-        original_entry ==
-            IF Len(log[l]) >= pos
-                THEN log[l][pos]
-                ELSE nil
-
-        entry == [original_entry EXCEPT
-            !.committed = TRUE,
-            !.term = nil
-        ]
+        l == current_leader[n]
+        upper == committed_upper[n] + 1
     IN
+    /\ l # nil
+    /\ last_term[n] = last_propose_term[l]
     /\ last_committed[l] # nil
-    /\ last_propose_term[l] = last_term[l]
-    /\ acceptor_committed[n] < last_committed[l]
-    /\ original_entry # nil
-    /\ n \in members[l]
+    /\ committed_upper[n] < last_committed[l]
 
-    /\ acceptor_committed' = [acceptor_committed EXCEPT ![n] = @ + 1]
-    /\ god_log' = putToSequence(god_log, pos, entry)
-    /\ log' = [log EXCEPT ![n] = putToSequence(@, pos, entry)]
+    /\ committed_upper' = [committed_upper EXCEPT ![n] = @ + 1]
+    /\ IF isLogEntryNonNil(log[n], upper)
+        THEN log' = setLogCommitted(log, n, upper)
+        ELSE UNCHANGED log
 
+    /\ UNCHANGED god_log
+    /\ UNCHANGED current_leader
     /\ UNCHANGED last_term
     /\ UNCHANGED leader_vars
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED msgs
-
-SyncCommitPosition(n) ==
-    \E l \in Node: doSyncCommitPos(n, l)
 
 ---------------------------------------------------------------
 
@@ -679,7 +721,7 @@ TerminateCond ==
         /\ state[n] \in {"Follower", "Leader"}
     /\ \A n \in Node:
         /\ ~(ENABLED SyncCommitPosition(n))
-        /\ members[n] # {} => acceptor_committed[n] = Len(god_log)
+        /\ current_leader[n] # nil => committed_upper[n] = Len(god_log)
 
 Terminated ==
     /\ TerminateCond
@@ -727,9 +769,11 @@ LogEntryCommittedInv ==
                     \/ is_committed
                     \/ not_committed
             IN
-                IF i <= acceptor_committed[n]
+                IF i <= committed_upper[n]
                     THEN is_committed
                     ELSE when_not_mark_committed
+
+\* TODO check lower + 1 => non committed
 
 
 MemLogNonNilInv ==
@@ -773,12 +817,11 @@ GodLogInv ==
         \/ god_log[i] # nil
         \/ god_log[i].committed
 
+godLogNeverShrinkStep ==
+    /\ Len(god_log') > Len(god_log)
 
-GodLogLengthInv ==
-    LET
-        all_committed == {acceptor_committed[n]: n \in Node}
-    IN
-        MaxOf(all_committed) = Len(god_log)
+GodLogNeverShrink ==
+    [][godLogNeverShrinkStep]_god_log
 
 
 MemLogNonEmptyInv ==
