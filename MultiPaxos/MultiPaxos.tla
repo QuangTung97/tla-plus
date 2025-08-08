@@ -702,6 +702,7 @@ SyncCommitPosition(n) ==
     LET
         l == current_leader[n]
         upper == committed_upper[n] + 1
+        entry == getLogEntryNull(log[n], upper)
     IN
     /\ l # nil
     /\ last_term[n] = last_propose_term[l]
@@ -709,7 +710,7 @@ SyncCommitPosition(n) ==
     /\ committed_upper[n] < last_committed[l]
 
     /\ committed_upper' = [committed_upper EXCEPT ![n] = @ + 1]
-    /\ IF getLogEntryNull(log[n], upper) # nil
+    /\ IF entry # nil /\ entry.term = last_term[n]
         THEN log' = setLogCommitted(log, n, upper)
         ELSE UNCHANGED log
 
@@ -750,6 +751,8 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+Sym == Permutations(Node)
+
 ---------------------------------------------------------------
 
 MemLogMatchLogVoted ==
@@ -764,22 +767,16 @@ LogEntryCommittedInv ==
                 e == log[n][i]
 
                 is_committed ==
-                    /\ e # nil
                     /\ e.committed
                     /\ e.term = nil
 
                 not_committed ==
                     /\ ~e.committed
                     /\ e.term # nil
-
-                when_not_mark_committed ==
-                    \/ e = nil
+            IN
+                e # nil =>
                     \/ is_committed
                     \/ not_committed
-            IN
-                IF i <= committed_upper[n]
-                    THEN e = nil \/ is_committed
-                    ELSE when_not_mark_committed
 
 MemLogNonNilInv ==
     \A n \in Node: \A i \in DOMAIN mem_log[n]:
