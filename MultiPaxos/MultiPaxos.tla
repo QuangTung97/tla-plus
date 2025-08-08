@@ -495,6 +495,7 @@ doHandleVoteResponse(n, resp) ==
     /\ state[n] = "Candidate"
     /\ last_propose_term[n] = resp.term
     /\ remain_pos = resp.log_pos
+    /\ resp.log_pos > candidate_accept_pos[n]
 
     /\ IF resp.more
         THEN update_mem_log
