@@ -447,12 +447,11 @@ buildAcceptRequests(n, term, pos, max_pos, input_log) ==
                 )
             ELSE {}
 
-
-
 doHandleVoteResponse(n, resp) ==
     LET
         from == resp.from
         remain_pos == candidate_remain_pos[n][from]
+        term == last_propose_term[n]
 
         update_remain_pos ==
             IF resp.more
@@ -507,7 +506,7 @@ doHandleVoteResponse(n, resp) ==
                 pos == index + last_committed[n]
             IN
             IF pos >= begin_accept_pos /\ pos <= new_accept_pos
-                THEN [old EXCEPT !.committed = FALSE, !.term = last_term[n]]
+                THEN [old EXCEPT !.committed = FALSE, !.term = term]
                 ELSE old
 
         set_mem_log_same_term ==
