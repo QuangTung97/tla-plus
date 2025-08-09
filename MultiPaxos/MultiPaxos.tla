@@ -89,7 +89,8 @@ VARIABLES
     mem_log, log_voted,
     last_cmd_num,
     candidate_remain_pos, candidate_accept_pos,
-    msgs, god_log
+    msgs, god_log,
+    handling_msg
 
 candidate_vars == <<
     candidate_remain_pos, candidate_accept_pos
@@ -111,7 +112,8 @@ vars == <<
     acceptor_vars,
     leader_vars,
     candidate_vars,
-    msgs, god_log
+    msgs, god_log,
+    handling_msg
 >>
 
 ---------------------------------------------------------------
@@ -236,6 +238,7 @@ TypeOK ==
     /\ candidate_accept_pos \in [Node -> NullLogPos]
 
     /\ msgs \subseteq Message
+    /\ handling_msg \in (Message \union {nil})
 
 init_members ==
     \E S \in SUBSET Node:
@@ -286,6 +289,7 @@ Init ==
     /\ candidate_accept_pos = [n \in Node |-> nil]
 
     /\ msgs = {}
+    /\ handling_msg = nil
 
 ----------------------
 
@@ -347,6 +351,7 @@ StartElection(n) ==
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED last_cmd_num
     /\ UNCHANGED god_log
+    /\ UNCHANGED handling_msg
 
 ---------------------------------------------------------------
 
@@ -394,6 +399,7 @@ HandleRequestVote(n) ==
         /\ n \in req.recv
         /\ last_term[n] < req.term
 
+        /\ handling_msg' = req
         /\ last_term' = [last_term EXCEPT ![n] = req.term]
         /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
         /\ msgs' = msgs \union buildVoteResponses(
@@ -472,7 +478,7 @@ doHandleVoteResponse(n, resp) ==
         put_entry_tmp ==
             IF resp.entry = nil
                 THEN null_entry
-                ELSE resp.entry
+                ELSE [resp.entry EXCEPT !.committed = FALSE]
 
         put_entry ==
             IF lessThanWithInf(prev_term, put_entry_tmp.term)
@@ -527,6 +533,7 @@ doHandleVoteResponse(n, resp) ==
     /\ remain_pos = resp.log_pos
     /\ resp.log_pos > candidate_accept_pos[n]
 
+    /\ handling_msg' = resp
     /\ mem_log' = [mem_log EXCEPT ![n] = set_mem_log_same_term]
     /\ log_voted' = [log_voted EXCEPT ![n] = update_log_voted]
 
@@ -593,6 +600,7 @@ NewCommand(n) ==
     /\ UNCHANGED members
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED god_log
+    /\ UNCHANGED handling_msg
 
 
 putToLog(n, entry, pos) ==
@@ -641,6 +649,7 @@ doAcceptEntry(n, req) ==
     /\ req.type = "AcceptEntry"
     /\ n \in req.recv
 
+    /\ handling_msg' = req
     /\ IF req.term >= last_term[n]
         THEN on_success
         ELSE on_fail
@@ -706,6 +715,7 @@ doHandleAcceptResponse(n, resp) ==
     /\ resp.log_pos > last_committed[n]
     /\ resp.from \notin old_votes
 
+    /\ handling_msg' = resp
     /\ update_last_committed
     /\ mem_log' = truncate_seq(update_log_committed)
     /\ log_voted' = truncate_seq(update_voted)
@@ -734,6 +744,7 @@ doHandleAcceptFailed(n, resp) ==
     /\ resp.term > last_propose_term[n]
     /\ state[n] \in {"Candidate", "Leader"}
 
+    /\ handling_msg' = resp
     /\ state' = [state EXCEPT ![n] = "Follower"]
     /\ last_committed' = [last_committed EXCEPT ![n] = nil]
     /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
@@ -776,6 +787,7 @@ SyncCommitPosition(n) ==
     /\ UNCHANGED leader_vars
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED msgs
+    /\ UNCHANGED handling_msg
 
 ---------------------------------------------------------------
 
@@ -845,7 +857,6 @@ MemLogNonNilInv ==
 
             not_committed ==
                 /\ ~e.committed
-                /\ e.term # infinity
         IN
         /\ e # nil
         /\ is_committed \/ not_committed
@@ -914,6 +925,21 @@ LogTermInv ==
 
 AcceptRequestInv ==
     \A req \in msgs:
-        req.type = "AcceptEntry" => req.term = req.entry.term
+        req.type = "AcceptEntry" =>
+            /\ req.term = req.entry.term
+            /\ ~req.entry.committed
+
+
+MemLogCommittedInv ==
+    \A n \in Node:
+        LET
+            accept_pos == candidate_accept_pos[n]
+            local_mem == mem_log[n]
+
+            cond ==
+                \A i \in DOMAIN local_mem:
+                    (i + last_committed[n] > accept_pos) => ~local_mem[i].committed
+        IN
+            accept_pos # nil => cond
 
 ====
