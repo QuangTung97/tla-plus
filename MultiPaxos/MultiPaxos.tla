@@ -688,7 +688,7 @@ doHandleAcceptResponse(n, resp) ==
     IN
     /\ resp.type = "AcceptResponse"
     /\ resp.to = n
-    /\ state[n] = "Leader"
+    /\ state[n] \in {"Candidate", "Leader"}
     /\ resp.term = last_propose_term[n]
     /\ resp.log_pos > last_committed[n]
     /\ resp.from \notin old_votes
