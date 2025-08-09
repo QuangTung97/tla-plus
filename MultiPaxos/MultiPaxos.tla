@@ -454,8 +454,8 @@ doHandleVoteResponse(n, resp) ==
                 ELSE [candidate_remain_pos EXCEPT ![n][from] = infinity]
 
         new_pos_map == update_remain_pos[n]
-
         mem_pos == resp.log_pos - last_committed[n]
+        local_mem_log == mem_log[n]
 
         null_entry == [
             type |-> "Null",
@@ -463,7 +463,7 @@ doHandleVoteResponse(n, resp) ==
             term |-> 20
         ]
 
-        prev_entry == getLogEntryNull(mem_log[n], mem_pos)
+        prev_entry == getLogEntryNull(local_mem_log, mem_pos)
         prev_term ==
             IF prev_entry = nil
                 THEN 19
@@ -480,16 +480,32 @@ doHandleVoteResponse(n, resp) ==
                 ELSE prev_entry
 
         update_mem_log ==
-            /\ mem_log' = [mem_log EXCEPT
-                    ![n] = putToSequence(mem_log[n], mem_pos, put_entry)
-                ]
-            /\ log_voted' = [log_voted EXCEPT
-                    ![n] = putToSequence(log_voted[n], mem_pos, {})
-                ]
+            IF resp.more THEN
+                putToSequence(local_mem_log, mem_pos, put_entry)
+            ELSE
+                local_mem_log
 
-        total_log_len == Len(mem_log'[n]) + last_committed[n]
+        update_log_voted ==
+            IF resp.more THEN
+                putToSequence(log_voted[n], mem_pos, {})
+            ELSE
+                log_voted[n]
+
+
+        total_log_len == Len(update_mem_log) + last_committed[n]
         new_accept_pos == compute_new_accept_pos(n, new_pos_map, total_log_len)
         begin_accept_pos == candidate_accept_pos[n] + 1
+
+        set_same_term_fn(index, old) ==
+            LET
+                pos == index + last_committed[n]
+            IN
+            IF pos >= begin_accept_pos /\ pos <= new_accept_pos
+                THEN [old EXCEPT !.committed = FALSE, !.term = last_term[n]]
+                ELSE old
+
+        set_mem_log_same_term ==
+            [i \in DOMAIN update_mem_log |-> set_same_term_fn(i, update_mem_log[i])]
 
         send_accept_req ==
             msgs' = msgs \union buildAcceptRequests(
@@ -497,9 +513,9 @@ doHandleVoteResponse(n, resp) ==
                 begin_accept_pos,
                 new_accept_pos,
                 SubSeq(
-                    mem_log'[n],
+                    set_mem_log_same_term,
                     begin_accept_pos - last_committed[n],
-                    Len(mem_log'[n])
+                    Len(set_mem_log_same_term)
                 )
             )
 
@@ -511,11 +527,8 @@ doHandleVoteResponse(n, resp) ==
     /\ remain_pos = resp.log_pos
     /\ resp.log_pos > candidate_accept_pos[n]
 
-    /\ IF resp.more
-        THEN update_mem_log
-        ELSE
-            /\ UNCHANGED mem_log
-            /\ UNCHANGED log_voted
+    /\ mem_log' = [mem_log EXCEPT ![n] = set_mem_log_same_term]
+    /\ log_voted' = [log_voted EXCEPT ![n] = update_log_voted]
 
     /\ send_accept_req
 
@@ -897,5 +910,10 @@ LogTermInv ==
                         /\ e1.term = e2.term
                 IN
                     pre_cond => e1 = e2
+
+
+AcceptRequestInv ==
+    \A req \in msgs:
+        req.type = "AcceptEntry" => req.term = req.entry.term
 
 ====
