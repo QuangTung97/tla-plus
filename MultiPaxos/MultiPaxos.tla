@@ -39,6 +39,14 @@ ASSUME IsQuorumOf({11, 12}, {11, 12}) = TRUE
 ASSUME IsQuorumOf({11, 12}, {11}) = FALSE
 ASSUME IsQuorumOf({11, 12, 13}, {12}) = FALSE
 
+
+SeqN(S, n) ==
+    UNION {[1..k -> S]: k \in 0..n}
+
+ASSUME <<>> \in SeqN({11, 12, 13}, 2)
+ASSUME <<12>> \in SeqN({11, 12, 13}, 2)
+ASSUME <<12, 13>> \in SeqN({11, 12, 13}, 2)
+
 ---------------------------------------------------------------
 
 CONSTANTS Node, nil, infinity, max_start_election, total_num_cmd
@@ -137,7 +145,7 @@ LogEntry ==
             type: {"Member"},
             term: TermNumInf,
             committed: BOOLEAN,
-            nodes: SUBSET Node
+            nodes: SeqN(SUBSET Node, 2)
         ]
 
         null_entry == [
@@ -236,7 +244,7 @@ TypeOK ==
     /\ god_log \in Seq(NullLogEntry)
 
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
-    /\ members \in [Node -> Seq(SUBSET Node)]
+    /\ members \in [Node -> SeqN(SUBSET Node, 2)]
     /\ last_committed \in [Node -> NullLogPos]
     /\ global_last_term \in TermNum
     /\ last_propose_term \in [Node -> TermNum]
@@ -263,7 +271,7 @@ init_members ==
                 type |-> "Member",
                 term |-> infinity,
                 committed |-> TRUE,
-                nodes |-> S
+                nodes |-> <<S>>
             ]
 
             init_logs(n) ==
