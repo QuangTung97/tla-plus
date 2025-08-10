@@ -82,7 +82,7 @@ ASSUME lessThanWithInf(72, 71) = FALSE
 ---------------------------------------------------------------
 
 VARIABLES
-    log, last_term, committed_upper, current_leader,
+    log, last_term, acceptor_committed, current_leader,
     global_last_term,
     members, state, last_committed,
     last_propose_term,
@@ -105,7 +105,7 @@ leader_vars == <<
 >>
 
 acceptor_vars == <<
-    log, last_term, committed_upper, current_leader
+    log, last_term, acceptor_committed, current_leader
 >>
 
 vars == <<
@@ -231,7 +231,7 @@ RemainPosition ==
 TypeOK ==
     /\ log \in [Node -> Seq(NullLogEntry)]
     /\ last_term \in [Node -> TermNum]
-    /\ committed_upper \in [Node -> LogPos]
+    /\ acceptor_committed \in [Node -> LogPos]
     /\ current_leader \in [Node -> NullNode]
     /\ god_log \in Seq(NullLogEntry)
 
@@ -279,7 +279,7 @@ init_members ==
         /\ S # {}
         /\ members = [n \in Node |-> init_nodes(n)]
         /\ log = [n \in Node |-> init_logs(n)]
-        /\ committed_upper = [n \in Node |-> init_committed(n)]
+        /\ acceptor_committed = [n \in Node |-> init_committed(n)]
         /\ god_log = <<init_entry>>
 
 Init ==
@@ -327,7 +327,7 @@ getLogEntryNull(input_log, pos) ==
 
 StartElection(n) ==
     LET
-        commit_index == committed_upper[n]
+        commit_index == acceptor_committed[n]
         all_members == getAllMembers(n)
 
         req == [
@@ -418,7 +418,7 @@ HandleRequestVote(n) ==
                 vote_logs, n, req, req.log_pos
             )
 
-        /\ UNCHANGED committed_upper
+        /\ UNCHANGED acceptor_committed
         /\ UNCHANGED <<log, god_log>>
         /\ UNCHANGED leader_vars
         /\ UNCHANGED candidate_vars
@@ -646,7 +646,7 @@ doAcceptEntry(n, req) ==
         ]
 
         put_entry ==
-            IF pos <= committed_upper[n]
+            IF pos <= acceptor_committed[n]
                 THEN setLogCommittedEntry(req.entry)
                 ELSE req.entry
 
@@ -679,7 +679,7 @@ doAcceptEntry(n, req) ==
 
     /\ UNCHANGED leader_vars
     /\ UNCHANGED god_log
-    /\ UNCHANGED committed_upper
+    /\ UNCHANGED acceptor_committed
     /\ UNCHANGED candidate_vars
 
 AcceptEntry(n) ==
@@ -791,15 +791,15 @@ HandleAcceptFailed(n) ==
 SyncCommitPosition(n) ==
     LET
         l == current_leader[n]
-        upper == committed_upper[n] + 1
+        upper == acceptor_committed[n] + 1
         entry == getLogEntryNull(log[n], upper)
     IN
     /\ l # nil
     /\ last_term[n] = last_propose_term[l]
     /\ last_committed[l] # nil
-    /\ committed_upper[n] < last_committed[l]
+    /\ acceptor_committed[n] < last_committed[l]
 
-    /\ committed_upper' = [committed_upper EXCEPT ![n] = @ + 1]
+    /\ acceptor_committed' = [acceptor_committed EXCEPT ![n] = @ + 1]
     /\ IF entry # nil /\ entry.term = last_term[n]
         THEN log' = setLogCommitted(log, n, upper)
         ELSE UNCHANGED log
@@ -821,7 +821,7 @@ TerminateCond ==
         /\ state[n] \in {"Follower", "Leader"}
     /\ \A n \in Node:
         /\ ~(ENABLED SyncCommitPosition(n))
-        /\ current_leader[n] # nil => committed_upper[n] = Len(god_log)
+        /\ current_leader[n] # nil => acceptor_committed[n] = Len(god_log)
 
 Terminated ==
     /\ TerminateCond
