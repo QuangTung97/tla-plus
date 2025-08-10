@@ -206,11 +206,22 @@ Message ==
         }
 
 
-IsQuorum(n, set) ==
+IsQuorum(n, Q) ==
     LET
-        factor == Cardinality(members[n]) \div 2 + 1
+        local_members == members[n]
+        is_true_set == {
+            IsQuorumOf(local_members[i], Q): i \in DOMAIN local_members
+        }
     IN
-        Cardinality(set) >= factor
+        is_true_set = {TRUE}
+
+
+getAllMembers(n) ==
+    LET
+        local_members == members[n]
+        sub_list == {local_members[i]: i \in DOMAIN local_members}
+    IN
+        UNION sub_list
 
 ---------------------------------------------------------------
 
@@ -225,7 +236,7 @@ TypeOK ==
     /\ god_log \in Seq(NullLogEntry)
 
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
-    /\ members \in [Node -> SUBSET Node]
+    /\ members \in [Node -> Seq(SUBSET Node)]
     /\ last_committed \in [Node -> NullLogPos]
     /\ global_last_term \in TermNum
     /\ last_propose_term \in [Node -> TermNum]
@@ -245,8 +256,8 @@ init_members ==
         LET
             init_nodes(n) ==
                 IF n \in S
-                    THEN S
-                    ELSE {}
+                    THEN <<S>>
+                    ELSE <<>>
 
             init_entry == [
                 type |-> "Member",
@@ -317,22 +328,23 @@ getLogEntryNull(input_log, pos) ==
 StartElection(n) ==
     LET
         commit_index == committed_upper[n]
+        all_members == getAllMembers(n)
 
         req == [
             type |-> "RequestVote",
             from |-> n,
             term |-> last_propose_term'[n],
             log_pos |-> commit_index + 1,
-            recv |-> members[n]
+            recv |-> all_members
         ]
 
         init_remain_pos == [n1 \in Node |->
-            IF n1 \in members[n]
+            IF n1 \in all_members
                 THEN commit_index + 1
                 ELSE nil
         ]
     IN
-    /\ n \in members[n]
+    /\ n \in all_members
     /\ state[n] = "Follower"
 
     /\ global_last_term < max_term_num
@@ -423,10 +435,22 @@ compute_new_accept_pos(n, pos_map, log_len) ==
                 THEN log_len
                 ELSE MinOf(num_set(Q)) - 1
 
-        all_quorums == {Q \in SUBSET members[n]: IsQuorum(n, Q)}
-        result == {accept_pos_quorum(Q): Q \in all_quorums}
+        local_members == members[n]
+
+        all_quorums(i) == {
+            Q \in SUBSET local_members[i]:
+                IsQuorumOf(local_members[i], Q)
+        }
+
+        new_accept_pos_per_members(i) == {
+            accept_pos_quorum(Q): Q \in all_quorums(i)
+        }
+
+        new_accept_pos_set == {
+            MaxOf(new_accept_pos_per_members(i)): i \in DOMAIN local_members
+        }
     IN
-        MaxOf(result)
+        MinOf(new_accept_pos_set)
 
 RECURSIVE buildAcceptRequests(_, _, _, _, _)
 
@@ -438,7 +462,7 @@ buildAcceptRequests(n, term, pos, max_pos, input_log) ==
             from |-> n,
             log_pos |-> pos,
             entry |-> input_log[1],
-            recv |-> members[n]
+            recv |-> getAllMembers(n)
         ]
     IN
         IF pos <= max_pos
@@ -579,7 +603,7 @@ NewCommand(n) ==
             from |-> n,
             log_pos |-> log_pos,
             entry |-> log_entry,
-            recv |-> members[n]
+            recv |-> getAllMembers(n)
         ]
     IN
     /\ state[n] = "Leader"
@@ -701,7 +725,7 @@ doHandleAcceptResponse(n, resp) ==
             type |-> "CommitLog",
             term |-> last_propose_term[n],
             log_pos |-> last_committed'[n],
-            recv |-> members[n]
+            recv |-> getAllMembers(n)
         ]
 
         send_commit_msg ==
