@@ -219,9 +219,8 @@ Message ==
         }
 
 
-IsQuorum(n, Q, pos) ==
+IsQuorum(local_members, Q, pos) ==
     LET
-        local_members == members[n]
         is_true_set == {
             IsQuorumOf(local_members[i].nodes, Q): i \in DOMAIN local_members
         }
@@ -229,10 +228,8 @@ IsQuorum(n, Q, pos) ==
         is_true_set = {TRUE}
 
 
-getAllMembers(n, pos) ==
+getAllMembers(local_members, pos) ==
     LET
-        local_members == members[n]
-
         get_nodes(i) ==
             IF pos >= local_members[i].from
                 THEN local_members[i].nodes
@@ -353,7 +350,7 @@ StartElection(n) ==
     LET
         commit_index == acceptor_committed[n]
         pos == commit_index + 1
-        all_members == getAllMembers(n, pos)
+        all_members == getAllMembers(members[n], pos)
 
         req == [
             type |-> "RequestVote",
@@ -450,6 +447,46 @@ HandleRequestVote(n) ==
 
 ---------------------------------------------------------------
 
+RECURSIVE handle_vote_response_recur(_, _)
+
+(*
+- obj.term
+- obj.n
+- obj.remain_map
+- obj.mem_log
+- obj.members
+- obj.accept_pos
+- obj.msgs
+*)
+handle_vote_response_recur(obj, pos) ==
+    LET
+        remain_ok_set == {
+            n1 \in Node:
+                \/ obj.remain_map[n1] = infinity
+                \/ obj.remain_map[n1] > pos
+        }
+
+        mem_pos == pos - last_committed[obj.n]
+
+        accept_req == [
+            type |-> "AcceptEntry",
+            term |-> obj.term,
+            from |-> obj.n,
+            log_pos |-> pos,
+            entry |-> obj.mem_log[mem_pos],
+            recv |-> getAllMembers(obj.members, pos)
+        ]
+
+        new_obj == [obj EXCEPT
+            !.accept_pos = @ + 1,
+            !.msgs = @ \union {accept_req}
+        ]
+    IN
+        IF IsQuorum(obj.members, remain_ok_set, pos)
+            THEN new_obj
+            ELSE obj
+
+
 \* TODO rework
 compute_new_accept_pos(n, pos_map, log_len) ==
     LET
@@ -488,7 +525,7 @@ buildAcceptRequests(n, term, pos, max_pos, input_log) ==
             from |-> n,
             log_pos |-> pos,
             entry |-> input_log[1],
-            recv |-> getAllMembers(n, pos)
+            recv |-> getAllMembers(members[n], pos)
         ]
     IN
         IF pos <= max_pos
@@ -546,9 +583,8 @@ doHandleVoteResponse(n, resp) ==
             ELSE
                 log_voted[n]
 
-
         total_log_len == Len(update_mem_log) + last_committed[n]
-        new_accept_pos == compute_new_accept_pos(n, new_pos_map, total_log_len)
+        new_accept_pos == compute_new_accept_pos(n, new_pos_map, total_log_len) \* TODO
         begin_accept_pos == candidate_accept_pos[n] + 1
 
         set_same_term_fn(index, old) ==
@@ -588,7 +624,7 @@ doHandleVoteResponse(n, resp) ==
 
     /\ send_accept_req
 
-    /\ IF IsQuorum(n, inf_set, last_committed[n] + Len(mem_log[n]))
+    /\ IF IsQuorum(members[n], inf_set, last_committed[n] + Len(mem_log[n]))
         THEN
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
@@ -629,7 +665,7 @@ NewCommand(n) ==
             from |-> n,
             log_pos |-> log_pos,
             entry |-> log_entry,
-            recv |-> getAllMembers(n, log_pos)
+            recv |-> getAllMembers(members[n], log_pos)
         ]
     IN
     /\ state[n] = "Leader"
@@ -729,7 +765,7 @@ doHandleAcceptResponse(n, resp) ==
         old_votes == log_voted[n][pos]
         new_votes == old_votes \union {resp.from}
 
-        is_quorum == IsQuorum(n, new_votes, resp.log_pos)
+        is_quorum == IsQuorum(members[n], new_votes, resp.log_pos)
 
         update_voted ==
             [log_voted EXCEPT ![n][pos] = new_votes]
@@ -751,7 +787,7 @@ doHandleAcceptResponse(n, resp) ==
             type |-> "CommitLog",
             term |-> last_propose_term[n],
             log_pos |-> last_committed'[n],
-            recv |-> getAllMembers(n, resp.log_pos)
+            recv |-> getAllMembers(members[n], resp.log_pos)
         ]
 
         send_commit_msg ==
