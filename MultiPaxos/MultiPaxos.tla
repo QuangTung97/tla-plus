@@ -447,7 +447,7 @@ HandleRequestVote(n) ==
 
 ---------------------------------------------------------------
 
-RECURSIVE handle_vote_response_recur(_, _)
+RECURSIVE handle_vote_response_recur(_)
 
 (*
 - obj.term
@@ -458,12 +458,14 @@ RECURSIVE handle_vote_response_recur(_, _)
 - obj.accept_pos
 - obj.msgs
 *)
-handle_vote_response_recur(obj, pos) ==
+handle_vote_response_recur(obj) ==
     LET
+        pos == obj.accept_pos + 1
+
         remain_ok_set == {
             n1 \in Node:
-                \/ obj.remain_map[n1] = infinity
-                \/ obj.remain_map[n1] > pos
+                /\ obj.remain_map[n1] # nil
+                /\ obj.remain_map[n1] # infinity => obj.remain_map[n1] > pos
         }
 
         mem_pos == pos - last_committed[obj.n]
@@ -477,62 +479,20 @@ handle_vote_response_recur(obj, pos) ==
             recv |-> getAllMembers(obj.members, pos)
         ]
 
+        new_mem_log(old) == [old EXCEPT
+            ![mem_pos].committed = FALSE,
+            ![mem_pos].term = obj.term
+        ]
+
         new_obj == [obj EXCEPT
-            !.accept_pos = @ + 1,
+            !.accept_pos = pos,
+            !.mem_log = new_mem_log(@),
             !.msgs = @ \union {accept_req}
         ]
     IN
-        IF IsQuorum(obj.members, remain_ok_set, pos)
-            THEN new_obj
+        IF pos <= Len(obj.mem_log) /\ IsQuorum(obj.members, remain_ok_set, pos)
+            THEN handle_vote_response_recur(new_obj)
             ELSE obj
-
-
-\* TODO rework
-compute_new_accept_pos(n, pos_map, log_len) ==
-    LET
-        non_inf_set(Q) == {n1 \in Q: pos_map[n1] # infinity /\ pos_map[n1] # nil}
-        num_set(Q) == {pos_map[n1]: n1 \in non_inf_set(Q)}
-
-        accept_pos_quorum(Q) ==
-            IF num_set(Q) = {}
-                THEN log_len
-                ELSE MinOf(num_set(Q)) - 1
-
-        local_members == members[n]
-
-        all_quorums(i) == {
-            Q \in SUBSET local_members[i].nodes:
-                IsQuorumOf(local_members[i].nodes, Q)
-        }
-
-        new_accept_pos_per_members(i) == {
-            accept_pos_quorum(Q): Q \in all_quorums(i)
-        }
-
-        new_accept_pos_set == {
-            MaxOf(new_accept_pos_per_members(i)): i \in DOMAIN local_members
-        }
-    IN
-        MinOf(new_accept_pos_set)
-
-RECURSIVE buildAcceptRequests(_, _, _, _, _)
-
-buildAcceptRequests(n, term, pos, max_pos, input_log) ==
-    LET
-        accept_req == [
-            type |-> "AcceptEntry",
-            term |-> term,
-            from |-> n,
-            log_pos |-> pos,
-            entry |-> input_log[1],
-            recv |-> getAllMembers(members[n], pos)
-        ]
-    IN
-        IF pos <= max_pos
-            THEN {accept_req} \union buildAcceptRequests(
-                    n, term, pos + 1, max_pos, Tail(input_log)
-                )
-            ELSE {}
 
 doHandleVoteResponse(n, resp) ==
     LET
@@ -540,26 +500,25 @@ doHandleVoteResponse(n, resp) ==
         remain_pos == candidate_remain_pos[n][from]
         term == last_propose_term[n]
 
-        update_remain_pos ==
+        update_remain_map ==
             IF resp.more
-                THEN [candidate_remain_pos EXCEPT ![n][from] = @ + 1]
-                ELSE [candidate_remain_pos EXCEPT ![n][from] = infinity]
+                THEN [candidate_remain_pos[n] EXCEPT ![from] = @ + 1]
+                ELSE [candidate_remain_pos[n] EXCEPT ![from] = infinity]
 
-        new_pos_map == update_remain_pos[n]
         mem_pos == resp.log_pos - last_committed[n]
         local_mem_log == mem_log[n]
-
-        null_entry == [
-            type |-> "Null",
-            committed |-> FALSE,
-            term |-> 20
-        ]
 
         prev_entry == getLogEntryNull(local_mem_log, mem_pos)
         prev_term ==
             IF prev_entry = nil
                 THEN 19
                 ELSE prev_entry.term
+
+        null_entry == [
+            type |-> "Null",
+            committed |-> FALSE,
+            term |-> 20
+        ]
 
         put_entry_tmp ==
             IF resp.entry = nil
@@ -583,34 +542,19 @@ doHandleVoteResponse(n, resp) ==
             ELSE
                 log_voted[n]
 
-        total_log_len == Len(update_mem_log) + last_committed[n]
-        new_accept_pos == compute_new_accept_pos(n, new_pos_map, total_log_len) \* TODO
-        begin_accept_pos == candidate_accept_pos[n] + 1
+        obj == [
+            term |-> term,
+            n |-> n,
+            members |-> members[n],
+            remain_map |-> update_remain_map,
+            mem_log |-> update_mem_log,
+            accept_pos |-> candidate_accept_pos[n],
+            msgs |-> msgs
+        ]
 
-        set_same_term_fn(index, old) ==
-            LET
-                pos == index + last_committed[n]
-            IN
-            IF pos >= begin_accept_pos /\ pos <= new_accept_pos
-                THEN [old EXCEPT !.committed = FALSE, !.term = term]
-                ELSE old
+        new_obj == handle_vote_response_recur(obj)
 
-        set_mem_log_same_term ==
-            [i \in DOMAIN update_mem_log |-> set_same_term_fn(i, update_mem_log[i])]
-
-        send_accept_req ==
-            msgs' = msgs \union buildAcceptRequests(
-                n, resp.term,
-                begin_accept_pos,
-                new_accept_pos,
-                SubSeq(
-                    set_mem_log_same_term,
-                    begin_accept_pos - last_committed[n],
-                    Len(set_mem_log_same_term)
-                )
-            )
-
-        inf_set == {n1 \in DOMAIN new_pos_map: new_pos_map[n1] = infinity}
+        inf_set == {n1 \in DOMAIN new_obj.remain_map: new_obj.remain_map[n1] = infinity}
     IN
     /\ resp.type = "VoteResponse"
     /\ state[n] = "Candidate"
@@ -619,10 +563,9 @@ doHandleVoteResponse(n, resp) ==
     /\ resp.log_pos > candidate_accept_pos[n]
 
     /\ handling_msg' = resp
-    /\ mem_log' = [mem_log EXCEPT ![n] = set_mem_log_same_term]
+    /\ mem_log' = [mem_log EXCEPT ![n] = new_obj.mem_log]
     /\ log_voted' = [log_voted EXCEPT ![n] = update_log_voted]
-
-    /\ send_accept_req
+    /\ msgs' = new_obj.msgs
 
     /\ IF IsQuorum(members[n], inf_set, last_committed[n] + Len(mem_log[n]))
         THEN
@@ -631,9 +574,10 @@ doHandleVoteResponse(n, resp) ==
             /\ candidate_accept_pos' = [candidate_accept_pos EXCEPT ![n] = nil]
         ELSE
             /\ UNCHANGED state
-            /\ candidate_remain_pos' = update_remain_pos
+            /\ candidate_remain_pos' = [candidate_remain_pos
+                    EXCEPT ![n] = new_obj.remain_map]
             /\ candidate_accept_pos' = [candidate_accept_pos
-                    EXCEPT ![n] = new_accept_pos]
+                    EXCEPT ![n] = new_obj.accept_pos]
 
     /\ UNCHANGED last_propose_term
     /\ UNCHANGED global_last_term
