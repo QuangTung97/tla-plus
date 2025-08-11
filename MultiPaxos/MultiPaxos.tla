@@ -221,8 +221,12 @@ Message ==
 
 IsQuorum(local_members, Q, pos) ==
     LET
+        cond(i)==
+            pos >= local_members[i].from =>
+                IsQuorumOf(local_members[i].nodes, Q)
+
         is_true_set == {
-            IsQuorumOf(local_members[i].nodes, Q): i \in DOMAIN local_members
+            cond(i): i \in DOMAIN local_members
         }
     IN
         is_true_set = {TRUE}
@@ -554,7 +558,10 @@ doHandleVoteResponse(n, resp) ==
 
         new_obj == handle_vote_response_recur(obj)
 
-        inf_set == {n1 \in DOMAIN new_obj.remain_map: new_obj.remain_map[n1] = infinity}
+        inf_set == {n1 \in DOMAIN new_obj.remain_map:
+            new_obj.remain_map[n1] = infinity
+        }
+        inf_check_pos == last_committed[n] + Len(new_obj.mem_log) + 1
     IN
     /\ resp.type = "VoteResponse"
     /\ state[n] = "Candidate"
@@ -567,7 +574,7 @@ doHandleVoteResponse(n, resp) ==
     /\ log_voted' = [log_voted EXCEPT ![n] = update_log_voted]
     /\ msgs' = new_obj.msgs
 
-    /\ IF IsQuorum(members[n], inf_set, last_committed[n] + Len(mem_log[n]))
+    /\ IF IsQuorum(members[n], inf_set, inf_check_pos)
         THEN
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
