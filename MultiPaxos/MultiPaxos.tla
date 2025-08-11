@@ -141,7 +141,7 @@ CmdNum == 30..max_cmd_num
 
 MemberInfo == [
     nodes: SUBSET Node,
-    from: 2..10
+    from: 2..(1 + total_num_cmd)
 ]
 
 LogEntry ==
@@ -223,7 +223,7 @@ IsQuorum(n, Q, pos) ==
     LET
         local_members == members[n]
         is_true_set == {
-            IsQuorumOf(local_members[i], Q): i \in DOMAIN local_members
+            IsQuorumOf(local_members[i].nodes, Q): i \in DOMAIN local_members
         }
     IN
         is_true_set = {TRUE}
@@ -232,7 +232,13 @@ IsQuorum(n, Q, pos) ==
 getAllMembers(n, pos) ==
     LET
         local_members == members[n]
-        sub_list == {local_members[i]: i \in DOMAIN local_members}
+
+        get_nodes(i) ==
+            IF pos >= local_members[i].from
+                THEN local_members[i].nodes
+                ELSE {}
+
+        sub_list == {get_nodes(i): i \in DOMAIN local_members}
     IN
         UNION sub_list
 
@@ -444,6 +450,7 @@ HandleRequestVote(n) ==
 
 ---------------------------------------------------------------
 
+\* TODO rework
 compute_new_accept_pos(n, pos_map, log_len) ==
     LET
         non_inf_set(Q) == {n1 \in Q: pos_map[n1] # infinity /\ pos_map[n1] # nil}
@@ -457,8 +464,8 @@ compute_new_accept_pos(n, pos_map, log_len) ==
         local_members == members[n]
 
         all_quorums(i) == {
-            Q \in SUBSET local_members[i]:
-                IsQuorumOf(local_members[i], Q)
+            Q \in SUBSET local_members[i].nodes:
+                IsQuorumOf(local_members[i].nodes, Q)
         }
 
         new_accept_pos_per_members(i) == {
@@ -581,7 +588,7 @@ doHandleVoteResponse(n, resp) ==
 
     /\ send_accept_req
 
-    /\ IF IsQuorum(n, inf_set, resp.log_pos)
+    /\ IF IsQuorum(n, inf_set, last_committed[n] + Len(mem_log[n]))
         THEN
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
