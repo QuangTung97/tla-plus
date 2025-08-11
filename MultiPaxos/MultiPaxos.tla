@@ -139,13 +139,18 @@ InfLogPos == NullLogPos \union {infinity}
 max_cmd_num == 30 + total_num_cmd
 CmdNum == 30..max_cmd_num
 
+MemberInfo == [
+    nodes: SUBSET Node,
+    from: 2..10
+]
+
 LogEntry ==
     LET
         membership== [
             type: {"Member"},
             term: TermNumInf,
             committed: BOOLEAN,
-            nodes: SeqN(SUBSET Node, 2)
+            nodes: SeqN(MemberInfo, 2)
         ]
 
         null_entry == [
@@ -214,7 +219,7 @@ Message ==
         }
 
 
-IsQuorum(n, Q) ==
+IsQuorum(n, Q, pos) ==
     LET
         local_members == members[n]
         is_true_set == {
@@ -224,7 +229,7 @@ IsQuorum(n, Q) ==
         is_true_set = {TRUE}
 
 
-getAllMembers(n) ==
+getAllMembers(n, pos) ==
     LET
         local_members == members[n]
         sub_list == {local_members[i]: i \in DOMAIN local_members}
@@ -244,7 +249,7 @@ TypeOK ==
     /\ god_log \in Seq(NullLogEntry)
 
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
-    /\ members \in [Node -> SeqN(SUBSET Node, 2)]
+    /\ members \in [Node -> SeqN(MemberInfo, 2)]
     /\ last_committed \in [Node -> NullLogPos]
     /\ global_last_term \in TermNum
     /\ last_propose_term \in [Node -> TermNum]
@@ -262,16 +267,21 @@ TypeOK ==
 init_members ==
     \E S \in SUBSET Node:
         LET
-            init_nodes(n) ==
+            member_info == [
+                nodes |-> S,
+                from |-> 2
+            ]
+
+            init_members(n) ==
                 IF n \in S
-                    THEN <<S>>
+                    THEN <<member_info>>
                     ELSE <<>>
 
             init_entry == [
                 type |-> "Member",
                 term |-> infinity,
                 committed |-> TRUE,
-                nodes |-> <<S>>
+                nodes |-> <<member_info>>
             ]
 
             init_logs(n) ==
@@ -285,7 +295,7 @@ init_members ==
                     ELSE 0
         IN
         /\ S # {}
-        /\ members = [n \in Node |-> init_nodes(n)]
+        /\ members = [n \in Node |-> init_members(n)]
         /\ log = [n \in Node |-> init_logs(n)]
         /\ acceptor_committed = [n \in Node |-> init_committed(n)]
         /\ god_log = <<init_entry>>
@@ -336,19 +346,20 @@ getLogEntryNull(input_log, pos) ==
 StartElection(n) ==
     LET
         commit_index == acceptor_committed[n]
-        all_members == getAllMembers(n)
+        pos == commit_index + 1
+        all_members == getAllMembers(n, pos)
 
         req == [
             type |-> "RequestVote",
             from |-> n,
             term |-> last_propose_term'[n],
-            log_pos |-> commit_index + 1,
+            log_pos |-> pos,
             recv |-> all_members
         ]
 
         init_remain_pos == [n1 \in Node |->
             IF n1 \in all_members
-                THEN commit_index + 1
+                THEN pos
                 ELSE nil
         ]
     IN
@@ -470,7 +481,7 @@ buildAcceptRequests(n, term, pos, max_pos, input_log) ==
             from |-> n,
             log_pos |-> pos,
             entry |-> input_log[1],
-            recv |-> getAllMembers(n)
+            recv |-> getAllMembers(n, pos)
         ]
     IN
         IF pos <= max_pos
@@ -570,7 +581,7 @@ doHandleVoteResponse(n, resp) ==
 
     /\ send_accept_req
 
-    /\ IF IsQuorum(n, inf_set)
+    /\ IF IsQuorum(n, inf_set, resp.log_pos)
         THEN
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
@@ -611,7 +622,7 @@ NewCommand(n) ==
             from |-> n,
             log_pos |-> log_pos,
             entry |-> log_entry,
-            recv |-> getAllMembers(n)
+            recv |-> getAllMembers(n, log_pos)
         ]
     IN
     /\ state[n] = "Leader"
@@ -711,7 +722,7 @@ doHandleAcceptResponse(n, resp) ==
         old_votes == log_voted[n][pos]
         new_votes == old_votes \union {resp.from}
 
-        is_quorum == IsQuorum(n, new_votes)
+        is_quorum == IsQuorum(n, new_votes, resp.log_pos)
 
         update_voted ==
             [log_voted EXCEPT ![n][pos] = new_votes]
@@ -733,7 +744,7 @@ doHandleAcceptResponse(n, resp) ==
             type |-> "CommitLog",
             term |-> last_propose_term[n],
             log_pos |-> last_committed'[n],
-            recv |-> getAllMembers(n)
+            recv |-> getAllMembers(n, resp.log_pos)
         ]
 
         send_commit_msg ==
