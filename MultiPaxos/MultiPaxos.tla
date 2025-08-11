@@ -470,27 +470,27 @@ handle_vote_response_recur(obj) ==
 
         mem_pos == pos - last_committed[obj.n]
 
+        new_mem_log == [obj.mem_log EXCEPT
+            ![mem_pos].committed = FALSE,
+            ![mem_pos].term = obj.term
+        ]
+
         accept_req == [
             type |-> "AcceptEntry",
             term |-> obj.term,
             from |-> obj.n,
             log_pos |-> pos,
-            entry |-> obj.mem_log[mem_pos],
+            entry |-> new_mem_log[mem_pos],
             recv |-> getAllMembers(obj.members, pos)
-        ]
-
-        new_mem_log(old) == [old EXCEPT
-            ![mem_pos].committed = FALSE,
-            ![mem_pos].term = obj.term
         ]
 
         new_obj == [obj EXCEPT
             !.accept_pos = pos,
-            !.mem_log = new_mem_log(@),
+            !.mem_log = new_mem_log,
             !.msgs = @ \union {accept_req}
         ]
     IN
-        IF pos <= Len(obj.mem_log) /\ IsQuorum(obj.members, remain_ok_set, pos)
+        IF mem_pos <= Len(obj.mem_log) /\ IsQuorum(obj.members, remain_ok_set, pos)
             THEN handle_vote_response_recur(new_obj)
             ELSE obj
 
