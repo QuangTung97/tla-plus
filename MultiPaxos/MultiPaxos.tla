@@ -594,6 +594,16 @@ HandleVoteResponse(n) ==
 
 ---------------------------------------------------------------
 
+newCommandUnchanged ==
+    /\ UNCHANGED state
+    /\ UNCHANGED candidate_vars
+    /\ UNCHANGED last_propose_term
+    /\ UNCHANGED global_last_term
+    /\ UNCHANGED last_committed
+    /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED god_log
+    /\ UNCHANGED handling_msg
+
 NewCommand(n) ==
     LET
         log_entry == [
@@ -622,16 +632,9 @@ NewCommand(n) ==
     /\ log_voted' = [log_voted EXCEPT ![n] = Append(@, {})]
     /\ msgs' = msgs \union {accept_req}
 
-    /\ UNCHANGED state
-    /\ UNCHANGED candidate_vars
-    /\ UNCHANGED last_propose_term
-    /\ UNCHANGED global_last_term
-    /\ UNCHANGED last_committed
     /\ UNCHANGED members
-    /\ UNCHANGED acceptor_vars
-    /\ UNCHANGED god_log
-    /\ UNCHANGED handling_msg
     /\ UNCHANGED num_member_change
+    /\ newCommandUnchanged
 
 ---------------------------------------------------------------
 
@@ -679,18 +682,51 @@ doChangeMembership(n, new_nodes) ==
     /\ log_voted' = [log_voted EXCEPT ![n] = Append(@, {})]
     /\ msgs' = msgs \union {accept_req}
 
-    /\ UNCHANGED state
-    /\ UNCHANGED global_last_term
-    /\ UNCHANGED god_log
-    /\ UNCHANGED handling_msg
-    /\ UNCHANGED last_committed
-    /\ UNCHANGED candidate_vars
-    /\ UNCHANGED acceptor_vars
     /\ UNCHANGED last_cmd_num
-    /\ UNCHANGED last_propose_term
+    /\ newCommandUnchanged
 
 ChangeMembership(n) ==
     \E nodes \in (SUBSET Node): doChangeMembership(n, nodes)
+
+---------------------------------------------------------------
+
+FinishChangeMembership(n) ==
+    LET
+        local_members == members[n]
+        pos == last_committed[n] + Len(mem_log[n]) + 1
+
+        new_conf == [
+            nodes |-> local_members[2].nodes,
+            from |-> 2
+        ]
+        new_members == <<new_conf>>
+
+        log_entry == [
+            type |-> "Member",
+            term |-> last_propose_term[n],
+            nodes |-> new_members
+        ]
+
+        accept_req == [
+            type |-> "AcceptEntry",
+            term |-> last_propose_term[n],
+            from |-> n,
+            log_pos |-> pos,
+            entry |-> log_entry,
+            recv |-> GetAllMembers(local_members, pos)
+        ]
+    IN
+    /\ state[n] = "Leader"
+    /\ Len(local_members) > 1
+
+    /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, log_entry)]
+    /\ log_voted' = [log_voted EXCEPT ![n] = Append(@, {})]
+    /\ msgs' = msgs \union {accept_req}
+    /\ members' = [members EXCEPT ![n] = new_members]
+
+    /\ UNCHANGED last_cmd_num
+    /\ UNCHANGED num_member_change
+    /\ newCommandUnchanged
 
 ---------------------------------------------------------------
 
@@ -979,8 +1015,10 @@ Next ==
         \/ HandleVoteResponse(n)
         \/ NewCommand(n)
         \/ AcceptEntry(n)
-        \/ ChangeMembership(n)
         \/ HandleAcceptResponse(n)
+
+        \/ ChangeMembership(n)
+        \/ FinishChangeMembership(n)
 
         \/ HandleVoteFailed(n)
         \/ HandleAcceptFailed(n)
