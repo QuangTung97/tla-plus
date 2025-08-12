@@ -824,6 +824,8 @@ TerminateCond ==
     /\ \A n \in Node:
         /\ mem_log[n] = <<>>
         /\ state[n] \in {"Follower", "Leader"}
+        /\ Len(members[n]) = 1
+        /\ members[n][1].from = 2
     /\ \A n \in Node:
         /\ ~(ENABLED SyncCommitPosition(n))
         /\ current_leader[n] # nil => acceptor_committed[n] = Len(god_log)
