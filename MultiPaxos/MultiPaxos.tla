@@ -1,7 +1,8 @@
 ------ MODULE MultiPaxos ----
 EXTENDS TLC, Utils
 
-CONSTANTS Node, nil, infinity, max_start_election, total_num_cmd
+CONSTANTS Node, nil, infinity, max_start_election,
+    total_num_cmd, max_member_change
 
 -------------------------
 
@@ -30,7 +31,7 @@ VARIABLES
     members, state, last_committed,
     last_propose_term,
     mem_log, log_voted,
-    last_cmd_num,
+    last_cmd_num, num_member_change,
     candidate_remain_pos, candidate_accept_pos,
     msgs, god_log,
     handling_msg
@@ -44,7 +45,7 @@ leader_vars == <<
     members, state, last_committed,
     last_propose_term,
     mem_log, log_voted,
-    last_cmd_num
+    last_cmd_num, num_member_change
 >>
 
 acceptor_vars == <<
@@ -76,7 +77,7 @@ CmdNum == 30..max_cmd_num
 
 MemberInfo == [
     nodes: SUBSET Node,
-    from: 2..(1 + total_num_cmd)
+    from: 2..(2 + total_num_cmd + max_member_change)
 ]
 
 LogEntry ==
@@ -167,7 +168,7 @@ IsQuorum(local_members, Q, pos) ==
         is_true_set = {TRUE}
 
 
-getAllMembers(local_members, pos) ==
+GetAllMembers(local_members, pos) ==
     LET
         get_nodes(i) ==
             IF pos >= local_members[i].from
@@ -182,6 +183,11 @@ getAllMembers(local_members, pos) ==
 
 RemainPosition ==
     [Node -> InfLogPos] \union {nil}
+
+TypeOKCheck ==
+    /\ TRUE
+    /\ log_voted \in [Node -> Seq(SUBSET Node)]
+    /\ mem_log \in [Node -> Seq(LogEntry)]
 
 TypeOK ==
     /\ log \in [Node -> Seq(NullLogEntry)]
@@ -199,6 +205,7 @@ TypeOK ==
     /\ mem_log \in [Node -> Seq(LogEntry)]
     /\ log_voted \in [Node -> Seq(SUBSET Node)]
     /\ last_cmd_num \in CmdNum
+    /\ num_member_change \in 0..max_member_change
 
     /\ candidate_remain_pos \in [Node -> RemainPosition]
     /\ candidate_accept_pos \in [Node -> NullLogPos]
@@ -255,6 +262,7 @@ Init ==
     /\ mem_log = [n \in Node |-> <<>>]
     /\ log_voted = [n \in Node |-> <<>>]
     /\ last_cmd_num = 30
+    /\ num_member_change = 0
 
     /\ candidate_remain_pos = [n \in Node |-> nil]
     /\ candidate_accept_pos = [n \in Node |-> nil]
@@ -289,7 +297,7 @@ StartElection(n) ==
     LET
         commit_index == acceptor_committed[n]
         pos == commit_index + 1
-        all_members == getAllMembers(members[n], pos)
+        all_members == GetAllMembers(members[n], pos)
 
         req == [
             type |-> "RequestVote",
@@ -325,6 +333,7 @@ StartElection(n) ==
     /\ UNCHANGED last_cmd_num
     /\ UNCHANGED god_log
     /\ UNCHANGED handling_msg
+    /\ UNCHANGED num_member_change
 
 ---------------------------------------------------------------
 
@@ -420,7 +429,7 @@ handle_vote_response_recur(obj) ==
             from |-> obj.n,
             log_pos |-> pos,
             entry |-> new_mem_log[mem_pos],
-            recv |-> getAllMembers(obj.members, pos)
+            recv |-> GetAllMembers(obj.members, pos)
         ]
 
         new_obj == [obj EXCEPT
@@ -528,6 +537,7 @@ doHandleVoteResponse(n, resp) ==
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED last_cmd_num
     /\ UNCHANGED god_log
+    /\ UNCHANGED num_member_change
 
 HandleVoteResponse(n) ==
     \E resp \in msgs: doHandleVoteResponse(n, resp)
@@ -551,7 +561,7 @@ NewCommand(n) ==
             from |-> n,
             log_pos |-> log_pos,
             entry |-> log_entry,
-            recv |-> getAllMembers(members[n], log_pos)
+            recv |-> GetAllMembers(members[n], log_pos)
         ]
     IN
     /\ state[n] = "Leader"
@@ -572,7 +582,69 @@ NewCommand(n) ==
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED god_log
     /\ UNCHANGED handling_msg
+    /\ UNCHANGED num_member_change
 
+---------------------------------------------------------------
+
+doChangeMembership(n, new_nodes) ==
+    LET
+        local_members == members[n]
+        enable_cond ==
+            \A i \in DOMAIN local_members:
+                local_members[i].nodes # new_nodes
+
+        pos == last_committed[n] + Len(mem_log[n]) + 1
+
+        old_conf == local_members[1]
+        new_conf == [
+            nodes |-> new_nodes,
+            from |-> pos + 1
+        ]
+
+        new_members == <<old_conf, new_conf>>
+
+        log_entry == [
+            type |-> "Member",
+            term |-> last_propose_term[n],
+            committed |-> FALSE,
+            nodes |-> new_members
+        ]
+
+        accept_req == [
+            type |-> "AcceptEntry",
+            term |-> last_propose_term[n],
+            from |-> n,
+            log_pos |-> pos,
+            entry |-> log_entry,
+            recv |-> GetAllMembers(local_members, pos)
+        ]
+    IN
+    /\ state[n] = "Leader"
+    /\ new_nodes # {}
+    /\ num_member_change < max_member_change
+    /\ num_member_change' = num_member_change + 1
+    /\ Len(local_members) = 1
+    /\ enable_cond
+
+    /\ members' = [members EXCEPT ![n] = new_members]
+    /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, log_entry)]
+    /\ log_voted' = [log_voted EXCEPT ![n] = Append(@, {})]
+    /\ msgs' = msgs \union {accept_req}
+
+    /\ UNCHANGED state
+    /\ UNCHANGED global_last_term
+    /\ UNCHANGED god_log
+    /\ UNCHANGED handling_msg
+    /\ UNCHANGED last_committed
+    /\ UNCHANGED candidate_vars
+    /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED last_cmd_num
+    /\ UNCHANGED last_propose_term
+
+ChangeMembership(n) ==
+    \E nodes \in (SUBSET Node): doChangeMembership(n, nodes)
+
+---------------------------------------------------------------
 
 putToLog(n, entry, pos) ==
     LET
@@ -773,6 +845,7 @@ Next ==
         \/ HandleVoteResponse(n)
         \/ NewCommand(n)
         \/ AcceptEntry(n)
+        \/ ChangeMembership(n)
         \/ HandleAcceptResponse(n)
         \/ HandleAcceptFailed(n)
         \/ SyncCommitPosition(n)
@@ -902,5 +975,9 @@ MemLogCommittedInv ==
                     (i + last_committed[n] > accept_pos) => ~local_mem[i].committed
         IN
             accept_pos # nil => cond
+
+---------------------------------------------------------------
+
+MainNext == Next \* To ease navigating around
 
 ====

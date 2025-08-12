@@ -32,13 +32,16 @@ IsQuorumOf(U, set) ==
     LET
         factor == Cardinality(U) \div 2 + 1
     IN
-        Cardinality(set) >= factor
+        IF set \subseteq U
+            THEN Cardinality(set) >= factor
+            ELSE "panic"
 
 ASSUME IsQuorumOf({11, 12, 13}, {11, 12}) = TRUE
 ASSUME IsQuorumOf({11, 12, 13}, {11, 12, 13}) = TRUE
 ASSUME IsQuorumOf({11, 12}, {11, 12}) = TRUE
 ASSUME IsQuorumOf({11, 12}, {11}) = FALSE
 ASSUME IsQuorumOf({11, 12, 13}, {12}) = FALSE
+ASSUME IsQuorumOf({11, 12, 13}, {14}) = "panic"
 
 
 SeqN(S, n) ==
