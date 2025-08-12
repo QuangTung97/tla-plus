@@ -125,6 +125,12 @@ Message ==
             more: BOOLEAN
         ]
 
+        vote_failed == [
+            type: {"VoteFailed"},
+            term: TermNum,
+            to: Node
+        ]
+
         accept_entry == [
             type: {"AcceptEntry"},
             term: TermNum,
@@ -149,7 +155,7 @@ Message ==
         ]
     IN
         UNION {
-            request_vote, vote_response,
+            request_vote, vote_response, vote_failed,
             accept_entry, accept_resp, accept_failed
         }
 
@@ -412,17 +418,34 @@ HandleRequestVote(n) ==
                 IF req.log_pos > log_len
                     THEN <<>>
                     ELSE SubSeq(log[n], req.log_pos, log_len)
+
+            on_success ==
+                /\ last_term[n] < req.term
+                /\ last_term' = [last_term EXCEPT ![n] = req.term]
+                /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
+                /\ msgs' = msgs \union buildVoteResponses(
+                        vote_logs, n, req, req.log_pos
+                    )
+
+            vote_fail == [
+                type |-> "VoteFailed",
+                term |-> req.term,
+                to |-> req.from
+            ]
+
+            on_fail ==
+                /\ last_term[n] > req.term
+                /\ vote_fail \notin msgs
+                /\ msgs' = msgs \union {vote_fail}
+                /\ UNCHANGED last_term
+                /\ UNCHANGED current_leader
         IN
         /\ req.type = "RequestVote"
         /\ n \in req.recv
-        /\ last_term[n] < req.term
-
         /\ handling_msg' = req
-        /\ last_term' = [last_term EXCEPT ![n] = req.term]
-        /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
-        /\ msgs' = msgs \union buildVoteResponses(
-                vote_logs, n, req, req.log_pos
-            )
+
+        /\ \/ on_success
+           \/ on_fail
 
         /\ UNCHANGED acceptor_committed
         /\ UNCHANGED <<log, god_log>>
@@ -700,6 +723,8 @@ doAcceptEntry(n, req) ==
         new_log == putToSequence(log[n], pos, put_entry)
 
         on_success ==
+            /\ prev_entry # nil =>
+                lessThanWithInf(prev_entry.term, req.term)
             /\ last_term' = [last_term EXCEPT ![n] = req.term]
             /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
             /\ msgs' = msgs \union {resp}
@@ -809,12 +834,7 @@ HandleAcceptResponse(n) ==
 
 ---------------------------------------------------------------
 
-doHandleAcceptFailed(n, resp) ==
-    /\ resp.type = "AcceptFailed"
-    /\ resp.term > last_propose_term[n]
-    /\ state[n] \in {"Candidate", "Leader"}
-
-    /\ handling_msg' = resp
+resetToFollower(n) ==
     /\ state' = [state EXCEPT ![n] = "Follower"]
     /\ last_committed' = [last_committed EXCEPT ![n] = nil]
     /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = nil]
@@ -830,6 +850,28 @@ doHandleAcceptFailed(n, resp) ==
     /\ UNCHANGED msgs
     /\ UNCHANGED god_log
     /\ UNCHANGED num_member_change
+
+doHandleVoteFailed(n, resp) ==
+    /\ resp.type = "VoteFailed"
+    /\ resp.term > last_propose_term[n]
+    /\ state[n] = "Candidate"
+
+    /\ handling_msg' = resp
+    /\ resetToFollower(n)
+
+
+HandleVoteFailed(n) ==
+    \E resp \in msgs: doHandleVoteFailed(n, resp)
+
+---------------------------------------------------------------
+
+doHandleAcceptFailed(n, resp) ==
+    /\ resp.type = "AcceptFailed"
+    /\ resp.term > last_propose_term[n]
+    /\ state[n] \in {"Candidate", "Leader"}
+
+    /\ handling_msg' = resp
+    /\ resetToFollower(n)
 
 HandleAcceptFailed(n) ==
     \E resp \in msgs: doHandleAcceptFailed(n, resp)
@@ -914,7 +956,7 @@ logFullyReplicated ==
             computeCommittedInfo(n).pos = obj.pos
 
 TerminateCond ==
-    /\ global_last_term = max_term_num
+    /\ last_cmd_num = max_cmd_num
 
     /\ \A n \in Node:
         /\ mem_log[n] = <<>>
@@ -940,7 +982,10 @@ Next ==
         \/ AcceptEntry(n)
         \/ ChangeMembership(n)
         \/ HandleAcceptResponse(n)
+
+        \/ HandleVoteFailed(n)
         \/ HandleAcceptFailed(n)
+
         \/ SyncLeaderCommitPosition(n)
         \/ SyncCommitLogEntry(n)
     \/ Terminated
@@ -948,6 +993,9 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 Sym == Permutations(Node)
+
+FairSpec == Spec /\ WF_vars(Next)
+AlwaysTerminate == []<>TerminateCond
 
 ---------------------------------------------------------------
 
