@@ -872,9 +872,13 @@ HandleAcceptFailed(n) ==
 ---------------------------------------------------------------
 
 allowLeaderSync(l, dst) ==
+    LET
+        term == last_propose_term[l]
+    IN
     /\ state[l] \in {"Candidate", "Leader"}
     /\ dst \in GetAllMembers(members[l], 100)
-    /\ last_term[dst] = last_propose_term[l]
+    /\ last_term[dst] <= term
+    /\ last_term' = [last_term EXCEPT ![dst] = term]
 
 doSyncLeaderCommitPosition(l, dst) ==
     LET
@@ -891,7 +895,6 @@ doSyncLeaderCommitPosition(l, dst) ==
         ELSE UNCHANGED log
 
     /\ UNCHANGED god_log
-    /\ UNCHANGED last_term
     /\ UNCHANGED leader_vars
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED msgs
@@ -928,7 +931,6 @@ doSyncCommitLogEntry(l, dst) ==
     /\ acceptor_committed' = [acceptor_committed EXCEPT ![dst] = new_commit]
 
     /\ UNCHANGED god_log
-    /\ UNCHANGED last_term
     /\ UNCHANGED leader_vars
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED msgs
