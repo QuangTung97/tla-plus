@@ -880,8 +880,8 @@ HandleAcceptFailed(n) ==
 SyncLeaderCommitPosition(n) ==
     LET
         l == current_leader[n]
-        upper == acceptor_committed[n] + 1
-        entry == getLogEntryNull(log[n], upper)
+        new_index == acceptor_committed[n] + 1
+        entry == getLogEntryNull(log[n], new_index)
     IN
     /\ l # nil
     /\ l = n
@@ -891,7 +891,7 @@ SyncLeaderCommitPosition(n) ==
 
     /\ acceptor_committed' = [acceptor_committed EXCEPT ![n] = @ + 1]
     /\ IF entry # nil /\ entry.term = last_term[n]
-        THEN log' = setLogCommitted(log, n, upper)
+        THEN log' = setLogCommitted(log, n, new_index)
         ELSE UNCHANGED log
 
     /\ UNCHANGED god_log
@@ -904,12 +904,11 @@ SyncLeaderCommitPosition(n) ==
 
 ---------------------------------------------------------------
 
-SyncCommitLogEntry(n) ==
+doSyncCommitLogEntry(l, dst) ==
     LET
-        l == current_leader[n]
-        obj == computeCommittedInfo(n)
+        obj == computeCommittedInfo(dst)
         pos == obj.pos + 1
-        local_log == log[n]
+        local_log == log[dst]
 
         leader_entry == getLogEntryNull(log[l], pos)
 
@@ -917,19 +916,21 @@ SyncCommitLogEntry(n) ==
             /\ pos <= Len(local_log)
             /\ logIsCommitted(local_log[pos])
 
-        old_commit == acceptor_committed[n]
+        old_commit == acceptor_committed[dst]
         new_commit ==
             IF old_commit < pos
                 THEN pos
                 ELSE old_commit
     IN
-    /\ l # nil
-    /\ last_term[n] = last_propose_term[l]
+    /\ state[l] \in {"Candidate", "Leader"}
+    /\ dst \in GetAllMembers(members[l], 100)
+
+    /\ last_term[dst] = last_propose_term[l]
     /\ logIsCommitted(leader_entry)
     /\ ~inverse_cond
 
-    /\ log' = [log EXCEPT ![n] = putToSequence(@, pos, leader_entry)]
-    /\ acceptor_committed' = [acceptor_committed EXCEPT ![n] = new_commit]
+    /\ log' = [log EXCEPT ![dst] = putToSequence(@, pos, leader_entry)]
+    /\ acceptor_committed' = [acceptor_committed EXCEPT ![dst] = new_commit]
 
     /\ UNCHANGED god_log
     /\ UNCHANGED current_leader
@@ -938,6 +939,9 @@ SyncCommitLogEntry(n) ==
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED msgs
     /\ UNCHANGED handling_msg
+
+SyncCommitLogEntry(n) ==
+    \E l \in Node: doSyncCommitLogEntry(l, n)
 
 ---------------------------------------------------------------
 
