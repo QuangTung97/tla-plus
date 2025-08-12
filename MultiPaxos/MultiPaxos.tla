@@ -671,13 +671,6 @@ ChangeMembership(n) ==
 
 ---------------------------------------------------------------
 
-putToLog(n, entry, pos) ==
-    LET
-        new_log == putToSequence(log[n], pos, entry)
-    IN
-        [log EXCEPT ![n] = new_log]
-
-
 doAcceptEntry(n, req) ==
     LET
         pos == req.log_pos
@@ -690,16 +683,23 @@ doAcceptEntry(n, req) ==
             log_pos |-> pos
         ]
 
+        prev_entry == getLogEntryNull(log[n], pos)
+
         put_entry ==
-            IF pos <= acceptor_committed[n]
-                THEN setLogCommittedEntry(req.entry)
-                ELSE req.entry
+            IF prev_entry # nil /\ prev_entry.term = infinity THEN
+                prev_entry
+            ELSE IF pos <= acceptor_committed[n] THEN
+                setLogCommittedEntry(req.entry)
+            ELSE
+                req.entry
+
+        new_log == putToSequence(log[n], pos, put_entry)
 
         on_success ==
             /\ last_term' = [last_term EXCEPT ![n] = req.term]
             /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
             /\ msgs' = msgs \union {resp}
-            /\ log' = putToLog(n, put_entry, pos)
+            /\ log' = [log EXCEPT ![n] = new_log]
 
         fail_resp == [
             type |-> "AcceptFailed",
@@ -832,13 +832,14 @@ HandleAcceptFailed(n) ==
 
 ---------------------------------------------------------------
 
-SyncCommitPosition(n) ==
+SyncLeaderCommitPosition(n) ==
     LET
         l == current_leader[n]
         upper == acceptor_committed[n] + 1
         entry == getLogEntryNull(log[n], upper)
     IN
     /\ l # nil
+    /\ l = n
     /\ last_term[n] = last_propose_term[l]
     /\ last_committed[l] # nil
     /\ acceptor_committed[n] < last_committed[l]
@@ -858,6 +859,39 @@ SyncCommitPosition(n) ==
 
 ---------------------------------------------------------------
 
+SyncCommitLogEntry(n) ==
+    LET
+        l == current_leader[n]
+        obj == computeCommittedInfo(n)
+        pos == obj.pos + 1
+        local_log == log[n]
+
+        leader_entry == getLogEntryNull(log[l], pos)
+
+        inverse_cond ==
+            /\ pos <= Len(local_log)
+            /\ local_log[pos] # nil
+            /\ local_log[pos].term = infinity
+    IN
+    /\ l # nil
+    /\ last_term[n] = last_propose_term[l]
+    /\ leader_entry # nil
+    /\ leader_entry.term = infinity
+    /\ ~inverse_cond
+
+    /\ log' = [log EXCEPT ![n] = putToSequence(@, pos, leader_entry)]
+
+    /\ UNCHANGED acceptor_committed
+    /\ UNCHANGED god_log
+    /\ UNCHANGED current_leader
+    /\ UNCHANGED last_term
+    /\ UNCHANGED leader_vars
+    /\ UNCHANGED candidate_vars
+    /\ UNCHANGED msgs
+    /\ UNCHANGED handling_msg
+
+---------------------------------------------------------------
+
 logFullyReplicated ==
     LET
         obj == computeCommittedInfoRecur([
@@ -867,27 +901,27 @@ logFullyReplicated ==
         ])
     IN
     \E Q \in SUBSET Node:
-        /\ obj.members # <<>>
         /\ IsQuorum(obj.members, Q, 100)
         /\ \A n \in Q:
             computeCommittedInfo(n).pos = obj.pos
 
 TerminateCond ==
     /\ global_last_term = max_term_num
+
     /\ \A n \in Node:
         /\ mem_log[n] = <<>>
         /\ state[n] \in {"Follower", "Leader"}
         /\ members[n] # nil =>
             /\ Len(members[n]) = 1
             /\ members[n][1].from = 2
-    /\ \A n \in Node:
-        /\ ~(ENABLED SyncCommitPosition(n))
-        /\ current_leader[n] # nil => acceptor_committed[n] = Len(god_log)
+
+    /\ logFullyReplicated
 
 Terminated ==
     /\ TerminateCond
     /\ UNCHANGED vars
 
+---------------------------------------
 
 Next ==
     \/ \E n \in Node:
@@ -899,7 +933,8 @@ Next ==
         \/ ChangeMembership(n)
         \/ HandleAcceptResponse(n)
         \/ HandleAcceptFailed(n)
-        \/ SyncCommitPosition(n)
+        \/ SyncLeaderCommitPosition(n)
+        \/ SyncCommitLogEntry(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
