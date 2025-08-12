@@ -266,6 +266,10 @@ Init ==
 
 ----------------------
 
+logIsCommitted(entry) ==
+    /\ entry # nil
+    /\ entry.term = infinity
+
 setLogCommitted(input_log, n, pos) ==
     [input_log EXCEPT ![n][pos].term = infinity]
 
@@ -308,7 +312,7 @@ computeCommittedInfoRecur(obj) ==
     IN
         IF next_pos > Len(obj.log) THEN
             obj
-        ELSE IF entry # nil /\ entry.term = infinity THEN
+        ELSE IF logIsCommitted(entry) THEN
             computeCommittedInfoRecur(new_obj)
         ELSE
             obj
@@ -686,7 +690,7 @@ doAcceptEntry(n, req) ==
         prev_entry == getLogEntryNull(log[n], pos)
 
         put_entry ==
-            IF prev_entry # nil /\ prev_entry.term = infinity THEN
+            IF logIsCommitted(prev_entry) THEN
                 prev_entry
             ELSE IF pos <= acceptor_committed[n] THEN
                 setLogCommittedEntry(req.entry)
@@ -870,18 +874,22 @@ SyncCommitLogEntry(n) ==
 
         inverse_cond ==
             /\ pos <= Len(local_log)
-            /\ local_log[pos] # nil
-            /\ local_log[pos].term = infinity
+            /\ logIsCommitted(local_log[pos])
+
+        old_commit == acceptor_committed[n]
+        new_commit ==
+            IF old_commit < pos
+                THEN pos
+                ELSE old_commit
     IN
     /\ l # nil
     /\ last_term[n] = last_propose_term[l]
-    /\ leader_entry # nil
-    /\ leader_entry.term = infinity
+    /\ logIsCommitted(leader_entry)
     /\ ~inverse_cond
 
     /\ log' = [log EXCEPT ![n] = putToSequence(@, pos, leader_entry)]
+    /\ acceptor_committed' = [acceptor_committed EXCEPT ![n] = new_commit]
 
-    /\ UNCHANGED acceptor_committed
     /\ UNCHANGED god_log
     /\ UNCHANGED current_leader
     /\ UNCHANGED last_term
@@ -958,7 +966,7 @@ GodLogConsistency ==
         LET
             e == log[n][i]
         IN
-            (e # nil /\ e.term = infinity) => god_log[i] = e
+            logIsCommitted(e) => god_log[i] = e
 
 GodLogNoLost ==
     LET
@@ -968,9 +976,7 @@ GodLogNoLost ==
 
 
 GodLogInv ==
-    \A i \in DOMAIN god_log:
-        \/ god_log[i] # nil
-        \/ god_log[i].term = infinity
+    \A i \in DOMAIN god_log: logIsCommitted(god_log[i])
 
 godLogNeverShrinkStep ==
     /\ Len(god_log') > Len(god_log)
