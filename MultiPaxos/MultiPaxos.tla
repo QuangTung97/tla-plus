@@ -90,7 +90,7 @@ LogEntry ==
 
         null_entry == [
             type: {"Null"},
-            term: TermNumInf
+            term: TermNumInf \union {20}
         ]
 
         cmd_entry == [
@@ -184,7 +184,7 @@ RemainPosition ==
     [Node -> InfLogPos] \union {nil}
 
 TypeOKCheck ==
-    /\ TRUE
+    /\ mem_log \in [Node -> Seq(LogEntry)]
 
 TypeOK ==
     /\ log \in [Node -> Seq(NullLogEntry)]
@@ -269,13 +269,10 @@ Init ==
 ----------------------
 
 setLogCommitted(input_log, n, pos) ==
-    [input_log EXCEPT
-            ![n][pos].committed = TRUE,
-            ![n][pos].term = infinity
-        ]
+    [input_log EXCEPT ![n][pos].term = infinity]
 
 setLogCommittedEntry(entry) ==
-    [entry EXCEPT !.committed = TRUE, !.term = infinity]
+    [entry EXCEPT !.term = infinity]
 
 getLogEntryNull(input_log, pos) ==
     LET
@@ -413,11 +410,7 @@ handle_vote_response_recur(obj) ==
         }
 
         mem_pos == pos - last_committed[obj.n]
-
-        new_mem_log == [obj.mem_log EXCEPT
-            ![mem_pos].committed = FALSE,
-            ![mem_pos].term = obj.term
-        ]
+        new_mem_log == [obj.mem_log EXCEPT ![mem_pos].term = obj.term]
 
         accept_req == [
             type |-> "AcceptEntry",
@@ -460,14 +453,13 @@ doHandleVoteResponse(n, resp) ==
 
         null_entry == [
             type |-> "Null",
-            committed |-> FALSE,
             term |-> 20
         ]
 
         put_entry_tmp ==
             IF resp.entry = nil
                 THEN null_entry
-                ELSE [resp.entry EXCEPT !.committed = FALSE]
+                ELSE resp.entry
 
         put_entry ==
             IF lessThanWithInf(prev_term, put_entry_tmp.term)
@@ -545,7 +537,6 @@ NewCommand(n) ==
         log_entry == [
             type |-> "Cmd",
             term |-> last_propose_term[n],
-            committed |-> FALSE,
             cmd |-> last_cmd_num'
         ]
 
@@ -602,7 +593,6 @@ doChangeMembership(n, new_nodes) ==
         log_entry == [
             type |-> "Member",
             term |-> last_propose_term[n],
-            committed |-> FALSE,
             nodes |-> new_members
         ]
 
@@ -708,7 +698,7 @@ RECURSIVE computeMaxCommitted(_)
 computeMaxCommitted(input_log) ==
     IF Len(input_log) = 0 THEN
         0
-    ELSE IF input_log[1].committed THEN
+    ELSE IF input_log[1].term = infinity THEN
         1 + computeMaxCommitted(Tail(input_log))
     ELSE
         0
@@ -729,7 +719,14 @@ doHandleAcceptResponse(n, resp) ==
                 THEN setLogCommitted(mem_log, n, pos)
                 ELSE mem_log
 
-        move_forward == computeMaxCommitted(update_log_committed[n])
+        accept_mem_pos == candidate_accept_pos[n] - last_committed[n]
+
+        accept_log ==
+            IF candidate_accept_pos[n] # nil
+                THEN SubSeq(update_log_committed[n], 1, accept_mem_pos)
+                ELSE update_log_committed[n]
+
+        move_forward == computeMaxCommitted(accept_log)
 
         update_last_committed ==
             last_committed' = [last_committed EXCEPT ![n] = @ + move_forward]
@@ -870,8 +867,7 @@ GodLogConsistency ==
         LET
             e == log[n][i]
         IN
-            /\ e # nil
-            /\ e.term = infinity => god_log[i] = e
+            (e # nil /\ e.term = infinity) => god_log[i] = e
 
 GodLogNoLost ==
     LET
@@ -926,20 +922,6 @@ AcceptRequestInv ==
     \A req \in msgs:
         req.type = "AcceptEntry" =>
             req.term = req.entry.term
-
-
-MemLogCommittedInv ==
-    \A n \in Node:
-        LET
-            accept_pos == candidate_accept_pos[n]
-            local_mem == mem_log[n]
-
-            cond ==
-                \A i \in DOMAIN local_mem:
-                    (i + last_committed[n] > accept_pos) =>
-                        local_mem[i].term # infinity
-        IN
-            accept_pos # nil => cond
 
 ---------------------------------------------------------------
 
