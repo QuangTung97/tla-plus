@@ -80,12 +80,14 @@ MemberInfo == [
     from: 2..(2 + total_num_cmd + max_member_change)
 ]
 
+MemberList == SeqN(MemberInfo, 2)
+
 LogEntry ==
     LET
         membership== [
             type: {"Member"},
             term: TermNumInf,
-            nodes: SeqN(MemberInfo, 2)
+            nodes: MemberList
         ]
 
         null_entry == [
@@ -186,6 +188,7 @@ RemainPosition ==
 TypeOKCheck ==
     /\ mem_log \in [Node -> Seq(LogEntry)]
 
+
 TypeOK ==
     /\ log \in [Node -> Seq(NullLogEntry)]
     /\ last_term \in [Node -> InitTermNum]
@@ -194,7 +197,7 @@ TypeOK ==
     /\ god_log \in Seq(NullLogEntry)
 
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
-    /\ members \in [Node -> SeqN(MemberInfo, 2)]
+    /\ members \in [Node -> (MemberList \union {nil})]
     /\ last_committed \in [Node -> NullLogPos]
     /\ global_last_term \in InitTermNum
     /\ last_propose_term \in [Node -> InitTermNum]
@@ -210,18 +213,13 @@ TypeOK ==
     /\ msgs \subseteq Message
     /\ handling_msg \in (Message \union {nil})
 
-init_members ==
+init_member_log ==
     \E S \in SUBSET Node:
         LET
             member_info == [
                 nodes |-> S,
                 from |-> 2
             ]
-
-            init_members(n) ==
-                IF n \in S
-                    THEN <<member_info>>
-                    ELSE <<>>
 
             init_entry == [
                 type |-> "Member",
@@ -240,13 +238,13 @@ init_members ==
                     ELSE 0
         IN
         /\ S # {}
-        /\ members = [n \in Node |-> init_members(n)]
         /\ log = [n \in Node |-> init_logs(n)]
         /\ acceptor_committed = [n \in Node |-> init_committed(n)]
         /\ god_log = <<init_entry>>
 
 Init ==
-    /\ init_members
+    /\ init_member_log
+    /\ members = [n \in Node |-> nil]
     /\ last_term = [n \in Node |-> 20]
     /\ current_leader = [n \in Node |-> nil]
 
@@ -286,11 +284,54 @@ getLogEntryNull(input_log, pos) ==
 
 ---------------------------------------------------------------
 
+RECURSIVE computeCommittedInfoRecur(_)
+
+(*
+- obj.n
+- obj.pos
+- obj.members
+*)
+computeCommittedInfoRecur(obj) ==
+    LET
+        next_pos == obj.pos + 1
+        n == obj.n
+        local_log == log[n]
+        entry == local_log[next_pos]
+
+        update_members ==
+            IF entry.type = "Member"
+                THEN entry.nodes
+                ELSE obj.members
+
+        new_obj == [obj EXCEPT
+            !.pos = next_pos,
+            !.members = update_members
+        ]
+    IN
+        IF next_pos > Len(local_log) THEN
+            obj
+        ELSE IF entry # nil /\ entry.term = infinity THEN
+            computeCommittedInfoRecur(new_obj)
+        ELSE
+            obj
+
+computeCommittedInfo(n) ==
+    LET
+        obj == [
+            n |-> n,
+            pos |-> 0,
+            members |-> <<>>
+        ]
+    IN
+        computeCommittedInfoRecur(obj)
+
+
 StartElection(n) ==
     LET
-        commit_index == acceptor_committed[n]
+        obj == computeCommittedInfo(n)
+        commit_index == obj.pos
         pos == commit_index + 1
-        all_members == GetAllMembers(members[n], pos)
+        all_members == GetAllMembers(obj.members, pos)
 
         req == [
             type |-> "RequestVote",
@@ -319,9 +360,9 @@ StartElection(n) ==
 
     /\ msgs' = msgs \union {req}
     /\ last_committed' = [last_committed EXCEPT ![n] = commit_index]
+    /\ members' = [members EXCEPT ![n] = obj.members]
 
     /\ UNCHANGED <<mem_log, log_voted>>
-    /\ UNCHANGED members
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED last_cmd_num
     /\ UNCHANGED god_log
@@ -778,12 +819,12 @@ doHandleAcceptFailed(n, resp) ==
     /\ candidate_accept_pos' = [candidate_accept_pos EXCEPT ![n] = nil]
     /\ mem_log' = [mem_log EXCEPT ![n] = <<>>]
     /\ log_voted' = [log_voted EXCEPT ![n] = <<>>]
+    /\ members' = [members EXCEPT ![n] = nil]
 
     /\ UNCHANGED last_propose_term
     /\ UNCHANGED global_last_term
     /\ UNCHANGED last_cmd_num
     /\ UNCHANGED acceptor_vars
-    /\ UNCHANGED members
     /\ UNCHANGED msgs
     /\ UNCHANGED god_log
     /\ UNCHANGED num_member_change
@@ -824,8 +865,9 @@ TerminateCond ==
     /\ \A n \in Node:
         /\ mem_log[n] = <<>>
         /\ state[n] \in {"Follower", "Leader"}
-        /\ Len(members[n]) = 1
-        /\ members[n][1].from = 2
+        /\ members[n] # nil =>
+            /\ Len(members[n]) = 1
+            /\ members[n][1].from = 2
     /\ \A n \in Node:
         /\ ~(ENABLED SyncCommitPosition(n))
         /\ current_leader[n] # nil => acceptor_committed[n] = Len(god_log)
@@ -924,6 +966,11 @@ AcceptRequestInv ==
     \A req \in msgs:
         req.type = "AcceptEntry" =>
             req.term = req.entry.term
+
+
+MembersInv ==
+    \A n \in Node:
+        members[n] # nil <=> state[n] # "Follower"
 
 ---------------------------------------------------------------
 
