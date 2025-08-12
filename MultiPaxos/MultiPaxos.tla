@@ -429,7 +429,7 @@ HandleRequestVote(n) ==
 
             vote_fail == [
                 type |-> "VoteFailed",
-                term |-> req.term,
+                term |-> last_term[n],
                 to |-> req.from
             ]
 
@@ -723,8 +723,7 @@ doAcceptEntry(n, req) ==
         new_log == putToSequence(log[n], pos, put_entry)
 
         on_success ==
-            /\ prev_entry # nil =>
-                lessThanWithInf(prev_entry.term, req.term)
+            /\ resp \notin msgs
             /\ last_term' = [last_term EXCEPT ![n] = req.term]
             /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
             /\ msgs' = msgs \union {resp}
