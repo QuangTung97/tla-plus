@@ -877,21 +877,23 @@ HandleAcceptFailed(n) ==
 
 ---------------------------------------------------------------
 
-SyncLeaderCommitPosition(n) ==
-    LET
-        l == current_leader[n]
-        new_index == acceptor_committed[n] + 1
-        entry == getLogEntryNull(log[n], new_index)
-    IN
-    /\ l # nil
-    /\ l = n
-    /\ last_term[n] = last_propose_term[l]
-    /\ last_committed[l] # nil
-    /\ acceptor_committed[n] < last_committed[l]
+allowLeaderSync(l, dst) ==
+    /\ state[l] \in {"Candidate", "Leader"}
+    /\ dst \in GetAllMembers(members[l], 100)
+    /\ last_term[dst] = last_propose_term[l]
 
-    /\ acceptor_committed' = [acceptor_committed EXCEPT ![n] = @ + 1]
-    /\ IF entry # nil /\ entry.term = last_term[n]
-        THEN log' = setLogCommitted(log, n, new_index)
+doSyncLeaderCommitPosition(l, dst) ==
+    LET
+        new_index == acceptor_committed[dst] + 1
+        entry == getLogEntryNull(log[dst], new_index)
+    IN
+    /\ allowLeaderSync(l, dst)
+    /\ l = dst
+    /\ acceptor_committed[dst] < last_committed[l]
+
+    /\ acceptor_committed' = [acceptor_committed EXCEPT ![dst] = @ + 1]
+    /\ IF entry # nil /\ entry.term = last_term[dst]
+        THEN log' = setLogCommitted(log, dst, new_index)
         ELSE UNCHANGED log
 
     /\ UNCHANGED god_log
@@ -901,6 +903,9 @@ SyncLeaderCommitPosition(n) ==
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED msgs
     /\ UNCHANGED handling_msg
+
+SyncLeaderCommitPosition(n) ==
+    \E l \in Node: doSyncLeaderCommitPosition(l, n)
 
 ---------------------------------------------------------------
 
@@ -922,10 +927,7 @@ doSyncCommitLogEntry(l, dst) ==
                 THEN pos
                 ELSE old_commit
     IN
-    /\ state[l] \in {"Candidate", "Leader"}
-    /\ dst \in GetAllMembers(members[l], 100)
-
-    /\ last_term[dst] = last_propose_term[l]
+    /\ allowLeaderSync(l, dst)
     /\ logIsCommitted(leader_entry)
     /\ ~inverse_cond
 
