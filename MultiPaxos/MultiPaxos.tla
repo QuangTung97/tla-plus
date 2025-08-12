@@ -26,7 +26,7 @@ ASSUME lessThanWithInf(72, 71) = FALSE
 ---------------------------------------------------------------
 
 VARIABLES
-    log, last_term, acceptor_committed, current_leader,
+    log, last_term, acceptor_committed,
     global_last_term,
     members, state, last_committed,
     last_propose_term,
@@ -49,7 +49,7 @@ leader_vars == <<
 >>
 
 acceptor_vars == <<
-    log, last_term, acceptor_committed, current_leader
+    log, last_term, acceptor_committed
 >>
 
 vars == <<
@@ -199,7 +199,6 @@ TypeOK ==
     /\ log \in [Node -> Seq(NullLogEntry)]
     /\ last_term \in [Node -> InitTermNum]
     /\ acceptor_committed \in [Node -> LogPos]
-    /\ current_leader \in [Node -> NullNode]
     /\ god_log \in Seq(NullLogEntry)
 
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
@@ -252,7 +251,6 @@ Init ==
     /\ init_member_log
     /\ members = [n \in Node |-> nil]
     /\ last_term = [n \in Node |-> 20]
-    /\ current_leader = [n \in Node |-> nil]
 
     /\ state = [n \in Node |-> "Follower"]
     /\ last_committed = [n \in Node |-> nil]
@@ -422,7 +420,6 @@ HandleRequestVote(n) ==
             on_success ==
                 /\ last_term[n] < req.term
                 /\ last_term' = [last_term EXCEPT ![n] = req.term]
-                /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
                 /\ msgs' = msgs \union buildVoteResponses(
                         vote_logs, n, req, req.log_pos
                     )
@@ -438,7 +435,6 @@ HandleRequestVote(n) ==
                 /\ vote_fail \notin msgs
                 /\ msgs' = msgs \union {vote_fail}
                 /\ UNCHANGED last_term
-                /\ UNCHANGED current_leader
         IN
         /\ req.type = "RequestVote"
         /\ n \in req.recv
@@ -725,7 +721,6 @@ doAcceptEntry(n, req) ==
         on_success ==
             /\ resp \notin msgs
             /\ last_term' = [last_term EXCEPT ![n] = req.term]
-            /\ current_leader' = [current_leader EXCEPT ![n] = req.from]
             /\ msgs' = msgs \union {resp}
             /\ log' = [log EXCEPT ![n] = new_log]
 
@@ -739,7 +734,6 @@ doAcceptEntry(n, req) ==
             /\ fail_resp \notin msgs
             /\ msgs' = msgs \union {fail_resp}
             /\ UNCHANGED last_term
-            /\ UNCHANGED current_leader
             /\ UNCHANGED log
     IN
     /\ req.type = "AcceptEntry"
@@ -897,7 +891,6 @@ doSyncLeaderCommitPosition(l, dst) ==
         ELSE UNCHANGED log
 
     /\ UNCHANGED god_log
-    /\ UNCHANGED current_leader
     /\ UNCHANGED last_term
     /\ UNCHANGED leader_vars
     /\ UNCHANGED candidate_vars
@@ -935,7 +928,6 @@ doSyncCommitLogEntry(l, dst) ==
     /\ acceptor_committed' = [acceptor_committed EXCEPT ![dst] = new_commit]
 
     /\ UNCHANGED god_log
-    /\ UNCHANGED current_leader
     /\ UNCHANGED last_term
     /\ UNCHANGED leader_vars
     /\ UNCHANGED candidate_vars
