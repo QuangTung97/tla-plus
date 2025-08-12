@@ -32,6 +32,7 @@ VARIABLES
     last_propose_term,
     mem_log, log_voted,
     last_cmd_num, num_member_change,
+    leader_acceptor_committed,
     candidate_remain_pos, candidate_accept_pos,
     msgs, god_log,
     handling_msg
@@ -57,6 +58,7 @@ vars == <<
     leader_vars,
     candidate_vars,
     msgs, god_log,
+    leader_acceptor_committed,
     handling_msg
 >>
 
@@ -68,7 +70,7 @@ max_term_num == 20 + max_start_election
 TermNum == 21..max_term_num
 TermNumInf == TermNum \union {infinity}
 
-LogPos == (0..20)
+LogPos == (0..9)
 NullLogPos == LogPos \union {nil}
 InfLogPos == NullLogPos \union {infinity}
 
@@ -194,6 +196,8 @@ RemainPosition ==
 TypeOKCheck ==
     /\ mem_log \in [Node -> Seq(LogEntry)]
 
+AcceptorCommitted ==
+    [Node -> LogPos] \union {nil}
 
 TypeOK ==
     /\ log \in [Node -> Seq(NullLogEntry)]
@@ -211,6 +215,7 @@ TypeOK ==
     /\ log_voted \in [Node -> Seq(SUBSET Node)]
     /\ last_cmd_num \in CmdNum
     /\ num_member_change \in 0..max_member_change
+    /\ leader_acceptor_committed \in [Node -> AcceptorCommitted]
 
     /\ candidate_remain_pos \in [Node -> RemainPosition]
     /\ candidate_accept_pos \in [Node -> NullLogPos]
@@ -261,6 +266,7 @@ Init ==
     /\ log_voted = [n \in Node |-> <<>>]
     /\ last_cmd_num = 30
     /\ num_member_change = 0
+    /\ leader_acceptor_committed = [n \in Node |-> nil]
 
     /\ candidate_remain_pos = [n \in Node |-> nil]
     /\ candidate_accept_pos = [n \in Node |-> nil]
@@ -352,6 +358,10 @@ StartElection(n) ==
                 THEN pos
                 ELSE nil
         ]
+
+        init_leader_acc_commit == [
+            n1 \in Node |-> IF n1 = n THEN commit_index ELSE 0
+        ]
     IN
     /\ n \in all_members
     /\ state[n] = "Follower"
@@ -363,6 +373,9 @@ StartElection(n) ==
     /\ last_propose_term' = [last_propose_term EXCEPT ![n] = global_last_term']
     /\ candidate_remain_pos' = [candidate_remain_pos EXCEPT ![n] = init_remain_pos]
     /\ candidate_accept_pos' = [candidate_accept_pos EXCEPT ![n] = commit_index]
+    /\ leader_acceptor_committed' = [
+            leader_acceptor_committed EXCEPT ![n] = init_leader_acc_commit
+        ]
 
     /\ msgs' = msgs \union {req}
     /\ last_committed' = [last_committed EXCEPT ![n] = commit_index]
@@ -447,6 +460,7 @@ HandleRequestVote(n) ==
         /\ UNCHANGED <<log, god_log>>
         /\ UNCHANGED leader_vars
         /\ UNCHANGED candidate_vars
+        /\ UNCHANGED leader_acceptor_committed
 
 ---------------------------------------------------------------
 
@@ -588,6 +602,7 @@ doHandleVoteResponse(n, resp) ==
     /\ UNCHANGED last_cmd_num
     /\ UNCHANGED god_log
     /\ UNCHANGED num_member_change
+    /\ UNCHANGED leader_acceptor_committed
 
 HandleVoteResponse(n) ==
     \E resp \in msgs: doHandleVoteResponse(n, resp)
@@ -603,6 +618,7 @@ newCommandUnchanged ==
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED god_log
     /\ UNCHANGED handling_msg
+    /\ UNCHANGED leader_acceptor_committed
 
 NewCommand(n) ==
     LET
@@ -695,6 +711,11 @@ FinishChangeMembership(n) ==
         local_members == members[n]
         pos == last_committed[n] + Len(mem_log[n]) + 1
 
+        config_pos == local_members[2].from - 1
+        commit_set == {n1 \in Node:
+            leader_acceptor_committed[n][n1] >= config_pos
+        }
+
         new_conf == [
             nodes |-> local_members[2].nodes,
             from |-> 2
@@ -718,6 +739,7 @@ FinishChangeMembership(n) ==
     IN
     /\ state[n] = "Leader"
     /\ Len(local_members) > 1
+    /\ IsQuorum(new_members, commit_set, pos + 1)
 
     /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, log_entry)]
     /\ log_voted' = [log_voted EXCEPT ![n] = Append(@, {})]
@@ -784,6 +806,7 @@ doAcceptEntry(n, req) ==
     /\ UNCHANGED god_log
     /\ UNCHANGED acceptor_committed
     /\ UNCHANGED candidate_vars
+    /\ UNCHANGED leader_acceptor_committed
 
 AcceptEntry(n) ==
     \E req \in msgs: doAcceptEntry(n, req)
@@ -857,6 +880,7 @@ doHandleAcceptResponse(n, resp) ==
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED num_member_change
+    /\ UNCHANGED leader_acceptor_committed
 
 HandleAcceptResponse(n) ==
     \E resp \in msgs: doHandleAcceptResponse(n, resp)
@@ -871,6 +895,9 @@ resetToFollower(n) ==
     /\ mem_log' = [mem_log EXCEPT ![n] = <<>>]
     /\ log_voted' = [log_voted EXCEPT ![n] = <<>>]
     /\ members' = [members EXCEPT ![n] = nil]
+    /\ leader_acceptor_committed' = [
+            leader_acceptor_committed EXCEPT ![n] = nil
+        ]
 
     /\ UNCHANGED last_propose_term
     /\ UNCHANGED global_last_term
@@ -908,28 +935,28 @@ HandleAcceptFailed(n) ==
 ---------------------------------------------------------------
 
 allowLeaderSync(l, dst) ==
-    LET
-        term == last_propose_term[l]
-    IN
     /\ state[l] \in {"Candidate", "Leader"}
     /\ dst \in GetAllMembers(members[l], 100)
-    /\ last_term[dst] <= term
-    /\ last_term' = [last_term EXCEPT ![dst] = term]
 
 doSyncLeaderCommitPosition(l, dst) ==
     LET
         new_index == acceptor_committed[dst] + 1
         entry == getLogEntryNull(log[dst], new_index)
+        term == last_propose_term[l]
     IN
     /\ allowLeaderSync(l, dst)
     /\ l = dst
     /\ acceptor_committed[dst] < last_committed[l]
+    /\ last_term[dst] <= term
+    /\ last_term' = [last_term EXCEPT ![dst] = term]
 
-    /\ acceptor_committed' = [acceptor_committed EXCEPT ![dst] = @ + 1]
+    /\ acceptor_committed' = [acceptor_committed EXCEPT ![dst] = new_index]
+
     /\ IF entry # nil /\ entry.term = last_term[dst]
         THEN log' = setLogCommitted(log, dst, new_index)
         ELSE UNCHANGED log
 
+    /\ UNCHANGED leader_acceptor_committed
     /\ UNCHANGED god_log
     /\ UNCHANGED leader_vars
     /\ UNCHANGED candidate_vars
@@ -946,6 +973,7 @@ doSyncCommitLogEntry(l, dst) ==
         obj == computeCommittedInfo(dst)
         pos == obj.pos + 1
         local_log == log[dst]
+        term == last_propose_term[l]
 
         leader_entry == getLogEntryNull(log[l], pos)
 
@@ -961,6 +989,8 @@ doSyncCommitLogEntry(l, dst) ==
     IN
     /\ allowLeaderSync(l, dst)
     /\ logIsCommitted(leader_entry)
+    /\ last_term[dst] <= term
+    /\ last_term' = [last_term EXCEPT ![dst] = term]
     /\ ~inverse_cond
 
     /\ log' = [log EXCEPT ![dst] = putToSequence(@, pos, leader_entry)]
@@ -971,9 +1001,33 @@ doSyncCommitLogEntry(l, dst) ==
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED msgs
     /\ UNCHANGED handling_msg
+    /\ UNCHANGED leader_acceptor_committed
 
 SyncCommitLogEntry(n) ==
     \E l \in Node: doSyncCommitLogEntry(l, n)
+
+---------------------------------------------------------------
+
+doSyncLeaderAcceptorCommitted(l, dst) ==
+    LET
+        obj == computeCommittedInfo(dst)
+    IN
+    /\ allowLeaderSync(l, dst)
+    /\ leader_acceptor_committed[l][dst] < obj.pos
+
+    /\ leader_acceptor_committed' = [
+            leader_acceptor_committed EXCEPT ![l][dst] = obj.pos
+        ]
+
+    /\ UNCHANGED god_log
+    /\ UNCHANGED leader_vars
+    /\ UNCHANGED candidate_vars
+    /\ UNCHANGED msgs
+    /\ UNCHANGED handling_msg
+    /\ UNCHANGED acceptor_vars
+
+SyncLeaderAcceptorCommitted(n) ==
+    \E l \in Node: doSyncLeaderAcceptorCommitted(l, n)
 
 ---------------------------------------------------------------
 
@@ -1025,6 +1079,7 @@ Next ==
 
         \/ SyncLeaderCommitPosition(n)
         \/ SyncCommitLogEntry(n)
+        \/ SyncLeaderAcceptorCommitted(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
