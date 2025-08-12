@@ -766,6 +766,7 @@ doHandleAcceptResponse(n, resp) ==
     /\ UNCHANGED global_last_term
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED num_member_change
 
 HandleAcceptResponse(n) ==
     \E resp \in msgs: doHandleAcceptResponse(n, resp)
@@ -792,6 +793,7 @@ doHandleAcceptFailed(n, resp) ==
     /\ UNCHANGED members
     /\ UNCHANGED msgs
     /\ UNCHANGED god_log
+    /\ UNCHANGED num_member_change
 
 HandleAcceptFailed(n) ==
     \E resp \in msgs: doHandleAcceptFailed(n, resp)

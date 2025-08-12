@@ -28,20 +28,19 @@ ASSUME AppendFrom(<<11, 12, 13, 14>>, 2, <<21, 22>>) = <<11, 21, 22, 14>>
 
 ----------------
 
-IsQuorumOf(U, set) ==
+IsQuorumOf(U, input_set) ==
     LET
         factor == Cardinality(U) \div 2 + 1
+        set == input_set \intersect U
     IN
-        IF set \subseteq U
-            THEN Cardinality(set) >= factor
-            ELSE "panic"
+        Cardinality(set) >= factor
 
 ASSUME IsQuorumOf({11, 12, 13}, {11, 12}) = TRUE
 ASSUME IsQuorumOf({11, 12, 13}, {11, 12, 13}) = TRUE
 ASSUME IsQuorumOf({11, 12}, {11, 12}) = TRUE
 ASSUME IsQuorumOf({11, 12}, {11}) = FALSE
 ASSUME IsQuorumOf({11, 12, 13}, {12}) = FALSE
-ASSUME IsQuorumOf({11, 12, 13}, {14}) = "panic"
+ASSUME IsQuorumOf({11, 12, 13}, {12, 14}) = FALSE
 
 
 SeqN(S, n) ==
