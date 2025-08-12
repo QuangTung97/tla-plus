@@ -287,16 +287,14 @@ getLogEntryNull(input_log, pos) ==
 RECURSIVE computeCommittedInfoRecur(_)
 
 (*
-- obj.n
+- obj.log
 - obj.pos
 - obj.members
 *)
 computeCommittedInfoRecur(obj) ==
     LET
         next_pos == obj.pos + 1
-        n == obj.n
-        local_log == log[n]
-        entry == local_log[next_pos]
+        entry == obj.log[next_pos]
 
         update_members ==
             IF entry.type = "Member"
@@ -308,7 +306,7 @@ computeCommittedInfoRecur(obj) ==
             !.members = update_members
         ]
     IN
-        IF next_pos > Len(local_log) THEN
+        IF next_pos > Len(obj.log) THEN
             obj
         ELSE IF entry # nil /\ entry.term = infinity THEN
             computeCommittedInfoRecur(new_obj)
@@ -318,7 +316,7 @@ computeCommittedInfoRecur(obj) ==
 computeCommittedInfo(n) ==
     LET
         obj == [
-            n |-> n,
+            log |-> log[n],
             pos |-> 0,
             members |-> <<>>
         ]
@@ -859,6 +857,20 @@ SyncCommitPosition(n) ==
     /\ UNCHANGED handling_msg
 
 ---------------------------------------------------------------
+
+logFullyReplicated ==
+    LET
+        obj == computeCommittedInfoRecur([
+            log |-> god_log,
+            pos |-> 0,
+            members |-> <<>>
+        ])
+    IN
+    \E Q \in SUBSET Node:
+        /\ obj.members # <<>>
+        /\ IsQuorum(obj.members, Q, 100)
+        /\ \A n \in Q:
+            computeCommittedInfo(n).pos = obj.pos
 
 TerminateCond ==
     /\ global_last_term = max_term_num
