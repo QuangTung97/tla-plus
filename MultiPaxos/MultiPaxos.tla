@@ -65,7 +65,7 @@ vars == <<
 NullNode == Node \union {nil}
 
 max_term_num == 20 + max_start_election
-TermNum == 20..max_term_num
+TermNum == 21..max_term_num
 TermNumInf == TermNum \union {infinity}
 
 LogPos == (0..20)
@@ -85,20 +85,17 @@ LogEntry ==
         membership== [
             type: {"Member"},
             term: TermNumInf,
-            committed: BOOLEAN,
             nodes: SeqN(MemberInfo, 2)
         ]
 
         null_entry == [
             type: {"Null"},
-            term: TermNumInf,
-            committed: BOOLEAN
+            term: TermNumInf
         ]
 
         cmd_entry == [
             type: {"Cmd"},
             term: TermNumInf,
-            committed: BOOLEAN,
             cmd: CmdNum
         ]
     IN
@@ -181,17 +178,17 @@ GetAllMembers(local_members, pos) ==
 
 ---------------------------------------------------------------
 
+InitTermNum == TermNum \union {20}
+
 RemainPosition ==
     [Node -> InfLogPos] \union {nil}
 
 TypeOKCheck ==
     /\ TRUE
-    /\ log_voted \in [Node -> Seq(SUBSET Node)]
-    /\ mem_log \in [Node -> Seq(LogEntry)]
 
 TypeOK ==
     /\ log \in [Node -> Seq(NullLogEntry)]
-    /\ last_term \in [Node -> TermNum]
+    /\ last_term \in [Node -> InitTermNum]
     /\ acceptor_committed \in [Node -> LogPos]
     /\ current_leader \in [Node -> NullNode]
     /\ god_log \in Seq(NullLogEntry)
@@ -199,8 +196,8 @@ TypeOK ==
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
     /\ members \in [Node -> SeqN(MemberInfo, 2)]
     /\ last_committed \in [Node -> NullLogPos]
-    /\ global_last_term \in TermNum
-    /\ last_propose_term \in [Node -> TermNum]
+    /\ global_last_term \in InitTermNum
+    /\ last_propose_term \in [Node -> InitTermNum]
 
     /\ mem_log \in [Node -> Seq(LogEntry)]
     /\ log_voted \in [Node -> Seq(SUBSET Node)]
@@ -229,7 +226,6 @@ init_members ==
             init_entry == [
                 type |-> "Member",
                 term |-> infinity,
-                committed |-> TRUE,
                 nodes |-> <<member_info>>
             ]
 
@@ -864,40 +860,6 @@ MemLogMatchLogVoted ==
         Len(mem_log[n]) = Len(log_voted[n])
 
 
-LogEntryCommittedInv ==
-    \A n \in Node:
-        \A i \in DOMAIN log[n]:
-            LET
-                e == log[n][i]
-
-                is_committed ==
-                    /\ e.committed
-                    /\ e.term = infinity
-
-                not_committed ==
-                    /\ ~e.committed
-                    /\ e.term # infinity
-            IN
-                e # nil =>
-                    \/ is_committed
-                    \/ not_committed
-
-MemLogNonNilInv ==
-    \A n \in Node: \A i \in DOMAIN mem_log[n]:
-        LET
-            e == mem_log[n][i]
-
-            is_committed ==
-                /\ e.committed
-                /\ e.term = infinity
-
-            not_committed ==
-                /\ ~e.committed
-        IN
-        /\ e # nil
-        /\ is_committed \/ not_committed
-
-
 CandidateRemainPosInv ==
     \A n \in Node:
         candidate_remain_pos[n] # nil <=> state[n] = "Candidate"
@@ -908,7 +870,8 @@ GodLogConsistency ==
         LET
             e == log[n][i]
         IN
-            e # nil /\ e.committed => god_log[i] = e
+            /\ e # nil
+            /\ e.term = infinity => god_log[i] = e
 
 GodLogNoLost ==
     LET
@@ -920,7 +883,7 @@ GodLogNoLost ==
 GodLogInv ==
     \A i \in DOMAIN god_log:
         \/ god_log[i] # nil
-        \/ god_log[i].committed
+        \/ god_log[i].term = infinity
 
 godLogNeverShrinkStep ==
     /\ Len(god_log') > Len(god_log)
@@ -962,8 +925,7 @@ LogTermInv ==
 AcceptRequestInv ==
     \A req \in msgs:
         req.type = "AcceptEntry" =>
-            /\ req.term = req.entry.term
-            /\ ~req.entry.committed
+            req.term = req.entry.term
 
 
 MemLogCommittedInv ==
@@ -974,7 +936,8 @@ MemLogCommittedInv ==
 
             cond ==
                 \A i \in DOMAIN local_mem:
-                    (i + last_committed[n] > accept_pos) => ~local_mem[i].committed
+                    (i + last_committed[n] > accept_pos) =>
+                        local_mem[i].term # infinity
         IN
             accept_pos # nil => cond
 
