@@ -196,7 +196,7 @@ notifyOther(ch) ==
                 /\ UNCHANGED queue
                 /\ UNCHANGED current_cmd
     IN
-    IF new_set = {} THEN
+    IF ch \in wait_set \/ new_set = {} THEN
         when_do_nothing
     ELSE
         notify_single(new_set)
