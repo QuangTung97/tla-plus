@@ -14,7 +14,7 @@ vars == <<pc, slave_vars, db_status, enable_delete>>
 
 PC == {
     "Init", "FinishWrite", "SendWriteComplete",
-    "SlaveDelete", "FinishDelete",
+    "S3Delete", "FinishDelete",
     "Terminated"
 }
 
@@ -60,16 +60,11 @@ Write(n) ==
             /\ goto(n, "FinishWrite")
             /\ status' = "Writing"
             /\ status_can_expire' = TRUE
-
-        when_fail ==
-            /\ goto(n, "Init")
-            /\ UNCHANGED slave_vars
     IN
     /\ pc[n] = "Init"
     /\ writing_set = {}
-    /\ IF allow_write
-        THEN when_normal
-        ELSE when_fail
+    /\ allow_write
+    /\ when_normal
 
     /\ UNCHANGED db_status
     /\ UNCHANGED enable_delete
@@ -96,7 +91,7 @@ SendWriteComplete(n) ==
 StartDelete(n) ==
     /\ pc[n] = "Init"
     /\ enable_delete
-    /\ goto(n, "SlaveDelete")
+    /\ goto(n, "S3Delete")
     /\ db_status = "Written"
     /\ db_status' = "Deleting"
     /\ UNCHANGED slave_vars
@@ -114,7 +109,7 @@ S3Delete(n) ==
             /\ goto(n, "Init")
             /\ UNCHANGED slave_vars
     IN
-    /\ pc[n] = "SlaveDelete"
+    /\ pc[n] = "S3Delete"
     /\ IF status = "WriteComplete"
         THEN when_normal
         ELSE when_fail
@@ -153,7 +148,11 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ---------------------------------------------------------------
+
+AlwaysTerminated == []<> TerminateCond
 
 NotAllowConcurrentDelete ==
     LET
