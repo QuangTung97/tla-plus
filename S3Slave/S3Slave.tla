@@ -5,10 +5,14 @@ CONSTANTS Node, nil
 
 VARIABLES pc,
     status, slave_generation, status_can_expire,
+    next_value, slave_value, kept_value,
     db_status, db_generation, master_generation,
     enable_delete
 
-slave_vars == <<status, slave_generation, status_can_expire>>
+slave_vars == <<
+    status, slave_generation, status_can_expire,
+    next_value, slave_value, kept_value
+>>
 db_vars == <<db_status, db_generation>>
 
 vars == <<pc, slave_vars, db_vars, master_generation, enable_delete>>
@@ -31,6 +35,9 @@ DBStatus == {"Empty", "Written", "Deleting", "Deleted"}
 
 Generation == 0..10
 
+WriteValue == 20..30
+NullWriteValue == WriteValue \union {nil}
+
 ---------------------------------------------------------------
 
 TypeOK ==
@@ -38,6 +45,10 @@ TypeOK ==
     /\ status \in NullStatus
     /\ slave_generation \in Generation
     /\ status_can_expire \in BOOLEAN
+
+    /\ next_value \in WriteValue
+    /\ slave_value \in NullWriteValue
+    /\ kept_value \in NullWriteValue
 
     /\ master_generation \in Generation
 
@@ -50,6 +61,10 @@ Init ==
     /\ status = nil
     /\ status_can_expire = FALSE
     /\ slave_generation = 0
+
+    /\ next_value = 20
+    /\ slave_value = nil
+    /\ kept_value = nil
 
     /\ master_generation = 1
 
@@ -65,6 +80,8 @@ slaveUnchanged ==
     /\ UNCHANGED master_generation
     /\ UNCHANGED enable_delete
 
+value_vars == <<next_value, slave_value, kept_value>>
+
 goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
 
@@ -75,17 +92,21 @@ Write(n) ==
         allow_write ==
             \/ status \in {nil, "Writing", "WriteComplete"}
             \/ slave_generation < master_generation
-
-        when_normal ==
-            /\ goto(n, "FinishWrite")
-            /\ status' = "Writing"
-            /\ status_can_expire' = TRUE
-            /\ slave_generation' = master_generation
     IN
     /\ pc[n] = "Init"
     /\ writing_set = {}
     /\ allow_write
-    /\ when_normal
+
+    /\ goto(n, "FinishWrite")
+    /\ status' = "Writing"
+    /\ status_can_expire' = TRUE
+    /\ slave_generation' = master_generation
+
+    /\ next_value' = next_value + 1
+    /\ slave_value' = next_value'
+    /\ IF enable_delete
+        THEN UNCHANGED kept_value
+        ELSE kept_value' = slave_value'
 
     /\ UNCHANGED db_vars
     /\ slaveUnchanged
@@ -97,6 +118,7 @@ FinishWrite(n) ==
     /\ status' = "WriteComplete"
     /\ status_can_expire' = FALSE
 
+    /\ UNCHANGED value_vars
     /\ UNCHANGED slave_generation
     /\ UNCHANGED db_vars
     /\ slaveUnchanged
@@ -134,6 +156,10 @@ S3Delete(n) ==
             /\ status' = "Deleted"
             /\ slave_generation' = db_generation
             /\ status_can_expire' = FALSE
+            /\ slave_value' = nil
+
+            /\ UNCHANGED kept_value
+            /\ UNCHANGED next_value
 
         when_fail ==
             /\ goto(n, "Init")
@@ -167,6 +193,15 @@ MasterSync ==
     /\ UNCHANGED pc
     /\ UNCHANGED enable_delete
 
+
+DisableDelete ==
+    /\ enable_delete
+    /\ enable_delete' = FALSE
+    /\ UNCHANGED master_generation
+    /\ UNCHANGED db_vars
+    /\ UNCHANGED slave_vars
+    /\ UNCHANGED pc
+
 ---------------------------------------------------------------
 
 TerminateCond ==
@@ -187,6 +222,7 @@ Next ==
         \/ S3Delete(n)
         \/ FinishDelete(n)
     \/ MasterSync
+    \/ DisableDelete
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -196,6 +232,7 @@ FairSpec == Spec /\ WF_vars(Next)
 ---------------------------------------------------------------
 
 AlwaysTerminated == []<> TerminateCond
+
 
 NotAllowConcurrentDelete ==
     LET
@@ -207,5 +244,9 @@ NotAllowConcurrentDelete ==
             /\ delete_set # {}
     IN
         ~cond
+
+
+KeptValueMustPersist ==
+    kept_value # nil => slave_value = kept_value
 
 ====
