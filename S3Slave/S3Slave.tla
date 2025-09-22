@@ -27,7 +27,8 @@ vars == <<
 ---------------------------------------------------------------
 
 PC == {
-    "Init", "FinishWrite", "SendWriteComplete",
+    "Init",
+    "FinishWrite", "SendWriteComplete",
     "S3Delete", "FinishDelete",
     "Terminated"
 }
@@ -163,10 +164,16 @@ deleteUnchanged ==
     /\ UNCHANGED master_generation
 
 StartDelete(n) ==
+    LET
+        allow_delete ==
+            \/ /\ enable_delete
+               /\ db_status = "Written"
+            \/ db_status = "Deleting"
+    IN
     /\ pc[n] = "Init"
-    /\ enable_delete
+    /\ allow_delete
+
     /\ goto(n, "S3Delete")
-    /\ db_status = "Written"
     /\ db_status' = "Deleting"
     /\ delete_local_version' = [delete_local_version EXCEPT ![n] = db_write_version]
     /\ UNCHANGED db_generation
@@ -238,6 +245,21 @@ DisableDelete ==
 
 ---------------------------------------------------------------
 
+Restart(n) ==
+    /\ pc[n] \notin {"Init", "Terminated"}
+    /\ delete_local_version' = [delete_local_version EXCEPT ![n] = nil]
+
+    /\ IF pc[n] \in {"S3Delete", "FinishDelete"}
+        THEN goto(n, "Init")
+        ELSE goto(n, "Terminated")
+
+    /\ UNCHANGED master_generation
+    /\ UNCHANGED enable_delete
+    /\ UNCHANGED db_vars
+    /\ UNCHANGED slave_vars
+
+---------------------------------------------------------------
+
 TerminateCond ==
     /\ \A n \in Node: pc[n] = "Terminated"
     /\ ~enable_delete
@@ -256,6 +278,8 @@ Next ==
         \/ StartDelete(n)
         \/ S3Delete(n)
         \/ FinishDelete(n)
+
+        \/ Restart(n)
     \/ MasterSync
     \/ DisableDelete
     \/ Terminated
