@@ -181,6 +181,22 @@ SendWriteComplete(n) ==
     /\ UNCHANGED slave_vars
     /\ slaveUnchanged
 
+
+RestartWriting(n) ==
+    /\ pc[n] = "Terminated"
+    /\ writing_set = {}
+    /\ ~slave_locked
+
+    /\ status = "Writing"
+    /\ status_can_expire
+
+    /\ goto(n, "FinishWrite")
+
+    /\ UNCHANGED slave_locked
+    /\ UNCHANGED slave_vars
+    /\ UNCHANGED db_vars
+    /\ slaveUnchanged
+
 ---------------------------------------------------------------
 
 deleteUnchanged ==
@@ -190,12 +206,19 @@ deleteUnchanged ==
 
 StartDelete(n) ==
     LET
+        allow_delete_normal ==
+            /\ pc[n] = "Init"
+            /\ enable_delete
+            /\ db_status = "Written"
+
+        restart_delete ==
+            /\ pc[n] \in {"Init", "Terminated"}
+            /\ db_status = "Deleting"
+
         allow_delete ==
-            \/ /\ enable_delete
-               /\ db_status = "Written"
-            \/ db_status = "Deleting"
+            \/ allow_delete_normal
+            \/ restart_delete
     IN
-    /\ pc[n] = "Init"
     /\ allow_delete
 
     /\ goto(n, "S3Delete")
@@ -327,6 +350,7 @@ TerminateCond ==
     /\ ~enable_delete
     /\ ~slave_locked
     /\ status \in {"WriteComplete", "Deleted"}
+    /\ db_status \in {"Written", "Deleted"}
 
 Terminated ==
     /\ TerminateCond
@@ -338,6 +362,7 @@ Next ==
         \/ Write(n)
         \/ FinishWrite(n)
         \/ SendWriteComplete(n)
+        \/ RestartWriting(n)
 
         \/ StartDelete(n)
         \/ S3Delete(n)
