@@ -30,7 +30,7 @@ vars == <<
 
 PC == {
     "Init",
-    "FinishWrite", "SendWriteComplete",
+    "FinishWrite", "SendWriteComplete", "ClearCanExpire",
     "S3Delete", "DeleteUnlock", "FinishDelete",
     "Terminated"
 }
@@ -110,7 +110,7 @@ Init ==
 slaveUnchanged ==
     /\ UNCHANGED master_generation
     /\ UNCHANGED enable_delete
-    /\ UNCHANGED <<local_version, local_generation>>
+    /\ UNCHANGED <<local_generation>>
     /\ UNCHANGED num_restart
 
 value_vars == <<next_value, slave_value, kept_value>>
@@ -153,6 +153,7 @@ Write(n) ==
 
     /\ UNCHANGED db_vars
     /\ UNCHANGED slave_locked
+    /\ UNCHANGED local_version
     /\ slaveUnchanged
 
 
@@ -160,7 +161,8 @@ FinishWrite(n) ==
     /\ pc[n] = "FinishWrite"
     /\ goto(n, "SendWriteComplete")
     /\ status' = "WriteComplete"
-    /\ status_can_expire' = FALSE
+    /\ local_version' = [local_version EXCEPT ![n] = slave_write_version]
+    /\ UNCHANGED status_can_expire
 
     /\ UNCHANGED slave_write_version
     /\ UNCHANGED value_vars
@@ -172,13 +174,33 @@ FinishWrite(n) ==
 
 SendWriteComplete(n) ==
     /\ pc[n] = "SendWriteComplete"
-    /\ goto(n, "Terminated")
+    /\ goto(n, "ClearCanExpire")
     /\ db_status' = "Written"
     /\ db_write_version' = slave_write_version
 
+    /\ UNCHANGED local_version
     /\ UNCHANGED slave_locked
     /\ UNCHANGED db_generation
     /\ UNCHANGED slave_vars
+    /\ slaveUnchanged
+
+
+ClearCanExpire(n) ==
+    /\ pc[n] = "ClearCanExpire"
+    /\ goto(n, "Terminated")
+
+    /\ IF local_version[n] = slave_write_version
+        THEN status_can_expire' = FALSE
+        ELSE UNCHANGED status_can_expire
+
+    /\ local_version' = [local_version EXCEPT ![n] = nil]
+
+    /\ UNCHANGED slave_generation
+    /\ UNCHANGED slave_write_version
+    /\ UNCHANGED status
+    /\ UNCHANGED slave_locked
+    /\ UNCHANGED value_vars
+    /\ UNCHANGED db_vars
     /\ slaveUnchanged
 
 
@@ -195,6 +217,7 @@ RestartWriting(n) ==
     /\ UNCHANGED slave_locked
     /\ UNCHANGED slave_vars
     /\ UNCHANGED db_vars
+    /\ UNCHANGED local_version
     /\ slaveUnchanged
 
 ---------------------------------------------------------------
@@ -367,6 +390,7 @@ NormalAction ==
         \/ Write(n)
         \/ FinishWrite(n)
         \/ SendWriteComplete(n)
+        \/ ClearCanExpire(n)
 
         \/ StartDelete(n)
         \/ S3Delete(n)
@@ -406,5 +430,12 @@ NotAllowConcurrentDelete ==
 
 KeptValueMustPersist ==
     kept_value # nil => slave_value = kept_value
+
+
+TerminateInv ==
+    TerminateCond =>
+        \A n \in Node:
+            /\ local_version[n] = nil
+            /\ local_generation[n] = nil
 
 ====
