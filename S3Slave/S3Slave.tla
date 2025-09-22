@@ -13,9 +13,12 @@ vars == <<pc, slave_vars, db_status, enable_delete>>
 ---------------------------------------------------------------
 
 PC == {
-    "Init", "WriteData", "SendWriteComplete",
-    "DoDelete", "FinishDelete", "Terminated"
+    "Init", "FinishWrite", "SendWriteComplete",
+    "SlaveDelete", "FinishDelete",
+    "Terminated"
 }
+
+WritePC == {"FinishWrite", "SendWriteComplete"}
 
 Status == {"Writing", "WriteComplete", "Deleted"}
 
@@ -39,22 +42,41 @@ Init ==
     /\ db_status = "Empty"
     /\ enable_delete = TRUE
 
+    /\ WritePC \subseteq PC
+
 ---------------------------------------------------------------
 
 goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
 
+writing_set == {n \in Node: pc[n] \in WritePC}
+
 Write(n) ==
+    LET
+        allow_write ==
+            \/ status \in {nil, "Writing", "WriteComplete"}
+
+        when_normal ==
+            /\ goto(n, "FinishWrite")
+            /\ status' = "Writing"
+            /\ status_can_expire' = TRUE
+
+        when_fail ==
+            /\ goto(n, "Init")
+            /\ UNCHANGED slave_vars
+    IN
     /\ pc[n] = "Init"
-    /\ goto(n, "WriteData")
-    /\ status' = "Writing"
-    /\ status_can_expire' = TRUE
+    /\ writing_set = {}
+    /\ IF allow_write
+        THEN when_normal
+        ELSE when_fail
+
     /\ UNCHANGED db_status
     /\ UNCHANGED enable_delete
 
 
 FinishWrite(n) ==
-    /\ pc[n] = "WriteData"
+    /\ pc[n] = "FinishWrite"
     /\ goto(n, "SendWriteComplete")
     /\ status' = "WriteComplete"
     /\ status_can_expire' = FALSE
@@ -74,21 +96,32 @@ SendWriteComplete(n) ==
 StartDelete(n) ==
     /\ pc[n] = "Init"
     /\ enable_delete
-    /\ goto(n, "DoDelete")
+    /\ goto(n, "SlaveDelete")
     /\ db_status = "Written"
     /\ db_status' = "Deleting"
     /\ UNCHANGED slave_vars
     /\ UNCHANGED enable_delete
 
-DoDelete(n) ==
-    /\ pc[n] = "DoDelete"
-    /\ goto(n, "FinishDelete")
 
-    /\ status' = "Deleted"
-    /\ status_can_expire' = FALSE
+S3Delete(n) ==
+    LET
+        when_normal ==
+            /\ goto(n, "FinishDelete")
+            /\ status' = "Deleted"
+            /\ status_can_expire' = FALSE
+
+        when_fail ==
+            /\ goto(n, "Init")
+            /\ UNCHANGED slave_vars
+    IN
+    /\ pc[n] = "SlaveDelete"
+    /\ IF status = "WriteComplete"
+        THEN when_normal
+        ELSE when_fail
 
     /\ UNCHANGED db_status
     /\ UNCHANGED enable_delete
+
 
 FinishDelete(n) ==
     /\ pc[n] = "FinishDelete"
@@ -114,11 +147,23 @@ Next ==
         \/ SendWriteComplete(n)
 
         \/ StartDelete(n)
-        \/ DoDelete(n)
+        \/ S3Delete(n)
         \/ FinishDelete(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
 
+---------------------------------------------------------------
+
+NotAllowConcurrentDelete ==
+    LET
+        write_set == {n \in Node: pc[n] = "FinishWrite"}
+        delete_set == {n \in Node: pc[n] = "FinishDelete"}
+
+        cond ==
+            /\ write_set # {}
+            /\ delete_set # {}
+    IN
+        ~cond
 
 ====
