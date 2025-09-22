@@ -204,23 +204,7 @@ deleteUnchanged ==
     /\ UNCHANGED master_generation
     /\ UNCHANGED num_restart
 
-StartDelete(n) ==
-    LET
-        allow_delete_normal ==
-            /\ pc[n] = "Init"
-            /\ enable_delete
-            /\ db_status = "Written"
-
-        restart_delete ==
-            /\ pc[n] \in {"Init", "Terminated"}
-            /\ db_status = "Deleting"
-
-        allow_delete ==
-            \/ allow_delete_normal
-            \/ restart_delete
-    IN
-    /\ allow_delete
-
+doStartDelete(n) ==
     /\ goto(n, "S3Delete")
     /\ db_status' = "Deleting"
 
@@ -233,6 +217,27 @@ StartDelete(n) ==
     /\ UNCHANGED slave_vars
     /\ deleteUnchanged
 
+StartDelete(n) ==
+    LET
+        allow_delete ==
+            /\ pc[n] = "Init"
+            /\ enable_delete
+            /\ db_status = "Written"
+    IN
+    /\ allow_delete
+    /\ doStartDelete(n)
+
+RestartDeleting(n) ==
+    LET
+        restart_delete ==
+            /\ pc[n] \in {"Init", "Terminated"}
+            /\ db_status = "Deleting"
+            /\ db_write_version = slave_write_version
+    IN
+    /\ restart_delete
+    /\ doStartDelete(n)
+
+-----------------------------
 
 S3Delete(n) ==
     LET
@@ -351,27 +356,31 @@ TerminateCond ==
     /\ ~slave_locked
     /\ status \in {"WriteComplete", "Deleted"}
     /\ db_status \in {"Written", "Deleted"}
+    /\ ~status_can_expire
 
 Terminated ==
     /\ TerminateCond
     /\ UNCHANGED vars
 
-
-Next ==
+NormalAction ==
     \/ \E n \in Node:
         \/ Write(n)
         \/ FinishWrite(n)
         \/ SendWriteComplete(n)
-        \/ RestartWriting(n)
 
         \/ StartDelete(n)
         \/ S3Delete(n)
         \/ DeleteUnlock(n)
         \/ FinishDelete(n)
-
-        \/ Restart(n)
     \/ MasterSync
     \/ DisableDelete
+
+Next ==
+    \/ NormalAction
+    \/ \E n \in Node:
+        \/ RestartWriting(n)
+        \/ RestartDeleting(n)
+        \/ Restart(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
