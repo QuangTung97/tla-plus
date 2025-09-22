@@ -1,16 +1,16 @@
 ------ MODULE S3Slave ----
 EXTENDS TLC, Naturals
 
-CONSTANTS Node, nil
+CONSTANTS Node, nil, max_restart
 
 VARIABLES pc,
     status, slave_locked, slave_generation, status_can_expire,
     next_value, slave_value, kept_value,
     slave_write_version,
     db_status, db_generation, db_write_version,
-    delete_local_version,
+    local_version, local_generation,
     master_generation,
-    enable_delete
+    enable_delete, num_restart
 
 slave_vars == <<
     status, slave_generation, status_can_expire,
@@ -21,8 +21,9 @@ slave_vars == <<
 db_vars == <<db_status, db_generation, db_write_version>>
 
 vars == <<
-    pc, delete_local_version, slave_locked,
-    slave_vars, db_vars, master_generation, enable_delete
+    pc, local_version, local_generation, slave_locked,
+    slave_vars, db_vars, master_generation, enable_delete,
+    num_restart
 >>
 
 ---------------------------------------------------------------
@@ -42,6 +43,7 @@ NullStatus == Status \union {nil}
 DBStatus == {"Empty", "Written", "Deleting", "Deleted"}
 
 Generation == 0..10
+NullGeneration == Generation \union {nil}
 
 WriteValue == 20..29
 NullWriteValue == WriteValue \union {nil}
@@ -71,7 +73,10 @@ TypeOK ==
     /\ db_generation \in Generation
     /\ enable_delete \in BOOLEAN
 
-    /\ delete_local_version \in [Node -> NullWriteVersion]
+    /\ local_version \in [Node -> NullWriteVersion]
+    /\ local_generation \in [Node -> NullGeneration]
+
+    /\ num_restart \in 0..max_restart
 
 Init ==
     /\ pc = [n \in Node |-> "Init"]
@@ -93,7 +98,10 @@ Init ==
     /\ db_generation = 1
     /\ enable_delete = TRUE
 
-    /\ delete_local_version = [n \in Node |-> nil]
+    /\ local_version = [n \in Node |-> nil]
+    /\ local_generation = [n \in Node |-> nil]
+
+    /\ num_restart = 0
 
     /\ WritePC \subseteq PC
 
@@ -102,7 +110,8 @@ Init ==
 slaveUnchanged ==
     /\ UNCHANGED master_generation
     /\ UNCHANGED enable_delete
-    /\ UNCHANGED delete_local_version
+    /\ UNCHANGED <<local_version, local_generation>>
+    /\ UNCHANGED num_restart
 
 value_vars == <<next_value, slave_value, kept_value>>
 
@@ -177,6 +186,7 @@ SendWriteComplete(n) ==
 deleteUnchanged ==
     /\ UNCHANGED enable_delete
     /\ UNCHANGED master_generation
+    /\ UNCHANGED num_restart
 
 StartDelete(n) ==
     LET
@@ -190,7 +200,9 @@ StartDelete(n) ==
 
     /\ goto(n, "S3Delete")
     /\ db_status' = "Deleting"
-    /\ delete_local_version' = [delete_local_version EXCEPT ![n] = db_write_version]
+
+    /\ local_version' = [local_version EXCEPT ![n] = db_write_version]
+    /\ local_generation' = [local_generation EXCEPT ![n] = db_generation]
 
     /\ UNCHANGED slave_locked
     /\ UNCHANGED db_generation
@@ -202,21 +214,24 @@ StartDelete(n) ==
 S3Delete(n) ==
     LET
         allow_delete ==
-            /\ delete_local_version[n] = slave_write_version
+            /\ local_version[n] = slave_write_version
 
         when_normal ==
             /\ lockSlave
             /\ goto(n, "DeleteUnlock")
             /\ status' = "Deleted"
-            /\ slave_generation' = db_generation
+            /\ slave_generation' = local_generation[n]
             /\ status_can_expire' = FALSE
             /\ slave_value' = nil
 
             /\ UNCHANGED kept_value
             /\ UNCHANGED next_value
+            /\ UNCHANGED <<local_version, local_generation>>
 
         when_fail ==
-            /\ goto(n, "Init")
+            /\ goto(n, "Terminated")
+            /\ local_version' = [local_version EXCEPT ![n] = nil]
+            /\ local_generation' = [local_generation EXCEPT ![n] = nil]
             /\ UNCHANGED slave_locked
             /\ UNCHANGED slave_vars
     IN
@@ -228,7 +243,6 @@ S3Delete(n) ==
 
     /\ UNCHANGED slave_write_version
     /\ UNCHANGED db_vars
-    /\ UNCHANGED delete_local_version
     /\ deleteUnchanged
 
 
@@ -239,7 +253,7 @@ DeleteUnlock(n) ==
 
     /\ UNCHANGED db_vars
     /\ UNCHANGED slave_vars
-    /\ UNCHANGED delete_local_version
+    /\ UNCHANGED <<local_version, local_generation>>
     /\ deleteUnchanged
 
 
@@ -248,7 +262,9 @@ FinishDelete(n) ==
     /\ goto(n, "Terminated")
     /\ db_status' = "Deleted"
     /\ db_generation' = db_generation + 1
-    /\ delete_local_version' = [delete_local_version EXCEPT ![n] = nil]
+
+    /\ local_version' = [local_version EXCEPT ![n] = nil]
+    /\ local_generation' = [local_generation EXCEPT ![n] = nil]
 
     /\ UNCHANGED slave_locked
     /\ UNCHANGED db_write_version
@@ -265,7 +281,8 @@ MasterSync ==
     /\ UNCHANGED slave_locked
     /\ UNCHANGED pc
     /\ UNCHANGED enable_delete
-    /\ UNCHANGED delete_local_version
+    /\ UNCHANGED <<local_version, local_generation>>
+    /\ UNCHANGED num_restart
 
 
 DisableDelete ==
@@ -277,19 +294,26 @@ DisableDelete ==
     /\ UNCHANGED db_vars
     /\ UNCHANGED slave_vars
     /\ UNCHANGED pc
-    /\ UNCHANGED delete_local_version
+    /\ UNCHANGED <<local_version, local_generation>>
+    /\ UNCHANGED num_restart
 
 ---------------------------------------------------------------
 
 Restart(n) ==
     /\ pc[n] \notin {"Init", "Terminated"}
-    /\ delete_local_version' = [delete_local_version EXCEPT ![n] = nil]
+    /\ num_restart < max_restart
+    /\ num_restart' = num_restart + 1
 
-    /\ IF pc[n] \in {"S3Delete", "FinishDelete"}
+    /\ local_version' = [local_version EXCEPT ![n] = nil]
+    /\ local_generation' = [local_generation EXCEPT ![n] = nil]
+
+    /\ IF pc[n] \in {"S3Delete", "DeleteUnlock", "FinishDelete"}
         THEN goto(n, "Init")
         ELSE goto(n, "Terminated")
 
-    /\ slave_locked' = FALSE
+    /\ IF pc[n] = "DeleteUnlock"
+        THEN slave_locked' = FALSE
+        ELSE UNCHANGED slave_locked
 
     /\ UNCHANGED master_generation
     /\ UNCHANGED enable_delete
@@ -302,6 +326,7 @@ TerminateCond ==
     /\ \A n \in Node: pc[n] = "Terminated"
     /\ ~enable_delete
     /\ ~slave_locked
+    /\ status \in {"WriteComplete", "Deleted"}
 
 Terminated ==
     /\ TerminateCond
