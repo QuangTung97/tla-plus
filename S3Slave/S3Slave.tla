@@ -462,4 +462,9 @@ TerminateInv ==
             /\ local_version[n] = nil
             /\ local_generation[n] = nil
 
+
+StatusCanExpireInv ==
+    /\ status_can_expire => status \in {"Writing", "WriteComplete"}
+    /\ status = "Writing" => status_can_expire
+
 ====
