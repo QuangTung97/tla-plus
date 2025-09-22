@@ -178,7 +178,6 @@ StartDelete(n) ==
 S3Delete(n) ==
     LET
         allow_delete ==
-            /\ status = "WriteComplete"
             /\ delete_local_version[n] = slave_write_version
 
         when_normal ==
