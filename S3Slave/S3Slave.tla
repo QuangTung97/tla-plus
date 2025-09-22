@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals
 CONSTANTS Node, nil
 
 VARIABLES pc,
-    status, slave_generation, status_can_expire,
+    status, slave_locked, slave_generation, status_can_expire,
     next_value, slave_value, kept_value,
     slave_write_version,
     db_status, db_generation, db_write_version,
@@ -17,10 +17,11 @@ slave_vars == <<
     next_value, slave_value, kept_value,
     slave_write_version
 >>
+
 db_vars == <<db_status, db_generation, db_write_version>>
 
 vars == <<
-    pc, delete_local_version,
+    pc, delete_local_version, slave_locked,
     slave_vars, db_vars, master_generation, enable_delete
 >>
 
@@ -29,7 +30,7 @@ vars == <<
 PC == {
     "Init",
     "FinishWrite", "SendWriteComplete",
-    "S3Delete", "FinishDelete",
+    "S3Delete", "DeleteUnlock", "FinishDelete",
     "Terminated"
 }
 
@@ -53,6 +54,7 @@ NullWriteVersion == WriteVersion \union {nil}
 TypeOK ==
     /\ pc \in [Node -> PC]
     /\ status \in NullStatus
+    /\ slave_locked \in BOOLEAN
     /\ slave_generation \in Generation
     /\ status_can_expire \in BOOLEAN
 
@@ -74,6 +76,7 @@ TypeOK ==
 Init ==
     /\ pc = [n \in Node |-> "Init"]
     /\ status = nil
+    /\ slave_locked = FALSE
     /\ status_can_expire = FALSE
     /\ slave_generation = 0
 
@@ -108,6 +111,13 @@ goto(n, l) ==
 
 writing_set == {n \in Node: pc[n] \in WritePC}
 
+lockSlave ==
+    /\ ~slave_locked
+    /\ slave_locked' = TRUE
+
+unlockSlave ==
+    /\ slave_locked' = FALSE
+
 Write(n) ==
     LET
         allow_write ==
@@ -117,6 +127,7 @@ Write(n) ==
     /\ pc[n] = "Init"
     /\ writing_set = {}
     /\ allow_write
+    /\ ~slave_locked
 
     /\ goto(n, "FinishWrite")
     /\ status' = "Writing"
@@ -132,6 +143,7 @@ Write(n) ==
     /\ slave_write_version' = slave_write_version + 1
 
     /\ UNCHANGED db_vars
+    /\ UNCHANGED slave_locked
     /\ slaveUnchanged
 
 
@@ -144,6 +156,7 @@ FinishWrite(n) ==
     /\ UNCHANGED slave_write_version
     /\ UNCHANGED value_vars
     /\ UNCHANGED slave_generation
+    /\ UNCHANGED slave_locked
     /\ UNCHANGED db_vars
     /\ slaveUnchanged
 
@@ -153,6 +166,8 @@ SendWriteComplete(n) ==
     /\ goto(n, "Terminated")
     /\ db_status' = "Written"
     /\ db_write_version' = slave_write_version
+
+    /\ UNCHANGED slave_locked
     /\ UNCHANGED db_generation
     /\ UNCHANGED slave_vars
     /\ slaveUnchanged
@@ -176,6 +191,8 @@ StartDelete(n) ==
     /\ goto(n, "S3Delete")
     /\ db_status' = "Deleting"
     /\ delete_local_version' = [delete_local_version EXCEPT ![n] = db_write_version]
+
+    /\ UNCHANGED slave_locked
     /\ UNCHANGED db_generation
     /\ UNCHANGED db_write_version
     /\ UNCHANGED slave_vars
@@ -188,7 +205,8 @@ S3Delete(n) ==
             /\ delete_local_version[n] = slave_write_version
 
         when_normal ==
-            /\ goto(n, "FinishDelete")
+            /\ lockSlave
+            /\ goto(n, "DeleteUnlock")
             /\ status' = "Deleted"
             /\ slave_generation' = db_generation
             /\ status_can_expire' = FALSE
@@ -199,9 +217,11 @@ S3Delete(n) ==
 
         when_fail ==
             /\ goto(n, "Init")
+            /\ UNCHANGED slave_locked
             /\ UNCHANGED slave_vars
     IN
     /\ pc[n] = "S3Delete"
+
     /\ IF allow_delete
         THEN when_normal
         ELSE when_fail
@@ -212,12 +232,25 @@ S3Delete(n) ==
     /\ deleteUnchanged
 
 
+DeleteUnlock(n) ==
+    /\ pc[n] = "DeleteUnlock"
+    /\ goto(n, "FinishDelete")
+    /\ unlockSlave
+
+    /\ UNCHANGED db_vars
+    /\ UNCHANGED slave_vars
+    /\ UNCHANGED delete_local_version
+    /\ deleteUnchanged
+
+
 FinishDelete(n) ==
     /\ pc[n] = "FinishDelete"
     /\ goto(n, "Terminated")
     /\ db_status' = "Deleted"
     /\ db_generation' = db_generation + 1
     /\ delete_local_version' = [delete_local_version EXCEPT ![n] = nil]
+
+    /\ UNCHANGED slave_locked
     /\ UNCHANGED db_write_version
     /\ UNCHANGED slave_vars
     /\ deleteUnchanged
@@ -229,6 +262,7 @@ MasterSync ==
     /\ master_generation' = db_generation
     /\ UNCHANGED db_vars
     /\ UNCHANGED slave_vars
+    /\ UNCHANGED slave_locked
     /\ UNCHANGED pc
     /\ UNCHANGED enable_delete
     /\ UNCHANGED delete_local_version
@@ -237,6 +271,8 @@ MasterSync ==
 DisableDelete ==
     /\ enable_delete
     /\ enable_delete' = FALSE
+
+    /\ UNCHANGED slave_locked
     /\ UNCHANGED master_generation
     /\ UNCHANGED db_vars
     /\ UNCHANGED slave_vars
@@ -253,6 +289,8 @@ Restart(n) ==
         THEN goto(n, "Init")
         ELSE goto(n, "Terminated")
 
+    /\ slave_locked' = FALSE
+
     /\ UNCHANGED master_generation
     /\ UNCHANGED enable_delete
     /\ UNCHANGED db_vars
@@ -263,6 +301,7 @@ Restart(n) ==
 TerminateCond ==
     /\ \A n \in Node: pc[n] = "Terminated"
     /\ ~enable_delete
+    /\ ~slave_locked
 
 Terminated ==
     /\ TerminateCond
@@ -277,6 +316,7 @@ Next ==
 
         \/ StartDelete(n)
         \/ S3Delete(n)
+        \/ DeleteUnlock(n)
         \/ FinishDelete(n)
 
         \/ Restart(n)
@@ -296,7 +336,7 @@ AlwaysTerminated == []<> TerminateCond
 NotAllowConcurrentDelete ==
     LET
         write_set == {n \in Node: pc[n] = "FinishWrite"}
-        delete_set == {n \in Node: pc[n] = "FinishDelete"}
+        delete_set == {n \in Node: pc[n] = "DeleteUnlock"}
 
         cond ==
             /\ write_set # {}
