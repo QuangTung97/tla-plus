@@ -30,12 +30,12 @@ vars == <<
 
 PC == {
     "Init",
-    "FinishWrite", "SendWriteComplete", "ClearCanExpire",
+    "WriteUnlock", "FinishWrite", "SendWriteComplete", "ClearCanExpire",
     "S3Delete", "DeleteUnlock", "FinishDelete",
     "Terminated"
 }
 
-WritePC == {"FinishWrite", "SendWriteComplete"}
+WritePC == {"WriteUnlock", "FinishWrite", "SendWriteComplete", "ClearCanExpire"}
 
 Status == {"Writing", "WriteComplete", "Deleted"}
 NullStatus == Status \union {nil}
@@ -136,9 +136,9 @@ Write(n) ==
     /\ pc[n] = "Init"
     /\ writing_set = {}
     /\ allow_write
-    /\ ~slave_locked
+    /\ lockSlave
 
-    /\ goto(n, "FinishWrite")
+    /\ goto(n, "WriteUnlock")
     /\ status' = "Writing"
     /\ status_can_expire' = TRUE
     /\ slave_generation' = master_generation
@@ -152,8 +152,21 @@ Write(n) ==
     /\ slave_write_version' = slave_write_version + 1
 
     /\ UNCHANGED db_vars
-    /\ UNCHANGED slave_locked
     /\ UNCHANGED local_version
+    /\ slaveUnchanged
+
+
+WriteUnlock(n) ==
+    /\ pc[n] = "WriteUnlock"
+    /\ goto(n, "FinishWrite")
+    /\ unlockSlave
+
+    /\ UNCHANGED <<status, status_can_expire>>
+    /\ UNCHANGED local_version
+    /\ UNCHANGED slave_write_version
+    /\ UNCHANGED value_vars
+    /\ UNCHANGED slave_generation
+    /\ UNCHANGED db_vars
     /\ slaveUnchanged
 
 
@@ -173,10 +186,21 @@ FinishWrite(n) ==
 
 
 SendWriteComplete(n) ==
+    LET
+        when_normal ==
+            /\ db_status' = "Written"
+            /\ db_write_version' = slave_write_version
+
+        when_no_action ==
+            /\ UNCHANGED db_status
+            /\ UNCHANGED db_write_version
+    IN
     /\ pc[n] = "SendWriteComplete"
     /\ goto(n, "ClearCanExpire")
-    /\ db_status' = "Written"
-    /\ db_write_version' = slave_write_version
+
+    /\ IF db_write_version = nil \/ db_write_version < slave_write_version
+        THEN when_normal
+        ELSE when_no_action
 
     /\ UNCHANGED local_version
     /\ UNCHANGED slave_locked
@@ -209,7 +233,6 @@ RestartWriting(n) ==
     /\ writing_set = {}
     /\ ~slave_locked
 
-    /\ status = "Writing"
     /\ status_can_expire
 
     /\ goto(n, "FinishWrite")
@@ -362,7 +385,7 @@ Restart(n) ==
         THEN goto(n, "Init")
         ELSE goto(n, "Terminated")
 
-    /\ IF pc[n] = "DeleteUnlock"
+    /\ IF pc[n] \in {"WriteUnlock", "DeleteUnlock"}
         THEN slave_locked' = FALSE
         ELSE UNCHANGED slave_locked
 
@@ -388,6 +411,7 @@ Terminated ==
 NormalAction ==
     \/ \E n \in Node:
         \/ Write(n)
+        \/ WriteUnlock(n)
         \/ FinishWrite(n)
         \/ SendWriteComplete(n)
         \/ ClearCanExpire(n)
@@ -418,7 +442,7 @@ AlwaysTerminated == []<> TerminateCond
 
 NotAllowConcurrentDelete ==
     LET
-        write_set == {n \in Node: pc[n] = "FinishWrite"}
+        write_set == {n \in Node: pc[n] = "WriteUnlock"}
         delete_set == {n \in Node: pc[n] = "DeleteUnlock"}
 
         cond ==
