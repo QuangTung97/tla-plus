@@ -1,14 +1,17 @@
 ------ MODULE S3Slave ----
-EXTENDS TLC
+EXTENDS TLC, Naturals
 
 CONSTANTS Node, nil
 
-VARIABLES pc, status, status_can_expire,
-    db_status, enable_delete
+VARIABLES pc,
+    status, slave_generation, status_can_expire,
+    db_status, db_generation, master_generation,
+    enable_delete
 
-slave_vars == <<status, status_can_expire>>
+slave_vars == <<status, slave_generation, status_can_expire>>
+db_vars == <<db_status, db_generation>>
 
-vars == <<pc, slave_vars, db_status, enable_delete>>
+vars == <<pc, slave_vars, db_vars, master_generation, enable_delete>>
 
 ---------------------------------------------------------------
 
@@ -26,25 +29,41 @@ NullStatus == Status \union {nil}
 
 DBStatus == {"Empty", "Written", "Deleting", "Deleted"}
 
+Generation == 0..10
+
 ---------------------------------------------------------------
 
 TypeOK ==
     /\ pc \in [Node -> PC]
     /\ status \in NullStatus
+    /\ slave_generation \in Generation
     /\ status_can_expire \in BOOLEAN
+
+    /\ master_generation \in Generation
+
     /\ db_status \in DBStatus
+    /\ db_generation \in Generation
     /\ enable_delete \in BOOLEAN
 
 Init ==
     /\ pc = [n \in Node |-> "Init"]
     /\ status = nil
     /\ status_can_expire = FALSE
+    /\ slave_generation = 0
+
+    /\ master_generation = 1
+
     /\ db_status = "Empty"
+    /\ db_generation = 1
     /\ enable_delete = TRUE
 
     /\ WritePC \subseteq PC
 
 ---------------------------------------------------------------
+
+slaveUnchanged ==
+    /\ UNCHANGED master_generation
+    /\ UNCHANGED enable_delete
 
 goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
@@ -55,19 +74,21 @@ Write(n) ==
     LET
         allow_write ==
             \/ status \in {nil, "Writing", "WriteComplete"}
+            \/ slave_generation < master_generation
 
         when_normal ==
             /\ goto(n, "FinishWrite")
             /\ status' = "Writing"
             /\ status_can_expire' = TRUE
+            /\ slave_generation' = master_generation
     IN
     /\ pc[n] = "Init"
     /\ writing_set = {}
     /\ allow_write
     /\ when_normal
 
-    /\ UNCHANGED db_status
-    /\ UNCHANGED enable_delete
+    /\ UNCHANGED db_vars
+    /\ slaveUnchanged
 
 
 FinishWrite(n) ==
@@ -75,18 +96,25 @@ FinishWrite(n) ==
     /\ goto(n, "SendWriteComplete")
     /\ status' = "WriteComplete"
     /\ status_can_expire' = FALSE
-    /\ UNCHANGED db_status
-    /\ UNCHANGED enable_delete
+
+    /\ UNCHANGED slave_generation
+    /\ UNCHANGED db_vars
+    /\ slaveUnchanged
 
 
 SendWriteComplete(n) ==
     /\ pc[n] = "SendWriteComplete"
     /\ goto(n, "Terminated")
     /\ db_status' = "Written"
+    /\ UNCHANGED db_generation
     /\ UNCHANGED slave_vars
-    /\ UNCHANGED enable_delete
+    /\ slaveUnchanged
 
 ---------------------------------------------------------------
+
+deleteUnchanged ==
+    /\ UNCHANGED enable_delete
+    /\ UNCHANGED master_generation
 
 StartDelete(n) ==
     /\ pc[n] = "Init"
@@ -94,8 +122,9 @@ StartDelete(n) ==
     /\ goto(n, "S3Delete")
     /\ db_status = "Written"
     /\ db_status' = "Deleting"
+    /\ UNCHANGED db_generation
     /\ UNCHANGED slave_vars
-    /\ UNCHANGED enable_delete
+    /\ deleteUnchanged
 
 
 S3Delete(n) ==
@@ -103,6 +132,7 @@ S3Delete(n) ==
         when_normal ==
             /\ goto(n, "FinishDelete")
             /\ status' = "Deleted"
+            /\ slave_generation' = db_generation
             /\ status_can_expire' = FALSE
 
         when_fail ==
@@ -115,14 +145,26 @@ S3Delete(n) ==
         ELSE when_fail
 
     /\ UNCHANGED db_status
-    /\ UNCHANGED enable_delete
+    /\ UNCHANGED db_generation
+    /\ deleteUnchanged
 
 
 FinishDelete(n) ==
     /\ pc[n] = "FinishDelete"
     /\ goto(n, "Terminated")
     /\ db_status' = "Deleted"
+    /\ db_generation' = db_generation + 1
     /\ UNCHANGED slave_vars
+    /\ deleteUnchanged
+
+---------------------------------------------------------------
+
+MasterSync ==
+    /\ master_generation < db_generation
+    /\ master_generation' = db_generation
+    /\ UNCHANGED db_vars
+    /\ UNCHANGED slave_vars
+    /\ UNCHANGED pc
     /\ UNCHANGED enable_delete
 
 ---------------------------------------------------------------
@@ -144,6 +186,7 @@ Next ==
         \/ StartDelete(n)
         \/ S3Delete(n)
         \/ FinishDelete(n)
+    \/ MasterSync
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
