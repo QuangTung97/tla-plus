@@ -8,7 +8,8 @@ CONSTANTS Node, Key, LinkKey, nil
 VARIABLES
     store, store_ref, ws_links, locked,
     pc, local_key, local_link,
-    job_pc, job_key, job_link
+    job_pc, job_key, job_link,
+    enable_unlink
 
 local_vars == <<
     pc, local_key, local_link
@@ -21,7 +22,8 @@ job_vars == <<
 vars == <<
     store, store_ref, ws_links, locked,
     local_vars,
-    job_vars
+    job_vars,
+    enable_unlink
 >>
 
 ---------------------------------------------------------------
@@ -33,6 +35,7 @@ PC == {
     "Init",
     "CloneProject", "SetStoreRef",
     "LinkWorkspace",
+    "DoDeleteKey",
     "Terminated"
 }
 
@@ -52,6 +55,8 @@ TypeOK ==
     /\ job_key \in NullKey
     /\ job_link \in NullLinkKey
 
+    /\ enable_unlink \in BOOLEAN
+
 Init ==
     /\ store = {}
     /\ store_ref = [k \in Key |-> {}]
@@ -65,6 +70,8 @@ Init ==
     /\ job_pc = "Init"
     /\ job_key = nil
     /\ job_link = nil
+
+    /\ enable_unlink = TRUE
 
 ---------------------------------------------------------------
 
@@ -106,6 +113,7 @@ BeginClone(n, k, l) ==
     /\ UNCHANGED store
     /\ UNCHANGED store_ref
     /\ UNCHANGED job_vars
+    /\ UNCHANGED enable_unlink
 
 ---------------------------
 
@@ -113,6 +121,7 @@ unchangedLocalVars ==
     /\ UNCHANGED local_key
     /\ UNCHANGED local_link
     /\ UNCHANGED job_vars
+    /\ UNCHANGED enable_unlink
 
 CloneProject(n) ==
     LET
@@ -163,6 +172,7 @@ LinkWorkspace(n) ==
     /\ UNCHANGED job_vars
     /\ UNCHANGED store
     /\ UNCHANGED store_ref
+    /\ UNCHANGED enable_unlink
 
 ---------------------------------------------------------------
 
@@ -174,6 +184,7 @@ jobUnchanged ==
     /\ UNCHANGED store
     /\ UNCHANGED local_vars
     /\ UNCHANGED ws_links
+    /\ UNCHANGED enable_unlink
 
 StartFixLink(k, l) ==
     /\ job_pc = "Init"
@@ -208,10 +219,68 @@ RemoveStoreRef ==
 
 ---------------------------------------------------------------
 
+deleteKeyUnchanged ==
+    /\ UNCHANGED job_vars
+    /\ UNCHANGED ws_links
+    /\ UNCHANGED store_ref
+    /\ UNCHANGED local_link
+    /\ UNCHANGED enable_unlink
+
+DeleteKey(n, k) ==
+    /\ pc[n] = "Init"
+    /\ lockKey(k)
+    /\ k \in store
+    /\ store_ref[k] = {}
+    /\ goto(n, "DoDeleteKey")
+
+    /\ setLocal(local_key, n, k)
+
+    /\ UNCHANGED store
+    /\ deleteKeyUnchanged
+
+DoDeleteKey(n) ==
+    LET
+        k == local_key[n]
+    IN
+    /\ pc[n] = "DoDeleteKey"
+    /\ goto(n, "Terminated")
+    /\ unlockKey(k)
+
+    /\ store' = store \ {k}
+    /\ setLocal(local_key, n, nil)
+
+    /\ deleteKeyUnchanged
+
+---------------------------------------------------------------
+
+Unlink(l) ==
+    /\ enable_unlink
+    /\ ws_links[l] # nil
+    /\ ws_links' = [ws_links EXCEPT ![l] = nil]
+
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED job_vars
+    /\ UNCHANGED enable_unlink
+    /\ UNCHANGED locked
+    /\ UNCHANGED <<store, store_ref>>
+
+
+DisableUnlink ==
+    /\ enable_unlink
+    /\ enable_unlink' = FALSE
+
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED job_vars
+    /\ UNCHANGED locked
+    /\ UNCHANGED <<store, store_ref, ws_links>>
+
+---------------------------------------------------------------
+
 TerminateCond ==
     /\ \A n \in Node: pc[n] = "Terminated"
     /\ locked = {}
     /\ workspaceLinksMatched
+    /\ ~enable_unlink
 
 Terminated ==
     /\ TerminateCond
@@ -226,11 +295,18 @@ Next ==
         \/ CloneProject(n)
         \/ SetStoreRef(n)
         \/ LinkWorkspace(n)
+        \/ DoDeleteKey(n)
 
     \/ \E k \in Key, l \in LinkKey:
         \/ StartFixLink(k, l)
     \/ RemoveStoreRef
 
+    \/ \E n \in Node, k \in Key:
+        \/ DeleteKey(n, k)
+
+    \/ \E l \in LinkKey:
+        \/ Unlink(l)
+    \/ DisableUnlink
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
