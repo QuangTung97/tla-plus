@@ -1,15 +1,15 @@
 ------ MODULE GitlabStore ----
-EXTENDS TLC
+EXTENDS TLC, Naturals
 
 ---------------------------------------------------------------
 
-CONSTANTS Node, Key, LinkKey, nil
+CONSTANTS Node, Key, LinkKey, nil, max_num_restart
 
 VARIABLES
     store, store_ref, ws_links, locked,
     pc, local_key, local_link,
     job_pc, job_key, job_link,
-    enable_unlink
+    enable_unlink, num_restart
 
 local_vars == <<
     pc, local_key, local_link
@@ -23,7 +23,7 @@ vars == <<
     store, store_ref, ws_links, locked,
     local_vars,
     job_vars,
-    enable_unlink
+    enable_unlink, num_restart
 >>
 
 ---------------------------------------------------------------
@@ -56,6 +56,7 @@ TypeOK ==
     /\ job_link \in NullLinkKey
 
     /\ enable_unlink \in BOOLEAN
+    /\ num_restart \in 0..max_num_restart
 
 Init ==
     /\ store = {}
@@ -72,6 +73,7 @@ Init ==
     /\ job_link = nil
 
     /\ enable_unlink = TRUE
+    /\ num_restart = 0
 
 ---------------------------------------------------------------
 
@@ -90,6 +92,11 @@ setLocal(var, n, val) ==
     var' = [var EXCEPT ![n] = val]
 
 ---------------------------
+
+mainUnchanged ==
+    /\ UNCHANGED job_vars
+    /\ UNCHANGED enable_unlink
+    /\ UNCHANGED num_restart
 
 BeginClone(n, k, l) ==
     LET
@@ -112,16 +119,14 @@ BeginClone(n, k, l) ==
     /\ UNCHANGED ws_links
     /\ UNCHANGED store
     /\ UNCHANGED store_ref
-    /\ UNCHANGED job_vars
-    /\ UNCHANGED enable_unlink
+    /\ mainUnchanged
 
 ---------------------------
 
 unchangedLocalVars ==
     /\ UNCHANGED local_key
     /\ UNCHANGED local_link
-    /\ UNCHANGED job_vars
-    /\ UNCHANGED enable_unlink
+    /\ mainUnchanged
 
 CloneProject(n) ==
     LET
@@ -130,7 +135,7 @@ CloneProject(n) ==
     /\ pc[n] = "CloneProject"
     /\ goto(n, "SetStoreRef")
 
-    /\ store' = store \union {k} \* TODO clone fail
+    /\ store' = store \union {k}
 
     /\ unchangedLocalVars
     /\ UNCHANGED locked
@@ -169,10 +174,9 @@ LinkWorkspace(n) ==
     /\ setLocal(local_key, n, nil)
     /\ setLocal(local_link, n, nil)
 
-    /\ UNCHANGED job_vars
     /\ UNCHANGED store
     /\ UNCHANGED store_ref
-    /\ UNCHANGED enable_unlink
+    /\ mainUnchanged
 
 ---------------------------------------------------------------
 
@@ -185,6 +189,7 @@ jobUnchanged ==
     /\ UNCHANGED local_vars
     /\ UNCHANGED ws_links
     /\ UNCHANGED enable_unlink
+    /\ UNCHANGED num_restart
 
 StartFixLink(k, l) ==
     /\ job_pc = "Init"
@@ -225,6 +230,7 @@ deleteKeyUnchanged ==
     /\ UNCHANGED store_ref
     /\ UNCHANGED local_link
     /\ UNCHANGED enable_unlink
+    /\ UNCHANGED num_restart
 
 DeleteKey(n, k) ==
     /\ pc[n] = "Init"
@@ -253,26 +259,61 @@ DoDeleteKey(n) ==
 
 ---------------------------------------------------------------
 
+globalActionUnchanged ==
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED job_vars
+    /\ UNCHANGED locked
+    /\ UNCHANGED num_restart
+    /\ UNCHANGED <<store, store_ref>>
+
 Unlink(l) ==
     /\ enable_unlink
     /\ ws_links[l] # nil
     /\ ws_links' = [ws_links EXCEPT ![l] = nil]
 
-    /\ UNCHANGED local_vars
-    /\ UNCHANGED job_vars
+    /\ globalActionUnchanged
     /\ UNCHANGED enable_unlink
-    /\ UNCHANGED locked
-    /\ UNCHANGED <<store, store_ref>>
 
 
 DisableUnlink ==
     /\ enable_unlink
     /\ enable_unlink' = FALSE
 
-    /\ UNCHANGED local_vars
-    /\ UNCHANGED job_vars
-    /\ UNCHANGED locked
-    /\ UNCHANGED <<store, store_ref, ws_links>>
+    /\ globalActionUnchanged
+    /\ UNCHANGED ws_links
+
+---------------------------------------------------------------
+
+RestartNode(n) ==
+    LET
+        k == local_key[n]
+
+        node_unlock ==
+            IF k # nil
+                THEN locked \ {k}
+                ELSE locked
+
+        job_unlock ==
+            IF job_key # nil
+                THEN node_unlock \ {job_key}
+                ELSE node_unlock
+    IN
+    /\ num_restart < max_num_restart
+    /\ num_restart' = num_restart + 1
+
+    /\ job_pc' = "Init"
+    /\ job_key' = nil
+    /\ job_link' = nil
+
+    /\ pc' = [pc EXCEPT ![n] = "Init"]
+    /\ setLocal(local_key, n, nil)
+    /\ setLocal(local_link, n, nil)
+
+    /\ locked' = job_unlock
+
+    /\ UNCHANGED <<store, store_ref>>
+    /\ UNCHANGED ws_links
+    /\ UNCHANGED enable_unlink
 
 ---------------------------------------------------------------
 
@@ -281,6 +322,7 @@ TerminateCond ==
     /\ locked = {}
     /\ workspaceLinksMatched
     /\ ~enable_unlink
+    /\ num_restart = max_num_restart
 
 Terminated ==
     /\ TerminateCond
@@ -296,6 +338,7 @@ Next ==
         \/ SetStoreRef(n)
         \/ LinkWorkspace(n)
         \/ DoDeleteKey(n)
+        \/ RestartNode(n)
 
     \/ \E k \in Key, l \in LinkKey:
         \/ StartFixLink(k, l)
@@ -336,5 +379,10 @@ TerminatedInv ==
         \A n \in Node:
             /\ local_key[n] = nil
             /\ local_link[n] = nil
+
+
+LockedSetInv ==
+    \A n \in Node:
+        local_key[n] # nil => local_key[n] \in locked
 
 ====
