@@ -579,7 +579,7 @@ doDeleteReplica(id) ==
         is_waiting ==
             /\ job_id # nil
             /\ sync_jobs[job_id].status = "Waiting"
-        
+
         when_waiting ==
             /\ sync_jobs' = [sync_jobs EXCEPT ![job_id].status = "Ready"]
             /\ replicas' = update_to_need_delete(id, updated)
@@ -668,7 +668,7 @@ doRemoveExtraReplicaPrimary(r) ==
         id == r.id
 
         new_status ==
-            IF r.delete_status = "Deleted" THEN
+            IF r.delete_status = "Deleted" \/ r.status = "Empty" THEN
                 "CanDelete"
             ELSE IF is_replica_deleting(r) THEN
                 r.delete_status
@@ -677,6 +677,7 @@ doRemoveExtraReplicaPrimary(r) ==
 
         updated == [replicas EXCEPT
             ![id].delete_status = new_status,
+            ![id].status = "Written",
             ![id].hard_deleted = TRUE
         ]
     IN
