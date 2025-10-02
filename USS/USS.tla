@@ -426,14 +426,40 @@ RemoveDeleteRule(span) ==
 
 ----------------------------
 
+get_sync_job_of(id) ==
+    LET
+        job_set == {job_id \in SyncJobID: sync_jobs[job_id].dst_id = id}
+    IN
+        IF job_set = {}
+            THEN nil
+            ELSE CHOOSE job_id \in job_set: TRUE
+
+
 doApplyDeleteRule(span, id) ==
     LET
+        job_id == get_sync_job_of(id)
+        src_id == sync_jobs[job_id].src_id
+
+        src_is_deleted ==
+            /\ job_id # nil
+            /\ replicas[id].status = "Empty"
+            /\ replicas[src_id].delete_status = "Deleted"
+
+        set_fully_deleted ==
+            /\ sync_jobs' = [sync_jobs EXCEPT ![job_id].status = "Succeeded"]
+            /\ replicas' = [replicas EXCEPT
+                    ![id].status = "Written",
+                    ![id].delete_status = "Deleted"
+                ]
+
         updated == [replicas EXCEPT ![id].delete_status = "NeedDelete"]
     IN
     /\ replicas[id].delete_status = "NoAction"
     /\ replicas[id].span = span
 
-    /\ do_set_delete_status({id}, updated, sync_jobs)
+    /\ IF src_is_deleted
+        THEN set_fully_deleted
+        ELSE do_set_delete_status({id}, updated, sync_jobs)
 
     /\ UNCHANGED deleted_spans
 
@@ -461,15 +487,6 @@ UpdateToReadyDelete ==
     \E id \in ReplicaID: doUpdateToReadyDelete(id)
 
 ----------------------------
-
-get_sync_job_of(id) ==
-    LET
-        job_set == {job_id \in SyncJobID: sync_jobs[job_id].dst_id = id}
-    IN
-        IF job_set = {}
-            THEN nil
-            ELSE CHOOSE job_id \in job_set: TRUE
-
 
 doUpdateToDeleting(id) ==
     LET
