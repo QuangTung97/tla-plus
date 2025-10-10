@@ -1,16 +1,16 @@
 ------ MODULE RingBuffer ----
 EXTENDS TLC, Naturals, Sequences
 
-CONSTANTS Node, nil, buff_len
+CONSTANTS Node, nil, infinity, buff_len
 
 VARIABLES
     buffer, next_seq, pc,
     current_val, local_seq, local_val, god_log,
-    consume_pc, consume_seq, consume_log
+    consume_pc, consume_seq, consume_log, notify_seq
 
 node_vars == <<
     next_seq, pc,
-    current_val, local_seq, local_val, god_log
+    current_val, local_seq, local_val, god_log, notify_seq
 >>
 
 consume_vars == <<consume_pc, consume_seq, consume_log>>
@@ -30,7 +30,7 @@ Value == 20..29
 NullValue == Value \union {nil}
 
 Item == [
-    next: Sequence,
+    next: Sequence \union {infinity},
     data: NullValue
 ]
 
@@ -41,7 +41,7 @@ init_item == [
 
 PC == {
     "Init", "LoadConsumeSeq",
-    "WriteData", "MarkFinish",
+    "WriteData", "MarkFinish", "NotifyConsumer",
     "Terminated"
 }
 
@@ -58,9 +58,10 @@ TypeOK ==
 
     /\ god_log \in Seq(Value)
 
-    /\ consume_pc \in {"Init", "ReadData"}
+    /\ consume_pc \in {"Init", "WaitNotify", "ReadData"}
     /\ consume_seq \in Sequence
     /\ consume_log \in Seq(Value)
+    /\ notify_seq \in Sequence
 
 Init ==
     /\ buffer = [x \in 1..buff_len |-> init_item]
@@ -76,6 +77,7 @@ Init ==
     /\ consume_pc = "Init"
     /\ consume_seq = 0
     /\ consume_log = <<>>
+    /\ notify_seq = 0
 
 ---------------------------------------------------------
 
@@ -99,6 +101,7 @@ StartSend(n) ==
     /\ god_log' = Append(god_log, current_val')
 
     /\ UNCHANGED buffer
+    /\ UNCHANGED notify_seq
     /\ nodeUnchanged
 
 -----------------------
@@ -120,6 +123,7 @@ LoadConsumeSeq(n) ==
     /\ goto(n, "WriteData")
 
     /\ UNCHANGED buffer
+    /\ UNCHANGED notify_seq
     /\ unchangedLocal
 
 -----------------------
@@ -133,6 +137,7 @@ WriteData(n) ==
 
     /\ buffer' = [buffer EXCEPT ![pos].data = local_val[n]]
 
+    /\ UNCHANGED notify_seq
     /\ unchangedLocal
 
 -----------------------
@@ -140,12 +145,27 @@ WriteData(n) ==
 MarkFinish(n) ==
     LET
         pos == computeBufferPos(local_seq[n])
+        item == buffer[pos]
     IN
     /\ pc[n] = "MarkFinish"
-    /\ goto(n, "Terminated")
 
     /\ buffer' = [buffer EXCEPT ![pos].next = local_seq[n] + 1]
+    /\ IF item.next = infinity
+        THEN goto(n, "NotifyConsumer")
+        ELSE goto(n, "Terminated")
 
+    /\ UNCHANGED notify_seq
+    /\ unchangedLocal
+
+-----------------------
+
+NotifyConsumer(n) ==
+    /\ pc[n] = "NotifyConsumer"
+    /\ goto(n, "Terminated")
+
+    /\ notify_seq' = local_seq[n] + 1
+
+    /\ UNCHANGED buffer
     /\ unchangedLocal
 
 ---------------------------------------------------------
@@ -154,17 +174,38 @@ StartConsume ==
     LET
         pos == computeBufferPos(consume_seq)
         item == buffer[pos]
+
+        when_wait ==
+            /\ consume_pc' = "WaitNotify"
+            /\ buffer' = [buffer EXCEPT ![pos].next = infinity]
+
+        when_normal ==
+            /\ consume_pc' = "ReadData"
+            /\ UNCHANGED buffer
     IN
     /\ consume_pc = "Init"
-    /\ item.next # 0 \* TODO add waiting
+    /\ IF item.next = 0
+        THEN when_wait
+        ELSE when_normal
 
-    /\ consume_pc' = "ReadData"
-
-    /\ UNCHANGED buffer
     /\ UNCHANGED consume_seq
     /\ UNCHANGED consume_log
     /\ UNCHANGED node_vars
 
+-----------------------
+
+WaitNotify ==
+    /\ consume_pc = "WaitNotify"
+    /\ consume_seq < notify_seq
+
+    /\ consume_pc' = "Init"
+
+    /\ UNCHANGED consume_seq
+    /\ UNCHANGED consume_log
+    /\ UNCHANGED buffer
+    /\ UNCHANGED node_vars
+
+-----------------------
 
 ReadData ==
     LET
@@ -188,7 +229,7 @@ ReadData ==
 TerminateCond ==
     /\ \A n \in Node:
         pc[n] = "Terminated"
-    /\ consume_pc = "Init"
+    /\ consume_pc = "WaitNotify"
     /\ Len(consume_log) = Len(god_log)
 
 Terminated ==
@@ -202,13 +243,19 @@ Next ==
         \/ LoadConsumeSeq(n)
         \/ WriteData(n)
         \/ MarkFinish(n)
+        \/ NotifyConsumer(n)
     \/ StartConsume
+    \/ WaitNotify
     \/ ReadData
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ---------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
 
 BufferSizeInv == Len(buffer) = buff_len
 
