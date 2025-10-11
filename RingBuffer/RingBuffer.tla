@@ -6,7 +6,7 @@ CONSTANTS Node, nil, infinity, buff_len
 VARIABLES
     buffer, next_seq, pc,
     current_val, local_seq, local_val, god_log,
-    consume_pc, consume_seq, consume_log, notify_seq
+    consume_pc, consume_seq, consume_log, sema, notify_seq
 
 node_vars == <<
     next_seq, pc,
@@ -17,6 +17,7 @@ consume_vars == <<consume_pc, consume_seq, consume_log>>
 
 vars == <<
     buffer,
+    sema,
     node_vars,
     consume_vars
 >>
@@ -41,7 +42,7 @@ init_item == [
 
 PC == {
     "Init", "LoadConsumeSeq",
-    "WriteData", "MarkFinish", "NotifyConsumer",
+    "WriteData", "MarkFinish", "SemaRelease",
     "Terminated"
 }
 
@@ -58,9 +59,10 @@ TypeOK ==
 
     /\ god_log \in Seq(Value)
 
-    /\ consume_pc \in {"Init", "WaitNotify", "ReadData"}
+    /\ consume_pc \in {"Init", "SemaAcquire", "ReadData"}
     /\ consume_seq \in Sequence
     /\ consume_log \in Seq(Value)
+    /\ sema \in {0, 1}
     /\ notify_seq \in Sequence
 
 Init ==
@@ -77,6 +79,7 @@ Init ==
     /\ consume_pc = "Init"
     /\ consume_seq = 0
     /\ consume_log = <<>>
+    /\ sema = 0
     /\ notify_seq = 0
 
 ---------------------------------------------------------
@@ -101,6 +104,7 @@ StartSend(n) ==
     /\ god_log' = Append(god_log, current_val')
 
     /\ UNCHANGED buffer
+    /\ UNCHANGED sema
     /\ UNCHANGED notify_seq
     /\ nodeUnchanged
 
@@ -118,11 +122,12 @@ unchangedLocal ==
 
 LoadConsumeSeq(n) ==
     /\ pc[n] = "LoadConsumeSeq"
-    /\ local_seq[n] < consume_seq + buff_len
+    /\ local_seq[n] < consume_seq + buff_len \* TODO wait
 
     /\ goto(n, "WriteData")
 
     /\ UNCHANGED buffer
+    /\ UNCHANGED sema
     /\ UNCHANGED notify_seq
     /\ unchangedLocal
 
@@ -138,6 +143,7 @@ WriteData(n) ==
     /\ buffer' = [buffer EXCEPT ![pos].data = local_val[n]]
 
     /\ UNCHANGED notify_seq
+    /\ UNCHANGED sema
     /\ unchangedLocal
 
 -----------------------
@@ -151,21 +157,23 @@ MarkFinish(n) ==
 
     /\ buffer' = [buffer EXCEPT ![pos].next = local_seq[n] + 1]
     /\ IF item.next = infinity
-        THEN goto(n, "NotifyConsumer")
+        THEN goto(n, "SemaRelease")
         ELSE goto(n, "Terminated")
 
+    /\ UNCHANGED sema
     /\ UNCHANGED notify_seq
     /\ unchangedLocal
 
 -----------------------
 
-NotifyConsumer(n) ==
-    /\ pc[n] = "NotifyConsumer"
+SemaRelease(n) ==
+    /\ pc[n] = "SemaRelease"
     /\ goto(n, "Terminated")
 
-    /\ notify_seq' = local_seq[n] + 1
+    /\ sema' = sema + 1
 
     /\ UNCHANGED buffer
+    /\ UNCHANGED notify_seq
     /\ unchangedLocal
 
 ---------------------------------------------------------
@@ -176,7 +184,7 @@ StartConsume ==
         item == buffer[pos]
 
         when_wait ==
-            /\ consume_pc' = "WaitNotify"
+            /\ consume_pc' = "SemaAcquire"
             /\ buffer' = [buffer EXCEPT ![pos].next = infinity]
 
         when_normal ==
@@ -188,16 +196,17 @@ StartConsume ==
         THEN when_wait
         ELSE when_normal
 
+    /\ UNCHANGED sema
     /\ UNCHANGED consume_seq
     /\ UNCHANGED consume_log
     /\ UNCHANGED node_vars
 
 -----------------------
 
-WaitNotify ==
-    /\ consume_pc = "WaitNotify"
-    /\ consume_seq < notify_seq
-
+SemaAcquire ==
+    /\ consume_pc = "SemaAcquire"
+    /\ sema > 0
+    /\ sema' = sema - 1
     /\ consume_pc' = "Init"
 
     /\ UNCHANGED consume_seq
@@ -222,6 +231,7 @@ ReadData ==
         ]
     /\ consume_log' = Append(consume_log, item.data)
 
+    /\ UNCHANGED sema
     /\ UNCHANGED node_vars
 
 ---------------------------------------------------------
@@ -229,7 +239,8 @@ ReadData ==
 TerminateCond ==
     /\ \A n \in Node:
         pc[n] = "Terminated"
-    /\ consume_pc = "WaitNotify"
+    /\ consume_pc = "SemaAcquire"
+    /\ sema = 0
     /\ Len(consume_log) = Len(god_log)
 
 Terminated ==
@@ -243,9 +254,9 @@ Next ==
         \/ LoadConsumeSeq(n)
         \/ WriteData(n)
         \/ MarkFinish(n)
-        \/ NotifyConsumer(n)
+        \/ SemaRelease(n)
     \/ StartConsume
-    \/ WaitNotify
+    \/ SemaAcquire
     \/ ReadData
     \/ Terminated
 
