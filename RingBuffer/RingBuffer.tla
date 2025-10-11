@@ -6,11 +6,13 @@ CONSTANTS Node, nil, infinity, buff_len
 VARIABLES
     buffer, next_seq, pc,
     current_val, local_seq, local_val, god_log,
-    consume_pc, consume_seq, consume_log, sema, notify_seq
+    consume_pc, consume_seq, consume_log,
+    sema, notify_seq, max_wait_seq
 
 node_vars == <<
     next_seq, pc,
-    current_val, local_seq, local_val, god_log
+    current_val, local_seq, local_val, god_log,
+    max_wait_seq
 >>
 
 consume_vars == <<consume_pc, consume_log>>
@@ -71,6 +73,7 @@ TypeOK ==
     /\ consume_log \in Seq(Value)
     /\ sema \in {0, 1}
     /\ notify_seq \in Sequence
+    /\ max_wait_seq \in Sequence
 
 Init ==
     /\ buffer = [x \in 1..buff_len |-> init_item]
@@ -88,11 +91,13 @@ Init ==
     /\ consume_log = <<>>
     /\ sema = 0
     /\ notify_seq = 0
+    /\ max_wait_seq = 0
 
 ---------------------------------------------------------
 
 nodeUnchanged ==
     /\ UNCHANGED consume_vars
+    /\ UNCHANGED notify_seq
 
 goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
@@ -112,7 +117,7 @@ StartSend(n) ==
 
     /\ UNCHANGED buffer
     /\ UNCHANGED sema
-    /\ UNCHANGED notify_seq
+    /\ UNCHANGED max_wait_seq
     /\ UNCHANGED consume_seq
     /\ nodeUnchanged
 
@@ -126,17 +131,23 @@ unchangedLocal ==
     /\ UNCHANGED current_val
     /\ UNCHANGED next_seq
     /\ UNCHANGED god_log
-    /\ UNCHANGED notify_seq
 
 LoadConsumeSeq(n) ==
     LET
         when_allow ==
             /\ goto(n, "WriteData")
             /\ UNCHANGED consume_seq
+            /\ UNCHANGED max_wait_seq
+
+        wait_seq == local_seq[n] - buff_len
 
         when_block ==
             /\ goto(n, "WaitNotifySeq")
             /\ consume_seq' = [consume_seq EXCEPT !.waiting = TRUE]
+            /\ max_wait_seq' =
+                IF wait_seq > max_wait_seq
+                    THEN wait_seq
+                    ELSE max_wait_seq
     IN
     /\ pc[n] = "LoadConsumeSeq"
 
@@ -159,6 +170,7 @@ WaitNotifySeq(n) ==
     /\ UNCHANGED buffer
     /\ UNCHANGED consume_seq
     /\ UNCHANGED sema
+    /\ UNCHANGED max_wait_seq
     /\ unchangedLocal
 
 -----------------------
@@ -174,6 +186,7 @@ WriteData(n) ==
 
     /\ UNCHANGED sema
     /\ UNCHANGED consume_seq
+    /\ UNCHANGED max_wait_seq
     /\ unchangedLocal
 
 -----------------------
@@ -192,6 +205,7 @@ MarkFinish(n) ==
 
     /\ UNCHANGED sema
     /\ UNCHANGED consume_seq
+    /\ UNCHANGED max_wait_seq
     /\ unchangedLocal
 
 -----------------------
@@ -204,6 +218,7 @@ SemaRelease(n) ==
 
     /\ UNCHANGED buffer
     /\ UNCHANGED consume_seq
+    /\ UNCHANGED max_wait_seq
     /\ unchangedLocal
 
 ---------------------------------------------------------
@@ -273,12 +288,18 @@ ReadData ==
 -----------------------
 
 SetNotifySeq ==
+    LET
+        clear_waiting ==
+            consume_seq' = [consume_seq EXCEPT !.waiting = FALSE]
+    IN
     /\ consume_pc = "SetNotifySeq"
     /\ consume_pc' = "Init"
 
     /\ notify_seq' = consume_seq.seq
+    /\ IF notify_seq' > max_wait_seq
+        THEN clear_waiting
+        ELSE UNCHANGED consume_seq
 
-    /\ UNCHANGED consume_seq
     /\ UNCHANGED consume_log
     /\ UNCHANGED buffer
     /\ UNCHANGED sema
