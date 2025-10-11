@@ -10,21 +10,22 @@ VARIABLES
 
 node_vars == <<
     next_seq, pc,
-    current_val, local_seq, local_val, god_log, notify_seq
+    current_val, local_seq, local_val, god_log
 >>
 
-consume_vars == <<consume_pc, consume_seq, consume_log>>
+consume_vars == <<consume_pc, consume_log>>
 
 vars == <<
     buffer,
     sema,
     node_vars,
+    consume_seq, notify_seq,
     consume_vars
 >>
 
 ---------------------------------------------------------
 
-Sequence == 0..15
+Sequence == 0..10
 NullSeq == Sequence \union {nil}
 
 Value == 20..29
@@ -43,8 +44,14 @@ init_item == [
 PC == {
     "Init", "LoadConsumeSeq",
     "WriteData", "MarkFinish", "SemaRelease",
+    "WaitNotifySeq",
     "Terminated"
 }
+
+ConsumeSeq == [
+    seq: Sequence,
+    waiting: BOOLEAN
+]
 
 ---------------------------------------------------------
 
@@ -59,8 +66,8 @@ TypeOK ==
 
     /\ god_log \in Seq(Value)
 
-    /\ consume_pc \in {"Init", "SemaAcquire", "ReadData"}
-    /\ consume_seq \in Sequence
+    /\ consume_pc \in {"Init", "SemaAcquire", "ReadData", "SetNotifySeq"}
+    /\ consume_seq \in ConsumeSeq
     /\ consume_log \in Seq(Value)
     /\ sema \in {0, 1}
     /\ notify_seq \in Sequence
@@ -77,7 +84,7 @@ Init ==
     /\ god_log = <<>>
 
     /\ consume_pc = "Init"
-    /\ consume_seq = 0
+    /\ consume_seq = [seq |-> 0, waiting |-> FALSE]
     /\ consume_log = <<>>
     /\ sema = 0
     /\ notify_seq = 0
@@ -106,6 +113,7 @@ StartSend(n) ==
     /\ UNCHANGED buffer
     /\ UNCHANGED sema
     /\ UNCHANGED notify_seq
+    /\ UNCHANGED consume_seq
     /\ nodeUnchanged
 
 -----------------------
@@ -118,17 +126,39 @@ unchangedLocal ==
     /\ UNCHANGED current_val
     /\ UNCHANGED next_seq
     /\ UNCHANGED god_log
-
+    /\ UNCHANGED notify_seq
 
 LoadConsumeSeq(n) ==
-    /\ pc[n] = "LoadConsumeSeq"
-    /\ local_seq[n] < consume_seq + buff_len \* TODO wait
+    LET
+        when_allow ==
+            /\ goto(n, "WriteData")
+            /\ UNCHANGED consume_seq
 
-    /\ goto(n, "WriteData")
+        when_block ==
+            /\ goto(n, "WaitNotifySeq")
+            /\ consume_seq' = [consume_seq EXCEPT !.waiting = TRUE]
+    IN
+    /\ pc[n] = "LoadConsumeSeq"
+
+    /\ IF local_seq[n] < consume_seq.seq + buff_len
+        THEN when_allow
+        ELSE when_block
 
     /\ UNCHANGED buffer
     /\ UNCHANGED sema
-    /\ UNCHANGED notify_seq
+    /\ unchangedLocal
+
+-----------------------
+
+WaitNotifySeq(n) ==
+    /\ pc[n] = "WaitNotifySeq"
+    /\ local_seq[n] < notify_seq + buff_len
+
+    /\ goto(n, "LoadConsumeSeq")
+
+    /\ UNCHANGED buffer
+    /\ UNCHANGED consume_seq
+    /\ UNCHANGED sema
     /\ unchangedLocal
 
 -----------------------
@@ -142,8 +172,8 @@ WriteData(n) ==
 
     /\ buffer' = [buffer EXCEPT ![pos].data = local_val[n]]
 
-    /\ UNCHANGED notify_seq
     /\ UNCHANGED sema
+    /\ UNCHANGED consume_seq
     /\ unchangedLocal
 
 -----------------------
@@ -161,7 +191,7 @@ MarkFinish(n) ==
         ELSE goto(n, "Terminated")
 
     /\ UNCHANGED sema
-    /\ UNCHANGED notify_seq
+    /\ UNCHANGED consume_seq
     /\ unchangedLocal
 
 -----------------------
@@ -173,14 +203,14 @@ SemaRelease(n) ==
     /\ sema' = sema + 1
 
     /\ UNCHANGED buffer
-    /\ UNCHANGED notify_seq
+    /\ UNCHANGED consume_seq
     /\ unchangedLocal
 
 ---------------------------------------------------------
 
 StartConsume ==
     LET
-        pos == computeBufferPos(consume_seq)
+        pos == computeBufferPos(consume_seq.seq)
         item == buffer[pos]
 
         when_wait ==
@@ -199,6 +229,7 @@ StartConsume ==
     /\ UNCHANGED sema
     /\ UNCHANGED consume_seq
     /\ UNCHANGED consume_log
+    /\ UNCHANGED notify_seq
     /\ UNCHANGED node_vars
 
 -----------------------
@@ -212,25 +243,46 @@ SemaAcquire ==
     /\ UNCHANGED consume_seq
     /\ UNCHANGED consume_log
     /\ UNCHANGED buffer
+    /\ UNCHANGED notify_seq
     /\ UNCHANGED node_vars
 
 -----------------------
 
 ReadData ==
     LET
-        pos == computeBufferPos(consume_seq)
+        pos == computeBufferPos(consume_seq.seq)
         item == buffer[pos]
     IN
     /\ consume_pc = "ReadData"
-    /\ consume_pc' = "Init"
 
-    /\ consume_seq' = item.next
+    /\ consume_seq' = [consume_seq EXCEPT
+            !.seq = item.next,
+            !.waiting = FALSE
+        ]
     /\ buffer' = [buffer EXCEPT
             ![pos].next = 0,
             ![pos].data = nil
         ]
     /\ consume_log' = Append(consume_log, item.data)
 
+    /\ IF consume_seq.waiting
+        THEN consume_pc' = "SetNotifySeq"
+        ELSE consume_pc' = "Init"
+
+    /\ UNCHANGED sema
+    /\ UNCHANGED notify_seq
+    /\ UNCHANGED node_vars
+
+-----------------------
+
+SetNotifySeq ==
+    /\ consume_pc = "SetNotifySeq"
+    /\ consume_pc' = "Init"
+    /\ notify_seq' = consume_seq.seq
+
+    /\ UNCHANGED consume_seq
+    /\ UNCHANGED consume_log
+    /\ UNCHANGED buffer
     /\ UNCHANGED sema
     /\ UNCHANGED node_vars
 
@@ -242,6 +294,7 @@ TerminateCond ==
     /\ consume_pc = "SemaAcquire"
     /\ sema = 0
     /\ Len(consume_log) = Len(god_log)
+    /\ consume_seq.waiting = FALSE
 
 Terminated ==
     /\ TerminateCond
@@ -252,12 +305,14 @@ Next ==
     \/ \E n \in Node:
         \/ StartSend(n)
         \/ LoadConsumeSeq(n)
+        \/ WaitNotifySeq(n)
         \/ WriteData(n)
         \/ MarkFinish(n)
         \/ SemaRelease(n)
     \/ StartConsume
     \/ SemaAcquire
     \/ ReadData
+    \/ SetNotifySeq
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
