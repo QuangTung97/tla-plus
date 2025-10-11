@@ -255,10 +255,7 @@ ReadData ==
     IN
     /\ consume_pc = "ReadData"
 
-    /\ consume_seq' = [consume_seq EXCEPT
-            !.seq = item.next,
-            !.waiting = FALSE
-        ]
+    /\ consume_seq' = [consume_seq EXCEPT !.seq = item.next]
     /\ buffer' = [buffer EXCEPT
             ![pos].next = 0,
             ![pos].data = nil
@@ -278,6 +275,7 @@ ReadData ==
 SetNotifySeq ==
     /\ consume_pc = "SetNotifySeq"
     /\ consume_pc' = "Init"
+
     /\ notify_seq' = consume_seq.seq
 
     /\ UNCHANGED consume_seq
