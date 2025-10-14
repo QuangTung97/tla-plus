@@ -151,6 +151,10 @@ Running(n) ==
 serverUnchanged ==
     /\ UNCHANGED <<pc, local_conn>>
 
+serverConnHasData(conn) ==
+    /\ conn \in server_conns
+    /\ global_conns[conn].send # <<>>
+
 doServerRecvInit(conn) ==
     LET
         remove_send == [global_conns EXCEPT ![conn].send = Tail(@)]
@@ -171,7 +175,7 @@ doServerRecvInit(conn) ==
             /\ pause_nodes' = pause_nodes \union {req.node}
             /\ UNCHANGED active_nodes
     IN
-    /\ global_conns[conn].send # <<>>
+    /\ serverConnHasData(conn)
     /\ req.type = "Init"
 
     /\ conn_node' = [conn_node EXCEPT ![conn] = req.node]
@@ -217,7 +221,7 @@ doServerRecvFinish(conn) ==
                 /\ active_nodes' = active_removed \union {n1}
                 /\ global_conns' = send_resp(n1)
     IN
-    /\ global_conns[conn].send # <<>>
+    /\ serverConnHasData(conn)
     /\ req.type = "Finish"
 
     /\ server_conns' = server_conns \ {conn}
@@ -231,6 +235,23 @@ doServerRecvFinish(conn) ==
 ServerRecvFinish ==
     \E conn \in Conn:
         doServerRecvFinish(conn)
+
+---------------------------------
+
+doDisconnectConn(conn) ==
+    /\ conn \in server_conns
+    /\ server_conns' = server_conns \ {conn}
+
+    /\ UNCHANGED active_nodes
+    /\ UNCHANGED pause_nodes
+    /\ UNCHANGED global_conns
+    /\ UNCHANGED conn_node
+
+    /\ serverUnchanged
+
+DisconnectConn ==
+    \E conn \in Conn:
+        doDisconnectConn(conn)
 
 -----------------------------------------------------------
 
@@ -256,6 +277,7 @@ Next ==
         \/ Running(n)
     \/ ServerRecvInit
     \/ ServerRecvFinish
+    \/ DisconnectConn
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
