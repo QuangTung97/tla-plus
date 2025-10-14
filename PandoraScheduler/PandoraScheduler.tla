@@ -6,13 +6,13 @@ CONSTANTS Node, nil, max_active
 VARIABLES
     global_conns,
     pc, local_conn,
-    server_conns, conn_node,
+    conn_node,
     active_nodes, pause_nodes
 
 vars == <<
     global_conns,
     pc, local_conn,
-    server_conns, conn_node,
+    conn_node,
     active_nodes, pause_nodes
 >>
 
@@ -39,7 +39,8 @@ Response == [
 
 ConnObj == [
     send: Seq(Request),
-    recv: Seq(Response)
+    recv: Seq(Response),
+    closed: BOOLEAN
 ]
 
 Conn == DOMAIN global_conns
@@ -53,7 +54,6 @@ TypeOK ==
     /\ global_conns \in Seq(ConnObj)
     /\ pc \in [Node -> PC]
     /\ local_conn \in [Node -> NullConn]
-    /\ server_conns \subseteq Conn
     /\ conn_node \in [Conn -> NullNode]
     /\ active_nodes \subseteq Node
     /\ pause_nodes \subseteq Node
@@ -63,7 +63,6 @@ Init ==
     /\ global_conns = <<>>
     /\ pc = [n \in Node |-> "Init"]
     /\ local_conn = [n \in Node |-> nil]
-    /\ server_conns = {}
     /\ conn_node = <<>>
     /\ active_nodes = {}
     /\ pause_nodes = {}
@@ -77,7 +76,8 @@ NewConn(n) ==
     LET
         new_conn == [
             send |-> <<>>,
-            recv |-> <<>>
+            recv |-> <<>>,
+            closed |-> FALSE
         ]
         conn == Len(global_conns')
     IN
@@ -85,14 +85,12 @@ NewConn(n) ==
     /\ goto(n, "SendInit")
     /\ global_conns' = Append(global_conns, new_conn)
     /\ conn_node' = Append(conn_node, nil)
-    /\ server_conns' = server_conns \union {conn}
     /\ local_conn' = [local_conn EXCEPT ![n] = conn]
     /\ UNCHANGED <<active_nodes, pause_nodes>>
 
 ---------------------------------
 
 nodeUnchanged ==
-    /\ UNCHANGED server_conns
     /\ UNCHANGED conn_node
     /\ UNCHANGED active_nodes
     /\ UNCHANGED pause_nodes
@@ -104,12 +102,22 @@ SendInit(n) ==
             type |-> "Init",
             node |-> n
         ]
+
+        when_normal ==
+            /\ ~global_conns[conn].closed
+            /\ goto(n, "WaitScheduler")
+            /\ global_conns' = [global_conns EXCEPT
+                    ![conn].send = Append(@, req)
+                ]
+
+        when_closed ==
+            /\ global_conns[conn].closed
+            /\ goto(n, "Terminated")
+            /\ UNCHANGED global_conns
     IN
     /\ pc[n] = "SendInit"
-    /\ goto(n, "WaitScheduler")
-    /\ global_conns' = [global_conns EXCEPT
-            ![conn].send = Append(@, req)
-        ]
+    /\ \/ when_normal
+       \/ when_closed
 
     /\ UNCHANGED local_conn
     /\ nodeUnchanged
@@ -120,12 +128,20 @@ WaitScheduler(n) ==
     LET
         conn == local_conn[n]
         recv == global_conns[conn].recv
+
+        when_normal ==
+            /\ recv # <<>>
+            /\ goto(n, "Running")
+            /\ global_conns' = [global_conns EXCEPT ![conn].recv = Tail(@)]
+
+        when_closed ==
+            /\ global_conns[conn].closed
+            /\ goto(n, "Terminated")
+            /\ UNCHANGED global_conns
     IN
     /\ pc[n] = "WaitScheduler"
-    /\ recv # <<>>
-
-    /\ goto(n, "Running")
-    /\ global_conns' = [global_conns EXCEPT ![conn].recv = Tail(@)]
+    /\ \/ when_normal
+       \/ when_closed
 
     /\ UNCHANGED local_conn
     /\ nodeUnchanged
@@ -141,7 +157,11 @@ Running(n) ==
     IN
     /\ pc[n] = "Running"
     /\ goto(n, "Terminated")
-    /\ global_conns' = [global_conns EXCEPT ![conn].send = Append(@, req)]
+    /\ IF global_conns[conn].closed
+        THEN UNCHANGED global_conns
+        ELSE global_conns' = [global_conns EXCEPT
+                ![conn].send = Append(@, req)
+            ]
 
     /\ UNCHANGED local_conn
     /\ nodeUnchanged
@@ -152,8 +172,11 @@ serverUnchanged ==
     /\ UNCHANGED <<pc, local_conn>>
 
 serverConnHasData(conn) ==
-    /\ conn \in server_conns
+    /\ ~global_conns[conn].closed
     /\ global_conns[conn].send # <<>>
+
+serverConnClosed(conn) ==
+    /\ global_conns[conn].closed
 
 doServerRecvInit(conn) ==
     LET
@@ -183,7 +206,6 @@ doServerRecvInit(conn) ==
         THEN when_normal
         ELSE when_pause
 
-    /\ UNCHANGED server_conns
     /\ serverUnchanged
 
 ServerRecvInit ==
@@ -211,9 +233,18 @@ doServerRecvFinish(conn) ==
 
         conn_of_node(n1) == CHOOSE c1 \in Conn: conn_node[c1] = n1
 
-        send_resp(n1) == [remove_send EXCEPT
-                ![conn_of_node(n1)].recv = Append(@, resp)
-        ]
+        send_resp(n1) ==
+            LET
+                c1 == conn_of_node(n1)
+                is_closed == remove_send[c1].closed
+
+                do_send == [remove_send EXCEPT
+                    ![c1].recv = Append(@, resp)
+                ]
+            IN
+                IF is_closed
+                    THEN remove_send
+                    ELSE do_send
 
         when_with_pause ==
             \E n1 \in pause_nodes:
@@ -224,7 +255,6 @@ doServerRecvFinish(conn) ==
     /\ serverConnHasData(conn)
     /\ req.type = "Finish"
 
-    /\ server_conns' = server_conns \ {conn}
     /\ conn_node' = [conn_node EXCEPT ![conn] = nil]
     /\ IF pause_nodes = {}
         THEN when_no_pause
@@ -238,13 +268,37 @@ ServerRecvFinish ==
 
 ---------------------------------
 
+doServerCloseConn(conn) ==
+    LET
+        n == conn_node[conn]
+    IN
+    /\ serverConnClosed(conn)
+
+    /\ conn_node[conn] # nil
+    /\ conn_node' = [conn_node EXCEPT ![conn] = nil]
+
+    /\ active_nodes' = active_nodes \ {n}
+    /\ pause_nodes' = pause_nodes \ {n}
+
+    /\ UNCHANGED global_conns
+    /\ serverUnchanged
+
+ServerCloseConn ==
+    \E conn \in Conn:
+        doServerCloseConn(conn)
+
+---------------------------------
+
 doDisconnectConn(conn) ==
-    /\ conn \in server_conns
-    /\ server_conns' = server_conns \ {conn}
+    /\ ~global_conns[conn].closed
+    /\ global_conns' = [global_conns EXCEPT
+            ![conn].closed = TRUE,
+            ![conn].send = <<>>,
+            ![conn].recv = <<>>
+        ]
 
     /\ UNCHANGED active_nodes
     /\ UNCHANGED pause_nodes
-    /\ UNCHANGED global_conns
     /\ UNCHANGED conn_node
 
     /\ serverUnchanged
@@ -260,7 +314,6 @@ TerminateCond ==
     /\ \A c \in Conn:
         /\ global_conns[c].send = <<>>
         /\ global_conns[c].recv = <<>>
-    /\ server_conns = {}
     /\ active_nodes = {}
     /\ pause_nodes = {}
     /\ \A c \in Conn: conn_node[c] = nil
@@ -278,6 +331,7 @@ Next ==
     \/ ServerRecvInit
     \/ ServerRecvFinish
     \/ DisconnectConn
+    \/ ServerCloseConn
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -298,5 +352,11 @@ NodeConnInv ==
         active_conns == {c \in Conn: conn_node[c] # nil}
     IN
         {conn_node[c]: c \in active_conns} = active_nodes \union pause_nodes
+
+ConnClosedInv ==
+    \A c \in Conn:
+        global_conns[c].closed =>
+            /\ global_conns[c].send = <<>>
+            /\ global_conns[c].recv = <<>>
 
 ====
