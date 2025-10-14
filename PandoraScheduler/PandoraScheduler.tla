@@ -1,17 +1,19 @@
 ------ MODULE PandoraScheduler ----
-EXTENDS TLC, Sequences
+EXTENDS TLC, Sequences, Naturals, FiniteSets
 
 CONSTANTS Node, nil, max_active
 
 VARIABLES
     global_conns,
     pc, local_conn,
-    server_conns, conn_node, active_nodes
+    server_conns, conn_node,
+    active_nodes, pause_nodes
 
 vars == <<
     global_conns,
     pc, local_conn,
-    server_conns, conn_node, active_nodes
+    server_conns, conn_node,
+    active_nodes, pause_nodes
 >>
 
 -----------------------------------------------------------
@@ -54,6 +56,8 @@ TypeOK ==
     /\ server_conns \subseteq Conn
     /\ conn_node \in [Conn -> NullNode]
     /\ active_nodes \subseteq Node
+    /\ pause_nodes \subseteq Node
+    /\ active_nodes \intersect pause_nodes = {}
 
 Init ==
     /\ global_conns = <<>>
@@ -62,6 +66,7 @@ Init ==
     /\ server_conns = {}
     /\ conn_node = <<>>
     /\ active_nodes = {}
+    /\ pause_nodes = {}
 
 -----------------------------------------------------------
 
@@ -82,7 +87,7 @@ NewConn(n) ==
     /\ conn_node' = Append(conn_node, nil)
     /\ server_conns' = server_conns \union {conn}
     /\ local_conn' = [local_conn EXCEPT ![n] = conn]
-    /\ UNCHANGED active_nodes
+    /\ UNCHANGED <<active_nodes, pause_nodes>>
 
 ---------------------------------
 
@@ -90,6 +95,7 @@ nodeUnchanged ==
     /\ UNCHANGED server_conns
     /\ UNCHANGED conn_node
     /\ UNCHANGED active_nodes
+    /\ UNCHANGED pause_nodes
 
 SendInit(n) ==
     LET
@@ -154,13 +160,24 @@ doServerRecvInit(conn) ==
             type |-> "Start"
         ]
         send_resp == [remove_send EXCEPT ![conn].recv = Append(@, resp)]
+
+        when_normal ==
+            /\ global_conns' = send_resp
+            /\ active_nodes' = active_nodes \union {req.node}
+            /\ UNCHANGED pause_nodes
+
+        when_pause ==
+            /\ global_conns' = remove_send
+            /\ pause_nodes' = pause_nodes \union {req.node}
+            /\ UNCHANGED active_nodes
     IN
     /\ global_conns[conn].send # <<>>
     /\ req.type = "Init"
 
-    /\ global_conns' = send_resp
-    /\ active_nodes' = active_nodes \union {req.node}
     /\ conn_node' = [conn_node EXCEPT ![conn] = req.node]
+    /\ IF Cardinality(active_nodes) < max_active
+        THEN when_normal
+        ELSE when_pause
 
     /\ UNCHANGED server_conns
     /\ serverUnchanged
@@ -175,14 +192,39 @@ doServerRecvFinish(conn) ==
     LET
         req == global_conns[conn].send[1]
         n == conn_node[conn]
+
+        remove_send == [global_conns EXCEPT ![conn].send = Tail(@)]
+        active_removed == active_nodes \ {n}
+
+        when_no_pause ==
+            /\ global_conns' = remove_send
+            /\ active_nodes' = active_removed
+            /\ UNCHANGED pause_nodes
+
+        resp == [
+            type |-> "Start"
+        ]
+
+        conn_of_node(n1) == CHOOSE c1 \in Conn: conn_node[c1] = n1
+
+        send_resp(n1) == [remove_send EXCEPT
+                ![conn_of_node(n1)].recv = Append(@, resp)
+        ]
+
+        when_with_pause ==
+            \E n1 \in pause_nodes:
+                /\ pause_nodes' = pause_nodes \ {n1}
+                /\ active_nodes' = active_removed \union {n1}
+                /\ global_conns' = send_resp(n1)
     IN
     /\ global_conns[conn].send # <<>>
     /\ req.type = "Finish"
 
-    /\ global_conns' = [global_conns EXCEPT ![conn].send = Tail(@)]
-    /\ active_nodes' = active_nodes \ {n}
     /\ server_conns' = server_conns \ {conn}
     /\ conn_node' = [conn_node EXCEPT ![conn] = nil]
+    /\ IF pause_nodes = {}
+        THEN when_no_pause
+        ELSE when_with_pause
 
     /\ serverUnchanged
 
@@ -199,6 +241,7 @@ TerminateCond ==
         /\ global_conns[c].recv = <<>>
     /\ server_conns = {}
     /\ active_nodes = {}
+    /\ pause_nodes = {}
     /\ \A c \in Conn: conn_node[c] = nil
 
 Terminated ==
@@ -217,6 +260,21 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 -----------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
+
+
+MaxActiveInv ==
+    Cardinality(active_nodes) <= max_active
+
+
+NodeConnInv ==
+    LET
+        active_conns == {c \in Conn: conn_node[c] # nil}
+    IN
+        {conn_node[c]: c \in active_conns} = active_nodes \union pause_nodes
 
 ====
