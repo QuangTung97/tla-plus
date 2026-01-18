@@ -1,23 +1,29 @@
 ------ MODULE WAL ----
 EXTENDS TLC, Naturals, Sequences
 
-CONSTANTS max_num_value, num_page, nil
+CONSTANTS max_num_value, num_page, nil, max_restart
 
 VARIABLES
     status, mem_wal, disk_wal,
     latest_page, current_val,
-    mem_values, god_values
+    mem_values, god_values,
+    num_restart
 
 vars == <<
     status, mem_wal, disk_wal,
     latest_page, current_val,
-    mem_values, god_values
+    mem_values, god_values,
+    num_restart
 >>
+
+--------------------------------------------------------------------------
 
 seq_remove(s, i) == SubSeq(s, 1, i - 1) \o SubSeq(s, i + 1, Len(s))
 ASSUME seq_remove(<<3, 4, 5, 6>>, 2) = <<3, 5, 6>>
 ASSUME seq_remove(<<3, 4>>, 2) = <<3>>
 ASSUME seq_remove(<<5, 6>>, 1) = <<6>>
+
+-------------------
 
 put_at_pos(s, pos, v) ==
     LET
@@ -36,6 +42,31 @@ put_at_pos(s, pos, v) ==
 ASSUME put_at_pos(<<>>, 2, 3) = <<nil, 3>>
 ASSUME put_at_pos(<<5, 6, 7>>, 3, 9) = <<5, 6, 9>>
 ASSUME put_at_pos(<<5, 6, 7>>, 5, 9) = <<5, 6, 7, nil, 9>>
+
+-------------------
+
+seq_get_sub(s, i, j) ==
+    IF j < i
+        THEN <<>>
+        ELSE SubSeq(s, i, j)
+
+ASSUME seq_get_sub(<<2, 3, 4>>, 1, 2) = <<2, 3>>
+ASSUME seq_get_sub(<<>>, 1, 0) = <<>>
+ASSUME seq_get_sub(<<5, 6, 7>>, 1, 1) = <<5>>
+
+-------------------
+
+RECURSIVE first_nil_pos(_)
+first_nil_pos(s) ==
+    IF s = <<>> THEN
+        1
+    ELSE IF s[1] = nil THEN
+        1
+    ELSE
+        1 + first_nil_pos(Tail(s))
+
+ASSUME first_nil_pos(<<3, 4, 5>>) = 4
+ASSUME first_nil_pos(<<3, 4, 5, nil, nil, 6>>) = 4
 
 --------------------------------------------------------------------------
 
@@ -72,6 +103,7 @@ TypeOK ==
 
     /\ mem_values \in Seq(NullValue)
     /\ god_values \in Seq(NullValue)
+    /\ num_restart \in 0..max_restart
 
 Init ==
     /\ mem_wal = <<>>
@@ -82,6 +114,7 @@ Init ==
 
     /\ mem_values = <<>>
     /\ god_values = <<>>
+    /\ num_restart = 0
 
 --------------------------------------------------------------------------
 
@@ -94,7 +127,9 @@ Recover ==
         page == disk_wal[index]
 
         when_equal ==
-            /\ latest_page' = pos \* TODO
+            /\ latest_page' = pos
+            /\ mem_values' = put_at_pos(mem_values, pos, page.val)
+            /\ UNCHANGED status
 
         when_not_equal ==
             /\ status' = "Ready"
@@ -109,6 +144,7 @@ Recover ==
     /\ UNCHANGED disk_wal
     /\ UNCHANGED current_val
     /\ UNCHANGED god_values
+    /\ UNCHANGED num_restart
 
 
 AddToLog ==
@@ -128,6 +164,7 @@ AddToLog ==
     /\ UNCHANGED status
     /\ UNCHANGED disk_wal
     /\ UNCHANGED <<mem_values, god_values>>
+    /\ UNCHANGED num_restart
 
 
 doFlushToDisk(i) ==
@@ -149,6 +186,20 @@ FlushToDisk ==
     /\ UNCHANGED status
     /\ UNCHANGED current_val
     /\ UNCHANGED latest_page
+    /\ UNCHANGED num_restart
+
+
+Restart ==
+    /\ num_restart < max_restart
+    /\ num_restart' = num_restart + 1
+    /\ status' = "Init"
+    /\ mem_wal' = <<>>
+    /\ latest_page' = 0 \* TODO
+    /\ mem_values' = <<>>
+    /\ god_values' = seq_get_sub(god_values, 1, first_nil_pos(god_values) - 1)
+
+    /\ UNCHANGED current_val
+    /\ UNCHANGED disk_wal
 
 
 --------------------------------------------------------------------------
@@ -166,6 +217,7 @@ Next ==
     \/ Recover
     \/ AddToLog
     \/ FlushToDisk
+    \/ Restart
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -173,6 +225,6 @@ Spec == Init /\ [][Next]_vars
 --------------------------------------------------------------------------
 
 Consistency ==
-    mem_values = god_values
+    status = "Ready" => mem_values = god_values
 
 ====
