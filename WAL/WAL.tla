@@ -135,7 +135,7 @@ Recover ==
         page == disk_wal[index]
 
         when_equal ==
-            /\ current' = [current EXCEPT !.num = page_num]
+            /\ current' = page.pos
             /\ mem_values' = put_at_pos(mem_values, page_num, page)
             /\ UNCHANGED status
             /\ UNCHANGED checkpoint
@@ -151,9 +151,14 @@ Recover ==
             /\ checkpoint' = current'
             /\ UNCHANGED mem_values
 
+        cond ==
+            /\ page.pos.gen = current.gen
+            /\ page.pos.num = current.num + 1
+            /\ page.prev = current.seq
+
     IN
     /\ status = "Init"
-    /\ IF page.pos.gen = current.gen /\ page.pos.num = page_num \* TODO
+    /\ IF cond
         THEN when_equal
         ELSE when_not_equal
     /\ UNCHANGED mem_wal
@@ -184,7 +189,7 @@ AddToLog ==
         do_update ==
             /\ mem_wal = <<>>
             /\ current.num > 0
-            /\ UNCHANGED current
+            /\ current' = inc_seq
             /\ mem_wal' = Append(mem_wal, update_entry)
     IN
     /\ status = "Ready"
@@ -230,9 +235,14 @@ flushed_lsn ==
         ELSE mem_wal[1].pos.num - 1
 
 IncreaseCheckpoint ==
+    LET
+        new_num == checkpoint.num + 1
+        index == pos_to_index(new_num)
+        new_seq == disk_wal[index].pos.seq
+    IN
     /\ status = "Ready"
     /\ checkpoint.num < flushed_lsn
-    /\ checkpoint' = [checkpoint EXCEPT !.num = @ + 1]
+    /\ checkpoint' = [checkpoint EXCEPT !.num = new_num, !.seq = new_seq]
 
     /\ UNCHANGED current
     /\ UNCHANGED current_val
@@ -318,5 +328,8 @@ LogPrevInv ==
         IF i > 1
             THEN god_values[i].prev = god_values[i - 1].pos.seq
             ELSE god_values[i].prev = 0
+
+
+\* TODO add terminate inv
 
 ====
