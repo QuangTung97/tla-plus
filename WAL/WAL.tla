@@ -5,13 +5,17 @@ CONSTANTS max_num_value, num_page, nil, max_restart
 
 VARIABLES
     status, mem_wal, disk_wal,
-    latest_page, checkpoint_lsn, current_val,
+    latest_page, generation,
+    checkpoint_lsn, checkpoint_generation,
+    current_val,
     mem_values, god_values,
     num_restart
 
 vars == <<
     status, mem_wal, disk_wal,
-    latest_page, checkpoint_lsn, current_val,
+    latest_page, generation,
+    checkpoint_lsn, checkpoint_generation,
+    current_val,
     mem_values, god_values,
     num_restart
 >>
@@ -80,17 +84,19 @@ PageIndex == 1..num_page
 
 PageNum == 0..(3 * num_page)
 
+Generation == 0..(1 + max_restart)
+
 Page == [
+    gen: Generation,
     num: PageNum,
     val: NullValue
 ]
 
 init_page == [
+    gen |-> 0,
     num |-> 0,
     val |-> nil
 ]
-
-PC == {"Init", "Terminated"}
 
 --------------------------------------------------------------------------
 
@@ -99,7 +105,9 @@ TypeOK ==
     /\ disk_wal \in [PageIndex -> Page]
     /\ status \in {"Init", "Ready"}
     /\ latest_page \in PageNum
+    /\ generation \in Generation
     /\ checkpoint_lsn \in PageNum
+    /\ checkpoint_generation \in Generation
     /\ current_val \in Value
 
     /\ mem_values \in Seq(NullValue)
@@ -111,7 +119,9 @@ Init ==
     /\ disk_wal = [x \in PageIndex |-> init_page]
     /\ status = "Init"
     /\ latest_page = 0
+    /\ generation = 0
     /\ checkpoint_lsn = 0
+    /\ checkpoint_generation = 0
     /\ current_val = 20
 
     /\ mem_values = <<>>
@@ -132,14 +142,16 @@ Recover ==
             /\ latest_page' = pos
             /\ mem_values' = put_at_pos(mem_values, pos, page.val)
             /\ UNCHANGED status
+            /\ UNCHANGED generation
 
         when_not_equal ==
             /\ status' = "Ready"
+            /\ generation' = generation + 1
             /\ UNCHANGED latest_page
             /\ UNCHANGED mem_values
     IN
     /\ status = "Init"
-    /\ IF page.num = pos
+    /\ IF page.gen >= generation /\ page.num = pos
         THEN when_equal
         ELSE when_not_equal
     /\ UNCHANGED mem_wal
@@ -147,12 +159,13 @@ Recover ==
     /\ UNCHANGED current_val
     /\ UNCHANGED god_values
     /\ UNCHANGED num_restart
-    /\ UNCHANGED checkpoint_lsn
+    /\ UNCHANGED <<checkpoint_lsn, checkpoint_generation>>
 
 
 AddToLog ==
     LET
         entry == [
+            gen |-> generation,
             num |-> latest_page',
             val |-> current_val'
         ]
@@ -168,8 +181,8 @@ AddToLog ==
     /\ UNCHANGED status
     /\ UNCHANGED disk_wal
     /\ UNCHANGED <<mem_values, god_values>>
-    /\ UNCHANGED num_restart
-    /\ UNCHANGED checkpoint_lsn
+    /\ UNCHANGED <<num_restart, generation>>
+    /\ UNCHANGED <<checkpoint_lsn, checkpoint_generation>>
 
 
 doFlushToDisk(i) ==
@@ -191,8 +204,8 @@ FlushToDisk ==
     /\ UNCHANGED status
     /\ UNCHANGED current_val
     /\ UNCHANGED latest_page
-    /\ UNCHANGED num_restart
-    /\ UNCHANGED checkpoint_lsn
+    /\ UNCHANGED <<num_restart, generation>>
+    /\ UNCHANGED <<checkpoint_lsn, checkpoint_generation>>
 
 
 flushed_lsn ==
@@ -205,6 +218,7 @@ IncreaseCheckpoint ==
     /\ status = "Ready"
     /\ checkpoint_lsn < flushed_lsn
     /\ checkpoint_lsn' = checkpoint_lsn + 1
+    /\ checkpoint_generation' = generation
 
     /\ UNCHANGED current_val
     /\ UNCHANGED latest_page
@@ -212,7 +226,7 @@ IncreaseCheckpoint ==
     /\ UNCHANGED status
     /\ UNCHANGED mem_wal
     /\ UNCHANGED disk_wal
-    /\ UNCHANGED num_restart
+    /\ UNCHANGED <<num_restart, generation>>
 
 
 Restart ==
@@ -221,12 +235,13 @@ Restart ==
     /\ status' = "Init"
     /\ mem_wal' = <<>>
     /\ latest_page' = checkpoint_lsn
+    /\ generation' = checkpoint_generation
     /\ mem_values' = seq_get_sub(mem_values, 1, checkpoint_lsn)
     /\ god_values' = seq_get_sub(god_values, 1, first_nil_pos(god_values) - 1)
 
     /\ UNCHANGED current_val
     /\ UNCHANGED disk_wal
-    /\ UNCHANGED checkpoint_lsn
+    /\ UNCHANGED <<checkpoint_lsn, checkpoint_generation>>
 
 
 --------------------------------------------------------------------------
@@ -254,5 +269,11 @@ Spec == Init /\ [][Next]_vars
 
 Consistency ==
     status = "Ready" => mem_values = god_values
+
+
+LogAlwaysIncrease ==
+    \A i, j \in DOMAIN god_values:
+        i < j /\ god_values[i] # nil /\ god_values[j] # nil
+            => god_values[i] < god_values[j]
 
 ====
