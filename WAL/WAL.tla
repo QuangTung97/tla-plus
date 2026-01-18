@@ -5,13 +5,13 @@ CONSTANTS max_num_value, num_page, nil, max_restart
 
 VARIABLES
     status, mem_wal, disk_wal,
-    latest_page, current_val,
+    latest_page, checkpoint_lsn, current_val,
     mem_values, god_values,
     num_restart
 
 vars == <<
     status, mem_wal, disk_wal,
-    latest_page, current_val,
+    latest_page, checkpoint_lsn, current_val,
     mem_values, god_values,
     num_restart
 >>
@@ -99,6 +99,7 @@ TypeOK ==
     /\ disk_wal \in [PageIndex -> Page]
     /\ status \in {"Init", "Ready"}
     /\ latest_page \in PageNum
+    /\ checkpoint_lsn \in PageNum
     /\ current_val \in Value
 
     /\ mem_values \in Seq(NullValue)
@@ -110,6 +111,7 @@ Init ==
     /\ disk_wal = [x \in PageIndex |-> init_page]
     /\ status = "Init"
     /\ latest_page = 0
+    /\ checkpoint_lsn = 0
     /\ current_val = 20
 
     /\ mem_values = <<>>
@@ -145,6 +147,7 @@ Recover ==
     /\ UNCHANGED current_val
     /\ UNCHANGED god_values
     /\ UNCHANGED num_restart
+    /\ UNCHANGED checkpoint_lsn
 
 
 AddToLog ==
@@ -156,6 +159,7 @@ AddToLog ==
     IN
     /\ status = "Ready"
     /\ current_val < max_value
+    /\ latest_page < checkpoint_lsn + num_page
     /\ current_val' = current_val + 1
     /\ latest_page' = latest_page + 1
 
@@ -165,6 +169,7 @@ AddToLog ==
     /\ UNCHANGED disk_wal
     /\ UNCHANGED <<mem_values, god_values>>
     /\ UNCHANGED num_restart
+    /\ UNCHANGED checkpoint_lsn
 
 
 doFlushToDisk(i) ==
@@ -187,6 +192,27 @@ FlushToDisk ==
     /\ UNCHANGED current_val
     /\ UNCHANGED latest_page
     /\ UNCHANGED num_restart
+    /\ UNCHANGED checkpoint_lsn
+
+
+flushed_lsn ==
+    IF mem_wal = <<>>
+        THEN latest_page
+        ELSE mem_wal[1].num - 1
+
+
+IncreaseCheckpoint ==
+    /\ status = "Ready"
+    /\ checkpoint_lsn < flushed_lsn
+    /\ checkpoint_lsn' = checkpoint_lsn + 1
+
+    /\ UNCHANGED current_val
+    /\ UNCHANGED latest_page
+    /\ UNCHANGED <<mem_values, god_values>>
+    /\ UNCHANGED status
+    /\ UNCHANGED mem_wal
+    /\ UNCHANGED disk_wal
+    /\ UNCHANGED num_restart
 
 
 Restart ==
@@ -194,12 +220,13 @@ Restart ==
     /\ num_restart' = num_restart + 1
     /\ status' = "Init"
     /\ mem_wal' = <<>>
-    /\ latest_page' = 0 \* TODO
-    /\ mem_values' = <<>>
+    /\ latest_page' = checkpoint_lsn
+    /\ mem_values' = seq_get_sub(mem_values, 1, checkpoint_lsn)
     /\ god_values' = seq_get_sub(god_values, 1, first_nil_pos(god_values) - 1)
 
     /\ UNCHANGED current_val
     /\ UNCHANGED disk_wal
+    /\ UNCHANGED checkpoint_lsn
 
 
 --------------------------------------------------------------------------
@@ -217,6 +244,7 @@ Next ==
     \/ Recover
     \/ AddToLog
     \/ FlushToDisk
+    \/ IncreaseCheckpoint
     \/ Restart
     \/ Terminated
 
