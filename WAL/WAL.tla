@@ -7,7 +7,7 @@ VARIABLES
     status, mem_wal, disk_wal,
     latest_page, generation,
     checkpoint_lsn, checkpoint_generation,
-    current_val,
+    last_val, current_val,
     mem_values, god_values,
     num_restart
 
@@ -15,7 +15,7 @@ vars == <<
     status, mem_wal, disk_wal,
     latest_page, generation,
     checkpoint_lsn, checkpoint_generation,
-    current_val,
+    last_val, current_val,
     mem_values, god_values,
     num_restart
 >>
@@ -89,13 +89,22 @@ Generation == 0..(1 + max_restart)
 Page == [
     gen: Generation,
     num: PageNum,
-    val: NullValue
+    val: NullValue,
+    prev: NullValue
 ]
+
+ValuePair == [
+    val: Value,
+    prev: NullValue
+]
+
+NullValuePair == ValuePair \union {nil}
 
 init_page == [
     gen |-> 0,
     num |-> 0,
-    val |-> nil
+    val |-> nil,
+    prev |-> nil
 ]
 
 --------------------------------------------------------------------------
@@ -108,10 +117,11 @@ TypeOK ==
     /\ generation \in Generation
     /\ checkpoint_lsn \in PageNum
     /\ checkpoint_generation \in Generation
+    /\ last_val \in NullValue
     /\ current_val \in Value
 
-    /\ mem_values \in Seq(NullValue)
-    /\ god_values \in Seq(NullValue)
+    /\ mem_values \in Seq(NullValuePair)
+    /\ god_values \in Seq(NullValuePair)
     /\ num_restart \in 0..max_restart
 
 Init ==
@@ -122,6 +132,7 @@ Init ==
     /\ generation = 0
     /\ checkpoint_lsn = 0
     /\ checkpoint_generation = 0
+    /\ last_val = nil
     /\ current_val = 20
 
     /\ mem_values = <<>>
@@ -137,19 +148,30 @@ Recover ==
         pos == latest_page + 1
         index == pos_to_index(pos)
         page == disk_wal[index]
+        pair == [
+            val |-> page.val,
+            prev |-> page.prev
+        ]
 
         when_equal ==
             /\ latest_page' = pos
-            /\ mem_values' = put_at_pos(mem_values, pos, page.val)
+            /\ mem_values' = put_at_pos(mem_values, pos, pair)
             /\ UNCHANGED status
             /\ UNCHANGED generation
             /\ UNCHANGED <<checkpoint_generation, checkpoint_lsn>>
+            /\ UNCHANGED last_val
+
+        get_last_val ==
+            IF mem_values # <<>>
+                THEN mem_values[Len(mem_values)].val
+                ELSE nil
 
         when_not_equal ==
             /\ status' = "Ready"
             /\ generation' = generation + 1
             /\ checkpoint_generation' = generation'
             /\ checkpoint_lsn' = latest_page
+            /\ last_val' = get_last_val
             /\ UNCHANGED latest_page
             /\ UNCHANGED mem_values
     IN
@@ -169,16 +191,30 @@ AddToLog ==
         entry == [
             gen |-> generation,
             num |-> latest_page',
-            val |-> current_val'
+            val |-> current_val',
+            prev |-> last_val
         ]
+
+        do_append ==
+            /\ latest_page < checkpoint_lsn + num_page
+            /\ latest_page' = latest_page + 1
+            /\ mem_wal' = Append(mem_wal, entry)
+
+        last_entry == god_values[Len(god_values)]
+        update_entry == [entry EXCEPT !.prev = last_entry.prev]
+
+        do_update ==
+            /\ mem_wal = <<>>
+            /\ latest_page > 0
+            /\ UNCHANGED latest_page
+            /\ mem_wal' = Append(mem_wal, update_entry)
     IN
     /\ status = "Ready"
     /\ current_val < max_value
-    /\ latest_page < checkpoint_lsn + num_page
     /\ current_val' = current_val + 1
-    /\ latest_page' = latest_page + 1
-
-    /\ mem_wal' = Append(mem_wal, entry)
+    /\ last_val' = current_val'
+    /\ \/ do_append
+       \/ do_update
 
     /\ UNCHANGED status
     /\ UNCHANGED disk_wal
@@ -191,12 +227,16 @@ doFlushToDisk(i) ==
     LET
         p == mem_wal[i]
         index == pos_to_index(p.num)
+        pair == [
+            val |-> p.val,
+            prev |-> p.prev
+        ]
     IN
     /\ mem_wal' = seq_remove(mem_wal, i)
     /\ disk_wal' = [disk_wal EXCEPT ![index] = p]
 
-    /\ mem_values' = put_at_pos(mem_values, p.num, p.val)
-    /\ god_values' = put_at_pos(god_values, p.num, p.val)
+    /\ mem_values' = put_at_pos(mem_values, p.num, pair)
+    /\ god_values' = put_at_pos(god_values, p.num, pair)
 
 FlushToDisk ==
     /\ status = "Ready"
@@ -206,6 +246,7 @@ FlushToDisk ==
     /\ UNCHANGED status
     /\ UNCHANGED current_val
     /\ UNCHANGED latest_page
+    /\ UNCHANGED last_val
     /\ UNCHANGED <<num_restart, generation>>
     /\ UNCHANGED <<checkpoint_lsn, checkpoint_generation>>
 
@@ -227,6 +268,7 @@ IncreaseCheckpoint ==
     /\ UNCHANGED mem_wal
     /\ UNCHANGED disk_wal
     /\ UNCHANGED <<num_restart, generation, checkpoint_generation>>
+    /\ UNCHANGED last_val
 
 
 Restart ==
@@ -238,6 +280,7 @@ Restart ==
     /\ generation' = checkpoint_generation
     /\ mem_values' = seq_get_sub(mem_values, 1, checkpoint_lsn)
     /\ god_values' = seq_get_sub(god_values, 1, first_nil_pos(god_values) - 1)
+    /\ last_val' = nil
 
     /\ UNCHANGED current_val
     /\ UNCHANGED disk_wal
@@ -278,6 +321,16 @@ Consistency ==
 LogAlwaysIncrease ==
     \A i, j \in DOMAIN god_values:
         i < j /\ god_values[i] # nil /\ god_values[j] # nil
-            => god_values[i] < god_values[j]
+            => god_values[i].val < god_values[j].val
+
+
+LogPrevInv ==
+    LET
+        last_index == first_nil_pos(god_values) - 1
+    IN
+    \A i \in 1..last_index:
+        IF i > 1
+            THEN god_values[i].prev = god_values[i - 1].val
+            ELSE god_values[i].prev = nil
 
 ====
