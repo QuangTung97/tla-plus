@@ -82,7 +82,7 @@ NullValue == Value \union {nil}
 
 PageIndex == 1..num_page
 
-PageNum == 0..(3 * num_page)
+PageNum == 0..max_value
 
 Generation == 0..(1 + max_restart)
 
@@ -143,15 +143,18 @@ Recover ==
             /\ mem_values' = put_at_pos(mem_values, pos, page.val)
             /\ UNCHANGED status
             /\ UNCHANGED generation
+            /\ UNCHANGED <<checkpoint_generation, checkpoint_lsn>>
 
         when_not_equal ==
             /\ status' = "Ready"
             /\ generation' = generation + 1
+            /\ checkpoint_generation' = generation'
+            /\ checkpoint_lsn' = latest_page
             /\ UNCHANGED latest_page
             /\ UNCHANGED mem_values
     IN
     /\ status = "Init"
-    /\ IF page.gen >= generation /\ page.num = pos
+    /\ IF page.gen = generation /\ page.num = pos
         THEN when_equal
         ELSE when_not_equal
     /\ UNCHANGED mem_wal
@@ -159,7 +162,6 @@ Recover ==
     /\ UNCHANGED current_val
     /\ UNCHANGED god_values
     /\ UNCHANGED num_restart
-    /\ UNCHANGED <<checkpoint_lsn, checkpoint_generation>>
 
 
 AddToLog ==
@@ -213,12 +215,10 @@ flushed_lsn ==
         THEN latest_page
         ELSE mem_wal[1].num - 1
 
-
 IncreaseCheckpoint ==
     /\ status = "Ready"
     /\ checkpoint_lsn < flushed_lsn
     /\ checkpoint_lsn' = checkpoint_lsn + 1
-    /\ checkpoint_generation' = generation
 
     /\ UNCHANGED current_val
     /\ UNCHANGED latest_page
@@ -226,7 +226,7 @@ IncreaseCheckpoint ==
     /\ UNCHANGED status
     /\ UNCHANGED mem_wal
     /\ UNCHANGED disk_wal
-    /\ UNCHANGED <<num_restart, generation>>
+    /\ UNCHANGED <<num_restart, generation, checkpoint_generation>>
 
 
 Restart ==
@@ -242,7 +242,6 @@ Restart ==
     /\ UNCHANGED current_val
     /\ UNCHANGED disk_wal
     /\ UNCHANGED <<checkpoint_lsn, checkpoint_generation>>
-
 
 --------------------------------------------------------------------------
 
@@ -265,7 +264,12 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 --------------------------------------------------------------------------
+
+AlwaysTerminated == []<> TerminateCond
+
 
 Consistency ==
     status = "Ready" => mem_values = god_values
