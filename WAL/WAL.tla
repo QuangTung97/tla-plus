@@ -6,14 +6,14 @@ CONSTANTS max_num_value, num_page, nil, max_restart
 VARIABLES
     status, mem_wal, disk_wal,
     current, checkpoint,
-    current_val, prev_non_full,
+    current_val, previous_val, prev_non_full,
     mem_values, god_values,
     num_restart
 
 vars == <<
     status, mem_wal, disk_wal,
     current, checkpoint,
-    current_val, prev_non_full,
+    current_val, previous_val, prev_non_full,
     mem_values, god_values,
     num_restart
 >>
@@ -83,7 +83,8 @@ init_position == [
 Page == [
     pos: Position,
     non_full: BOOLEAN,
-    val: NullValue
+    val: NullValue,
+    prev: NullValue
 ]
 
 NullPage == Page \union {nil}
@@ -91,7 +92,8 @@ NullPage == Page \union {nil}
 init_page == [
     pos |-> init_position,
     non_full |-> FALSE,
-    val |-> nil
+    val |-> nil,
+    prev |-> nil
 ]
 
 --------------------------------------------------------------------------
@@ -103,6 +105,7 @@ TypeOK ==
     /\ current \in Position
     /\ checkpoint \in Position
     /\ current_val \in Value
+    /\ previous_val \in Seq(Value)
     /\ prev_non_full \in BOOLEAN
 
     /\ mem_values \in Seq(NullPage)
@@ -116,6 +119,7 @@ Init ==
     /\ current = init_position
     /\ checkpoint = init_position
     /\ current_val = 20
+    /\ previous_val = <<20>>
     /\ prev_non_full = FALSE
 
     /\ mem_values = <<>>
@@ -165,6 +169,7 @@ Recover ==
     /\ UNCHANGED current_val
     /\ UNCHANGED god_values
     /\ UNCHANGED num_restart
+    /\ UNCHANGED previous_val
 
 
 AddToLog(non_full) ==
@@ -172,22 +177,34 @@ AddToLog(non_full) ==
         entry == [
             pos |-> current',
             non_full |-> non_full,
-            val |-> current_val'
+            val |-> current_val',
+            prev |-> "invalid"
+        ]
+
+        append_entry == [entry EXCEPT
+            !.prev = previous_val[Len(previous_val)]
         ]
 
         do_append ==
             /\ current.num < checkpoint.num + num_page
             /\ current' = [current EXCEPT !.num = @ + 1]
-            /\ mem_wal' = Append(mem_wal, entry)
+            /\ previous_val' = Append(previous_val, current_val')
+            /\ mem_wal' = Append(mem_wal, append_entry)
 
         last == Len(mem_wal)
         last_entry == mem_wal[last]
 
+        update_entry == [entry EXCEPT
+            !.prev = previous_val[Len(previous_val) - 1]
+        ]
+
         do_update ==
             /\ UNCHANGED current
-            /\ IF last > 0 /\ last_entry.pos.num = entry.pos.num
-                THEN mem_wal' = [mem_wal EXCEPT ![last] = entry]
-                ELSE mem_wal' = Append(mem_wal, entry)
+            /\ previous_val' = [previous_val EXCEPT
+                    ![Len(previous_val)] = current_val']
+            /\ IF last > 0 /\ last_entry.pos.num = update_entry.pos.num
+                THEN mem_wal' = [mem_wal EXCEPT ![last] = update_entry]
+                ELSE mem_wal' = Append(mem_wal, update_entry)
     IN
     /\ status = "Ready"
     /\ current_val < max_value
@@ -226,6 +243,7 @@ FlushToDisk ==
     /\ UNCHANGED current
     /\ UNCHANGED num_restart
     /\ UNCHANGED checkpoint
+    /\ UNCHANGED previous_val
     /\ UNCHANGED prev_non_full
 
 
@@ -247,6 +265,7 @@ IncreaseCheckpoint ==
     /\ UNCHANGED mem_wal
     /\ UNCHANGED disk_wal
     /\ UNCHANGED num_restart
+    /\ UNCHANGED previous_val
 
 
 RECURSIVE find_first_non_valid(_)
@@ -261,19 +280,25 @@ find_first_non_valid(values) ==
     ELSE
         1 + find_first_non_valid(Tail(values))
 
-Restart ==
+highest_valid_pos ==
     LET
-        sub_values == seq_get_sub(god_values, checkpoint.num + 1, Len(god_values))
-        highest_pos == checkpoint.num + find_first_non_valid(sub_values) - 1
+        sub_values == seq_get_sub(
+            god_values, checkpoint.num + 1, Len(god_values))
     IN
+    checkpoint.num + find_first_non_valid(sub_values) - 1
+
+Restart ==
     /\ num_restart < max_restart
     /\ num_restart' = num_restart + 1
     /\ status' = "Init"
     /\ mem_wal' = <<>>
     /\ current' = checkpoint
     /\ mem_values' = seq_get_sub(mem_values, 1, checkpoint.num)
-    /\ god_values' = seq_get_sub(god_values, 1, highest_pos)
+    /\ god_values' = seq_get_sub(god_values, 1, highest_valid_pos)
     /\ prev_non_full' = FALSE
+    /\ IF highest_valid_pos > 0
+        THEN previous_val' = <<god_values[highest_valid_pos].val>>
+        ELSE previous_val' = <<20>>
 
     /\ UNCHANGED current_val
     /\ UNCHANGED disk_wal
@@ -319,6 +344,12 @@ LogAlwaysIncrease ==
 
 MemValuesLessThanGodValues ==
     Len(mem_values) <= Len(god_values)
+
+
+LogPreviousValInv ==
+    \A i \in 1..highest_valid_pos:
+        i > 1 /\ god_values[i] # nil /\ god_values[i - 1] # nil
+            => god_values[i].prev = god_values[i - 1].val
 
 
 CheckPointInv ==
