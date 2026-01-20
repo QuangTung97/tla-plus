@@ -5,14 +5,14 @@ CONSTANTS max_num_value, num_page, nil, max_restart
 
 VARIABLES
     status, mem_wal, disk_wal,
-    current, checkpoint,
+    current, checkpoint, latest_gen,
     current_val, previous_val, prev_non_full,
     mem_values, god_values,
     num_restart
 
 vars == <<
     status, mem_wal, disk_wal,
-    current, checkpoint,
+    current, checkpoint, latest_gen,
     current_val, previous_val, prev_non_full,
     mem_values, god_values,
     num_restart
@@ -103,7 +103,8 @@ TypeOK ==
     /\ disk_wal \in [PageIndex -> Page]
     /\ status \in {"Init", "Ready"}
     /\ current \in Position
-    /\ checkpoint \in Position
+    /\ checkpoint \in PageNum
+    /\ latest_gen \in Generation
     /\ current_val \in Value
     /\ previous_val \in Seq(Value)
     /\ prev_non_full \in BOOLEAN
@@ -117,8 +118,9 @@ Init ==
     /\ disk_wal = [x \in PageIndex |-> init_page]
     /\ status = "Init"
     /\ current = init_position
-    /\ checkpoint = init_position
     /\ current_val = 20
+    /\ checkpoint = 0
+    /\ latest_gen = 0
     /\ previous_val = <<20>>
     /\ prev_non_full = FALSE
 
@@ -141,7 +143,7 @@ Recover ==
             /\ mem_values' = put_at_pos(mem_values, page_num, page)
             /\ prev_non_full' = page.non_full
             /\ UNCHANGED status
-            /\ UNCHANGED checkpoint
+            /\ UNCHANGED latest_gen
 
         get_last_val ==
             IF mem_values # <<>>
@@ -150,20 +152,21 @@ Recover ==
 
         when_not_equal ==
             /\ status' = "Ready"
-            /\ current' = [current EXCEPT !.gen = @ + 1]
-            /\ checkpoint' = current'
-            /\ prev_non_full' = FALSE
+            /\ latest_gen' = latest_gen + 1
+            /\ current' = [current EXCEPT !.gen = latest_gen']
             /\ UNCHANGED mem_values
+            /\ UNCHANGED prev_non_full
 
         cond ==
             /\ ~prev_non_full
-            /\ page.pos.gen = current.gen
+            /\ page.pos.gen >= current.gen
             /\ page.pos.num = current.num + 1
     IN
     /\ status = "Init"
     /\ IF cond
         THEN when_equal
         ELSE when_not_equal
+    /\ UNCHANGED checkpoint
     /\ UNCHANGED mem_wal
     /\ UNCHANGED disk_wal
     /\ UNCHANGED current_val
@@ -186,7 +189,8 @@ AddToLog(non_full) ==
         ]
 
         do_append ==
-            /\ current.num < checkpoint.num + num_page
+            \* Plus one to avoid overwrite checkpoint page
+            /\ current.num + 1 < checkpoint + num_page
             /\ current' = [current EXCEPT !.num = @ + 1]
             /\ previous_val' = Append(previous_val, current_val')
             /\ mem_wal' = Append(mem_wal, append_entry)
@@ -219,6 +223,7 @@ AddToLog(non_full) ==
     /\ UNCHANGED <<mem_values, god_values>>
     /\ UNCHANGED num_restart
     /\ UNCHANGED checkpoint
+    /\ UNCHANGED latest_gen
 
 
 doFlushToDisk(i) ==
@@ -243,6 +248,7 @@ FlushToDisk ==
     /\ UNCHANGED current
     /\ UNCHANGED num_restart
     /\ UNCHANGED checkpoint
+    /\ UNCHANGED latest_gen
     /\ UNCHANGED previous_val
     /\ UNCHANGED prev_non_full
 
@@ -254,8 +260,8 @@ flushed_lsn ==
 
 IncreaseCheckpoint ==
     /\ status = "Ready"
-    /\ checkpoint.num + 1 < flushed_lsn \* skip the latest page
-    /\ checkpoint' = [checkpoint EXCEPT !.num = @ + 1]
+    /\ checkpoint < flushed_lsn
+    /\ checkpoint' = checkpoint + 1
 
     /\ UNCHANGED current
     /\ UNCHANGED current_val
@@ -265,6 +271,7 @@ IncreaseCheckpoint ==
     /\ UNCHANGED mem_wal
     /\ UNCHANGED disk_wal
     /\ UNCHANGED num_restart
+    /\ UNCHANGED latest_gen
     /\ UNCHANGED previous_val
 
 
@@ -281,28 +288,41 @@ find_first_non_valid(values) ==
         1 + find_first_non_valid(Tail(values))
 
 highest_valid_pos ==
-    LET
-        sub_values == seq_get_sub(
-            god_values, checkpoint.num + 1, Len(god_values))
-    IN
-    checkpoint.num + find_first_non_valid(sub_values) - 1
+    find_first_non_valid(god_values) - 1
 
 Restart ==
+    LET
+        cp_index == pos_to_index(checkpoint)
+
+        new_prev_non_full ==
+            IF checkpoint > 0
+                THEN disk_wal[cp_index].non_full
+                ELSE FALSE
+
+        loaded_gen ==
+            IF checkpoint > 0
+                THEN disk_wal[cp_index].pos.gen
+                ELSE 0
+
+        new_current == [
+            gen |-> loaded_gen,
+            num |-> checkpoint
+        ]
+    IN
     /\ num_restart < max_restart
     /\ num_restart' = num_restart + 1
     /\ status' = "Init"
     /\ mem_wal' = <<>>
-    /\ current' = checkpoint
-    /\ mem_values' = seq_get_sub(mem_values, 1, checkpoint.num)
+    /\ current' = new_current
+    /\ mem_values' = seq_get_sub(mem_values, 1, checkpoint)
     /\ god_values' = seq_get_sub(god_values, 1, highest_valid_pos)
-    /\ prev_non_full' = FALSE
-    /\ IF highest_valid_pos > 0
-        THEN previous_val' = <<god_values[highest_valid_pos].val>>
-        ELSE previous_val' = <<20>>
+    /\ prev_non_full' = new_prev_non_full
+    /\ previous_val' = seq_get_sub(previous_val, 1, highest_valid_pos + 1)
 
     /\ UNCHANGED current_val
     /\ UNCHANGED disk_wal
     /\ UNCHANGED checkpoint
+    /\ UNCHANGED latest_gen
 
 --------------------------------------------------------------------------
 
@@ -353,7 +373,7 @@ LogPreviousValInv ==
 
 
 CheckPointInv ==
-    checkpoint.num <= Len(god_values)
+    checkpoint <= Len(god_values)
 
 
 TerminateInv ==
