@@ -1,19 +1,23 @@
 ------ MODULE DirectSync ----
 EXTENDS TLC, Naturals, Sequences
 
-CONSTANTS max_val, nil
+CONSTANTS nil, max_val, max_sync_restart
 
 VARIABLES
     local_disk, nfs_disk,
     local_mem_val, local_db_val, local_pc,
     current_req,
-    job_map
+    job_map,
+    db,
+    num_sync_restart
 
 vars == <<
     local_disk, nfs_disk,
     local_mem_val, local_db_val, local_pc,
     current_req,
-    job_map
+    job_map,
+    db,
+    num_sync_restart
 >>
 
 disk_vars == <<local_disk, nfs_disk>>
@@ -21,6 +25,8 @@ disk_vars == <<local_disk, nfs_disk>>
 local_vars == <<local_disk, local_mem_val, local_db_val, local_pc, current_req>>
 
 sync_vars == <<job_map>>
+
+core_vars == <<db>>
 
 ----------------------------------------------------------------
 
@@ -32,10 +38,15 @@ RequestID == 30..34
 
 Job == [
     id: RequestID,
-    status: {"Pending", "Syncing", "Finished"}
+    status: {"Pending", "Syncing", "Finished"},
+    val: NullValue
 ]
 
 NullJob == Job \union {nil}
+
+CoreDB == [
+    val: Value
+]
 
 ----------------------------------------------------------------
 
@@ -48,6 +59,9 @@ TypeOK ==
     /\ current_req \in RequestID
 
     /\ job_map \in [RequestID -> NullJob]
+    /\ db \in CoreDB
+
+    /\ num_sync_restart \in 0..max_sync_restart
 
 
 Init ==
@@ -59,8 +73,15 @@ Init ==
     /\ current_req = 30
 
     /\ job_map = [id \in RequestID |-> nil]
+    /\ db = [val |-> 20]
+
+    /\ num_sync_restart = 0
 
 ----------------------------------------------------------------
+
+local_unchanged ==
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED num_sync_restart
 
 UpdateLocalDisk ==
     /\ local_disk < max_val
@@ -70,6 +91,7 @@ UpdateLocalDisk ==
     /\ UNCHANGED local_db_val
     /\ UNCHANGED nfs_disk
     /\ UNCHANGED current_req
+    /\ local_unchanged
     /\ UNCHANGED sync_vars
 
 
@@ -82,13 +104,15 @@ ScanDiskChanged ==
     /\ UNCHANGED disk_vars
     /\ UNCHANGED local_db_val
     /\ UNCHANGED sync_vars
+    /\ local_unchanged
 
 
 SendSync ==
     LET
         init_job == [
             id |-> current_req,
-            status |-> "Pending"
+            status |-> "Pending",
+            val |-> nil
         ]
     IN
     /\ local_pc = "SendSync"
@@ -98,6 +122,7 @@ SendSync ==
     /\ UNCHANGED disk_vars
     /\ UNCHANGED local_mem_val
     /\ UNCHANGED local_db_val
+    /\ local_unchanged
 
 
 UpdateLocalDB ==
@@ -108,8 +133,15 @@ UpdateLocalDB ==
     /\ UNCHANGED current_req
     /\ UNCHANGED sync_vars
     /\ UNCHANGED disk_vars
+    /\ local_unchanged
 
 ----------------------------------------------------------------
+
+sync_unchanged ==
+    /\ UNCHANGED core_vars
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED num_sync_restart
+
 
 StartSync(id) ==
     /\ job_map[id] # nil
@@ -118,7 +150,8 @@ StartSync(id) ==
             ![id].status = "Syncing"
         ]
     /\ UNCHANGED nfs_disk
-    /\ UNCHANGED local_vars
+    /\ sync_unchanged
+
 
 
 FinishSync(id) ==
@@ -126,8 +159,32 @@ FinishSync(id) ==
     /\ job_map[id].status = "Syncing"
     /\ nfs_disk' = local_disk
     /\ job_map' = [job_map EXCEPT
-            ![id].status = "Finished"
+            ![id].status = "Finished",
+            ![id].val = local_disk
         ]
+    /\ sync_unchanged
+
+----------------------------------------------------------------
+
+GetDirectJob(id) ==
+    /\ job_map[id] # nil
+    /\ job_map[id].status = "Finished"
+    /\ job_map' = [job_map EXCEPT ![id] = nil]
+    /\ IF db.val < job_map[id].val
+        THEN db' = [db EXCEPT !.val = job_map[id].val]
+        ELSE UNCHANGED db
+    /\ UNCHANGED nfs_disk
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED num_sync_restart
+
+----------------------------------------------------------------
+
+RestartSync ==
+    /\ num_sync_restart < max_sync_restart
+    /\ num_sync_restart' = num_sync_restart + 1
+    /\ job_map' = [id \in RequestID |-> nil]
+    /\ UNCHANGED nfs_disk
+    /\ UNCHANGED core_vars
     /\ UNCHANGED local_vars
 
 ----------------------------------------------------------------
@@ -135,8 +192,7 @@ FinishSync(id) ==
 StopCond ==
     /\ local_pc = "Init"
     /\ local_db_val = local_disk
-    /\ \A id \in RequestID:
-        job_map[id] # nil => job_map[id].status = "Finished"
+    /\ \A id \in RequestID: job_map[id] = nil
 
 TerminateCond ==
     /\ StopCond
@@ -155,6 +211,8 @@ Next ==
     \/ \E id \in RequestID:
         \/ StartSync(id)
         \/ FinishSync(id)
+        \/ GetDirectJob(id)
+    \/ RestartSync
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -165,5 +223,6 @@ DataMatchInv ==
     StopCond =>
         /\ local_disk = nfs_disk
         /\ local_disk = local_db_val
+        /\ local_disk = db.val
 
 ====
