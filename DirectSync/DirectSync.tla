@@ -139,7 +139,7 @@ SendSync ==
 
 
 UpdateLocalDB ==
-    /\ local_pc = "UpdateLocalDB" \* TODO handle outbox
+    /\ local_pc = "UpdateLocalDB"
     /\ local_pc' = "Init"
     /\ local_db_val' = local_mem_val
     /\ local_db_req' = current_req
