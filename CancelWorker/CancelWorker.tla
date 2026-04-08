@@ -5,16 +5,20 @@ CONSTANTS Node, nil
 
 VARIABLES
     pc, last_action, local_action,
-    running_set, current_step, enable_timer
+    running_map, current_step,
+    current_action, enable_timer
 
 vars == <<
     pc, last_action, local_action,
-    running_set, current_step, enable_timer
+    running_map, current_step,
+    current_action, enable_timer
 >>
 
 -----------------------------------------------------------------------
 
-ActionID == 20..29
+num_nodes == Cardinality(Node)
+
+ActionID == 20..(20 + num_nodes)
 NullAction == ActionID \union {nil}
 
 PC == {"Init", "LockRunner", "RunWorkerTask", "ExecuteLongAction", "Terminated"}
@@ -22,22 +26,27 @@ PC == {"Init", "LockRunner", "RunWorkerTask", "ExecuteLongAction", "Terminated"}
 Step == {"BeginTask", "LongAction"}
 NullStep == Step \union {nil}
 
+ActionType == {"Foreground", "Background"}
+NullType == ActionType \union {nil}
+
 -----------------------------------------------------------------------
 
 TypeOK ==
     /\ pc \in [Node -> PC]
     /\ last_action \in ActionID
     /\ local_action \in [Node -> NullAction]
-    /\ running_set \subseteq ActionID
+    /\ running_map \in [ActionID -> NullType]
     /\ current_step \in NullStep
+    /\ current_action \in NullAction
     /\ enable_timer \in BOOLEAN
 
 Init ==
     /\ pc = [n \in Node |-> "Init"]
     /\ last_action = 20
     /\ local_action = [n \in Node |-> nil]
-    /\ running_set = {}
+    /\ running_map = [a \in ActionID |-> nil]
     /\ current_step = nil
+    /\ current_action = nil
     /\ enable_timer = FALSE
 
 -----------------------------------------------------------------------
@@ -45,21 +54,30 @@ Init ==
 goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
 
+
+foreground_set(input_map) ==
+    {a \in ActionID: input_map[a] # nil /\ input_map[a] = "Foreground"}
+
 should_enable_timer ==
-    Cardinality(running_set') > 1 /\ current_step' = "LongAction"
+    LET
+        other_running == foreground_set(running_map') \ {current_action'}
+    IN
+        /\ Cardinality(other_running) > 0
+        /\ current_step' = "LongAction"
 
 do_enable_timer ==
     IF should_enable_timer
         THEN enable_timer' = TRUE
         ELSE UNCHANGED enable_timer
 
-StartWorker(n) ==
+StartWorker(n, action_type) ==
     /\ pc[n] = "Init"
     /\ goto(n, "LockRunner")
     /\ last_action' = last_action + 1
-    /\ running_set' = running_set \union {last_action'}
+    /\ running_map' = [running_map EXCEPT ![last_action'] = action_type]
     /\ local_action' = [local_action EXCEPT ![n] = last_action']
     /\ UNCHANGED current_step
+    /\ UNCHANGED current_action
     /\ do_enable_timer
 
 
@@ -67,11 +85,12 @@ LockRunner(n) ==
     /\ pc[n] = "LockRunner"
     /\ current_step = nil
     /\ current_step' = "BeginTask"
+    /\ UNCHANGED current_action
     /\ goto(n, "RunWorkerTask")
     /\ UNCHANGED enable_timer
     /\ UNCHANGED last_action
     /\ UNCHANGED local_action
-    /\ UNCHANGED running_set
+    /\ UNCHANGED running_map
 
 
 RunWorkerTask(n) ==
@@ -79,7 +98,8 @@ RunWorkerTask(n) ==
     /\ goto(n, "ExecuteLongAction")
 
     /\ current_step' = "LongAction"
-    /\ UNCHANGED running_set
+    /\ current_action' = local_action[n]
+    /\ UNCHANGED running_map
     /\ do_enable_timer
 
     /\ UNCHANGED local_action
@@ -87,10 +107,14 @@ RunWorkerTask(n) ==
 
 
 ExecuteLongAction(n) ==
+    LET
+        a == local_action[n]
+    IN
     /\ pc[n] = "ExecuteLongAction"
     /\ goto(n, "Terminated")
     /\ current_step' = nil
-    /\ running_set' = running_set \ {local_action[n]}
+    /\ running_map' = [running_map EXCEPT ![a] = nil]
+    /\ current_action' = nil
     /\ IF ~should_enable_timer
         THEN enable_timer' = FALSE
         ELSE UNCHANGED enable_timer
@@ -109,7 +133,7 @@ Terminated ==
 
 Next ==
     \/ \E n \in Node:
-        \/ StartWorker(n)
+        \/ \E action_type \in ActionType: StartWorker(n, action_type)
         \/ LockRunner(n)
         \/ RunWorkerTask(n)
         \/ ExecuteLongAction(n)
@@ -127,10 +151,11 @@ TerminatedInv ==
 
 EnableTimerInv ==
     LET
+        other_running == foreground_set(running_map) \ {current_action}
         cond ==
-            /\ Cardinality(running_set) > 1
+            /\ Cardinality(other_running) > 0
             /\ current_step = "LongAction"
     IN
-    enable_timer <=> cond
+        enable_timer <=> cond
 
 ====
