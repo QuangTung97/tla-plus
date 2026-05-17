@@ -156,7 +156,7 @@ LoadConfig ==
 
         when_smaller ==
             /\ mem_epoch' = db_epoch
-            /\ mem_job' = [j \in Job |-> nil]
+            /\ mem_job' = [j \in Job |-> nil] \* TODO
             /\ UNCHANGED db_epoch
 
         when_normal ==
@@ -484,6 +484,7 @@ DBJobStep ==
 
         inc_config(j) ==
             /\ db_job[j] # nil
+            /\ db_job'[j].status = db_job[j].status
             /\ db_job'[j].config = db_job[j].config + 1
 
         inc_epoch(j) ==
