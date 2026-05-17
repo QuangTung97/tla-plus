@@ -5,11 +5,15 @@ CONSTANTS Job, nil
 
 VARIABLES
     db_config, db_epoch, mem_epoch,
-    db_job, mem_job, pc
+    db_job, mem_job,
+    pc, local_job,
+    job_pc
 
 vars == <<
     db_config, db_epoch, mem_epoch,
-    db_job, mem_job, pc
+    db_job, mem_job,
+    pc, local_job,
+    job_pc
 >>
 
 -------------------------------------------------------------
@@ -21,52 +25,69 @@ NullEpoch == Epoch \union {nil}
 
 Status == {"Ready", "Scheduled", "Finished"}
 
+NullJob == Job \union {nil}
+
 DBJob == [
     status: Status,
     config: Config,
-    epoch: NullEpoch
+    epoch: Epoch
 ]
 NullDBJob == DBJob \union {nil}
 
 MemJob == [
     config: Config,
-    status: {"Ready", "Scheduled"}
+    status: {"Added", "Scheduled"}
 ]
 NullMemJob == MemJob \union {nil}
 
-PC == {"Init", "GetNextJob", "ScheduleJob"}
+PC == {
+    "Init", "GetNextJob",
+    "ScheduleMemJob",
+    "UpdateToScheduled", "UpdateMemScheduled",
+    "UpdateJobEpoch"
+}
 
 -------------------------------------------------------------
 
 TypeOK ==
     /\ db_config \in Config
     /\ db_epoch \in Epoch
-    /\ mem_epoch \in NullEpoch
     /\ db_job \in [Job -> NullDBJob]
+
+    /\ mem_epoch \in NullEpoch
     /\ mem_job \in [Job -> NullMemJob]
+
     /\ pc \in PC
+    /\ local_job \in NullJob
+
+    /\ job_pc \in [Job -> {"Init", "Terminated"}]
 
 Init ==
     /\ db_config = 10
     /\ db_epoch = 20
-    /\ mem_epoch = nil
     /\ db_job = [j \in Job |-> nil]
+
+    /\ mem_epoch = nil
     /\ mem_job = [j \in Job |-> nil]
+
     /\ pc = "Init"
+    /\ local_job = nil
+
+    /\ job_pc = [j \in Job |-> "Init"]
 
 -------------------------------------------------------------
 
 jobUnchanged ==
-    /\ UNCHANGED pc
-    /\ UNCHANGED mem_epoch
-    /\ UNCHANGED mem_job
+    /\ UNCHANGED <<mem_epoch, mem_job>>
+    /\ UNCHANGED <<pc, local_job>>
+    /\ UNCHANGED job_pc
 
 StartJob(j) ==
     LET
         init_job == [
             status |-> "Ready",
             config |-> db_config,
-            epoch |-> nil
+            epoch |-> 20
         ]
     IN
     /\ db_job[j] = nil
@@ -79,6 +100,7 @@ StartJob(j) ==
 
 mainUnchanged ==
     /\ UNCHANGED db_config
+    /\ UNCHANGED job_pc
 
 \* TODO use
 at_least_one_scheduled ==
@@ -104,6 +126,7 @@ LoadConfig ==
         THEN when_start
         ELSE when_normal
 
+    /\ UNCHANGED local_job
     /\ UNCHANGED mem_job
     /\ UNCHANGED db_job
     /\ mainUnchanged
@@ -113,21 +136,16 @@ LoadConfig ==
 getNextJobCond(j) ==
     /\ db_job[j] # nil
     /\ db_job[j].status = "Ready"
+    /\ db_job[j].epoch < mem_epoch
 
 GetNextJob(j) ==
-    LET
-        job == db_job[j]
-        init_job == [
-            config |-> job.config,
-            status |-> "Ready"
-        ]
-    IN
     /\ pc = "GetNextJob"
     /\ getNextJobCond(j)
 
-    /\ pc' = "ScheduleJob"
-    /\ mem_job' = [mem_job EXCEPT ![j] = init_job]
+    /\ pc' = "ScheduleMemJob"
+    /\ local_job' = j
 
+    /\ UNCHANGED mem_job
     /\ UNCHANGED db_job
     /\ UNCHANGED mem_epoch
     /\ UNCHANGED db_config
@@ -136,32 +154,89 @@ GetNextJob(j) ==
 
 --------------------------
 
-ScheduleJob(j) ==
-    LET
-        when_scheduled ==
-            /\ mem_job' = [mem_job EXCEPT ![j].status = "Scheduled"]
-            /\ db_job' = [db_job EXCEPT ![j].status = "Scheduled"]
-
-        when_skip ==
-            /\ UNCHANGED db_job
-            /\ UNCHANGED mem_job
-    IN
-    /\ pc = "ScheduleJob"
-    /\ mem_job[j] # nil
-    /\ mem_job[j].status = "Ready"
-    /\ pc' = "Init"
-    /\ \/ when_scheduled
-       \/ when_skip
-
+mainNormalUnchanged ==
     /\ UNCHANGED mem_epoch
-    /\ UNCHANGED db_epoch
     /\ UNCHANGED db_config
+    /\ UNCHANGED db_epoch
     /\ mainUnchanged
+
+--------------------------
+
+ScheduleMemJob ==
+    LET
+        j == local_job
+        job == db_job[j]
+        init_job == [
+            config |-> job.config,
+            status |-> "Added"
+        ]
+
+        when_scheduled ==
+            /\ pc' = "UpdateToScheduled"
+    IN
+    /\ pc = "ScheduleMemJob"
+    /\ mem_job' = [mem_job EXCEPT ![j] = init_job]
+    /\ \/ when_scheduled
+
+    /\ UNCHANGED local_job
+    /\ UNCHANGED db_job
+    /\ mainNormalUnchanged
+
+--------------------------
+
+UpdateToScheduled ==
+    LET
+        j == local_job
+    IN
+    /\ pc = "UpdateToScheduled"
+    /\ pc' = "UpdateMemScheduled"
+
+    /\ db_job' = [db_job EXCEPT ![j].status = "Scheduled"]
+
+    /\ UNCHANGED local_job
+    /\ UNCHANGED mem_job
+    /\ mainNormalUnchanged
+
+--------------------------
+
+UpdateMemScheduled ==
+    LET
+        j == local_job
+    IN
+    /\ pc = "UpdateMemScheduled"
+    /\ pc' = "Init"
+    /\ mem_job' = [mem_job EXCEPT ![j].status = "Scheduled"]
+    /\ local_job' = nil
+
+    /\ UNCHANGED db_job
+    /\ mainNormalUnchanged
+
+--------------------------
+
+\* TODO use
+UpdateJobEpoch ==
+    /\ pc = "UpdateJobEpoch"
+    /\ mainUnchanged
+
+-------------------------------------------------------------
+
+runUnchanged ==
+    /\ UNCHANGED <<pc, local_job>>
+    /\ UNCHANGED db_config
+    /\ UNCHANGED db_epoch
+    /\ UNCHANGED mem_epoch
+
+FinishScheduledJob(j) ==
+    /\ job_pc[j] = "Running"
+    /\ runUnchanged
 
 -------------------------------------------------------------
 
 TerminateCond ==
     /\ pc = "GetNextJob"
+    /\ \A j \in Job:
+        /\ db_job[j] # nil
+        /\ db_job[j].status = "Finished"
 
 Terminated ==
     /\ TerminateCond
@@ -173,7 +248,10 @@ Next ==
     \/ \E j \in Job:
         \/ StartJob(j)
         \/ GetNextJob(j)
-        \/ ScheduleJob(j)
+        \/ FinishScheduledJob(j)
+    \/ ScheduleMemJob
+    \/ UpdateToScheduled
+    \/ UpdateMemScheduled
     \/ LoadConfig
     \/ Terminated
 
