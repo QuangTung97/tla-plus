@@ -22,8 +22,9 @@ vars == <<
 
 Config == 10..19
 
-Epoch == 20..29
+Epoch == 21..29
 NullEpoch == Epoch \union {nil}
+ZeroEpoch == Epoch \union {0}
 
 Status == {"Ready", "Scheduled", "Finished"}
 
@@ -32,7 +33,7 @@ NullJob == Job \union {nil}
 DBJob == [
     status: Status,
     config: Config,
-    epoch: Epoch
+    epoch: ZeroEpoch
 ]
 NullDBJob == DBJob \union {nil}
 
@@ -54,7 +55,7 @@ PC == {
 
 TypeOK ==
     /\ db_config \in Config
-    /\ db_epoch \in Epoch
+    /\ db_epoch \in Epoch \union {20}
     /\ db_job \in [Job -> NullDBJob]
 
     /\ mem_epoch \in NullEpoch
@@ -97,7 +98,7 @@ StartJob(j) ==
         init_job == [
             status |-> "Ready",
             config |-> db_config,
-            epoch |-> 20
+            epoch |-> 0
         ]
     IN
     /\ db_job[j] = nil
@@ -111,7 +112,10 @@ StartJob(j) ==
 ReRunJob(j) ==
     /\ db_job[j] # nil
     /\ db_job[j].status # "Ready"
-    /\ db_job' = [db_job EXCEPT ![j].status = "Ready"]
+    /\ db_job' = [db_job EXCEPT
+            ![j].status = "Ready",
+            ![j].epoch = 0
+        ]
     /\ UNCHANGED db_config
     /\ UNCHANGED db_epoch
     /\ jobUnchanged
@@ -249,7 +253,9 @@ UpdateJobEpoch ==
     IN
     /\ pc = "UpdateJobEpoch"
     /\ pc' = "Init"
-    /\ db_job' = [db_job EXCEPT ![j].epoch = mem_epoch] \* TODO conditional update
+    /\ IF db_job[j].status = "Ready"
+        THEN db_job' = [db_job EXCEPT ![j].epoch = mem_epoch]
+        ELSE UNCHANGED db_job
     /\ local_job' = nil
     /\ UNCHANGED mem_job
     /\ UNCHANGED job_pc
@@ -267,7 +273,11 @@ runUnchanged ==
 FinishScheduledJob(j) ==
     /\ job_pc[j] = "Running"
     /\ job_pc' = [job_pc EXCEPT ![j] = "ClearInMemJob"]
-    /\ db_job' = [db_job EXCEPT ![j].status = "Finished"] \* TODO conditional update
+    \* TODO conditional update
+    /\ db_job' = [db_job EXCEPT
+            ![j].status = "Finished",
+            ![j].epoch = 0
+        ]
     /\ UNCHANGED mem_job
     /\ runUnchanged
 
@@ -276,9 +286,9 @@ FinishScheduledJob(j) ==
 ClearInMemJob(j) ==
     /\ job_pc[j] = "ClearInMemJob"
     /\ job_pc' = [job_pc EXCEPT ![j] = "Terminated"]
-    /\ IF mem_job[j].status = "Scheduled"
+    /\ IF mem_job[j].status = "BeforeSchedule"
         THEN mem_job' = [mem_job EXCEPT ![j] = nil]
-        ELSE UNCHANGED mem_job
+        ELSE UNCHANGED mem_job \* TODO clear boolean flag
     /\ UNCHANGED db_job
     /\ runUnchanged
 
@@ -379,5 +389,16 @@ NotScanWhenAlreadyInMem ==
             \/ mem_job[j] = nil
             \/ /\ mem_job[j] # nil
                /\ mem_job[j].status # "Ready"
+
+
+TerminateInv ==
+    LET
+        db_job_cond ==
+            \A j \in Job:
+                /\ db_job[j].status = "Finished"
+                /\ db_job[j].epoch = 0
+    IN
+    TerminateCond =>
+        /\ db_job_cond
 
 ====
