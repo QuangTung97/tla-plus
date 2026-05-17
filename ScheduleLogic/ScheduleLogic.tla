@@ -6,14 +6,14 @@ CONSTANTS Job, nil
 VARIABLES
     db_config, db_epoch, mem_epoch,
     db_job, mem_job,
-    pc, local_job,
+    pc, local_job, local_version,
     job_pc,
     background_pc, background_job
 
 vars == <<
     db_config, db_epoch, mem_epoch,
     db_job, mem_job,
-    pc, local_job,
+    pc, local_job, local_version,
     job_pc,
     background_pc, background_job
 >>
@@ -30,15 +30,20 @@ Status == {"Ready", "Scheduled", "Finished"}
 
 NullJob == Job \union {nil}
 
+JobVersion == 31..39
+NullVersion == JobVersion \union {nil}
+
 DBJob == [
     status: Status,
     config: Config,
-    epoch: ZeroEpoch
+    epoch: ZeroEpoch,
+    version: JobVersion
 ]
 NullDBJob == DBJob \union {nil}
 
 MemJob == [
     config: Config,
+    version: JobVersion,
     status: {"Ready", "BeforeSchedule"},
     is_running: BOOLEAN
 ]
@@ -63,6 +68,7 @@ TypeOK ==
 
     /\ pc \in PC
     /\ local_job \in NullJob
+    /\ local_version \in NullVersion
 
     /\ job_pc \in [Job -> {"Init", "Running", "ClearInMemJob", "Terminated"}]
 
@@ -79,6 +85,7 @@ Init ==
 
     /\ pc = "Init"
     /\ local_job = nil
+    /\ local_version = nil
 
     /\ job_pc = [j \in Job |-> "Init"]
 
@@ -89,7 +96,7 @@ Init ==
 
 jobUnchanged ==
     /\ UNCHANGED <<mem_epoch, mem_job>>
-    /\ UNCHANGED <<pc, local_job>>
+    /\ UNCHANGED <<pc, local_job, local_version>>
     /\ UNCHANGED job_pc
     /\ UNCHANGED <<background_pc, background_job>>
 
@@ -98,7 +105,8 @@ StartJob(j) ==
         init_job == [
             status |-> "Ready",
             config |-> db_config,
-            epoch |-> 0
+            epoch |-> 0,
+            version |-> 31
         ]
     IN
     /\ db_job[j] = nil
@@ -109,11 +117,13 @@ StartJob(j) ==
 
 --------------------------
 
+\* TODO limit
 ReRunJob(j) ==
     /\ db_job[j] # nil
     /\ db_job[j].status # "Ready"
     /\ db_job' = [db_job EXCEPT
             ![j].status = "Ready",
+            ![j].version = @ + 1,
             ![j].epoch = 0
         ]
     /\ UNCHANGED db_config
@@ -150,6 +160,7 @@ LoadConfig ==
     /\ UNCHANGED mem_job
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
+    /\ UNCHANGED local_version
     /\ mainUnchanged
 
 --------------------------
@@ -176,6 +187,7 @@ GetNextJob(j) ==
     /\ UNCHANGED mem_job
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
+    /\ UNCHANGED local_version
     /\ mainNormalUnchanged
 
 --------------------------
@@ -185,25 +197,30 @@ ScheduleMemJob ==
         j == local_job
         job == db_job[j]
 
-        scheduling_job == [
+        init_job == [
             config |-> job.config,
-            status |-> "BeforeSchedule",
+            version |-> job.version,
+            status |-> nil,
             is_running |-> FALSE
         ]
 
+        base_job ==
+            IF mem_job[j] # nil
+                THEN [mem_job[j] EXCEPT !.version = job.version]
+                ELSE init_job
+
+        scheduling_job == [base_job EXCEPT !.status = "BeforeSchedule"]
         when_scheduled ==
+            /\ ~base_job.is_running
             /\ pc' = "UpdateToScheduled"
             /\ mem_job' = [mem_job EXCEPT ![j] = scheduling_job]
+            /\ UNCHANGED local_version
 
-        ready_job == [
-            config |-> job.config,
-            status |-> "Ready",
-            is_running |-> FALSE
-        ]
-
+        ready_job == [base_job EXCEPT !.status = "Ready"]
         when_ignore ==
             /\ pc' = "UpdateJobEpoch"
             /\ mem_job' = [mem_job EXCEPT ![j] = ready_job]
+            /\ local_version' = job.version
     IN
     /\ pc = "ScheduleMemJob"
     /\ \/ when_scheduled
@@ -228,6 +245,7 @@ UpdateToScheduled ==
     /\ UNCHANGED local_job
     /\ UNCHANGED mem_job
     /\ UNCHANGED job_pc
+    /\ UNCHANGED local_version
     /\ mainNormalUnchanged
 
 --------------------------
@@ -243,6 +261,7 @@ UpdateMemScheduled ==
     /\ job_pc' = [job_pc EXCEPT ![j] = "Running"]
 
     /\ UNCHANGED db_job
+    /\ UNCHANGED local_version
     /\ mainNormalUnchanged
 
 --------------------------
@@ -250,13 +269,19 @@ UpdateMemScheduled ==
 UpdateJobEpoch ==
     LET
         j == local_job
+
+        allow_update ==
+            /\ db_job[j].status = "Ready"
+            /\ db_job[j].version = local_version
     IN
     /\ pc = "UpdateJobEpoch"
     /\ pc' = "Init"
-    /\ IF db_job[j].status = "Ready"
+    /\ IF allow_update
         THEN db_job' = [db_job EXCEPT ![j].epoch = mem_epoch]
         ELSE UNCHANGED db_job
     /\ local_job' = nil
+    /\ local_version' = nil
+
     /\ UNCHANGED mem_job
     /\ UNCHANGED job_pc
     /\ mainNormalUnchanged
@@ -264,7 +289,7 @@ UpdateJobEpoch ==
 -------------------------------------------------------------
 
 runUnchanged ==
-    /\ UNCHANGED <<pc, local_job>>
+    /\ UNCHANGED <<pc, local_job, local_version>>
     /\ UNCHANGED db_config
     /\ UNCHANGED db_epoch
     /\ UNCHANGED mem_epoch
@@ -288,14 +313,14 @@ ClearInMemJob(j) ==
     /\ job_pc' = [job_pc EXCEPT ![j] = "Terminated"]
     /\ IF mem_job[j].status = "BeforeSchedule"
         THEN mem_job' = [mem_job EXCEPT ![j] = nil]
-        ELSE UNCHANGED mem_job \* TODO clear boolean flag
+        ELSE mem_job' = [mem_job EXCEPT ![j].is_running = FALSE]
     /\ UNCHANGED db_job
     /\ runUnchanged
 
 -------------------------------------------------------------
 
 backgroundUnchanged ==
-    /\ UNCHANGED <<pc, local_job>>
+    /\ UNCHANGED <<pc, local_job, local_version>>
     /\ UNCHANGED mem_epoch
     /\ UNCHANGED db_config
     /\ UNCHANGED db_epoch
@@ -303,7 +328,8 @@ backgroundUnchanged ==
 BackgroundSchedule(j) ==
     /\ background_pc = "Init"
     /\ mem_job[j] # nil
-    /\ mem_job[j].status = "Ready" \* TODO add running cond
+    /\ mem_job[j].status = "Ready"
+    /\ ~mem_job[j].is_running
 
     /\ background_pc' = "UpdateToScheduled"
     /\ background_job' = j
@@ -379,6 +405,9 @@ Next ==
 
     \/ Terminated
 
+\* TODO update db_config
+\* TODO add restart pc & background pc
+
 Spec == Init /\ [][Next]_vars
 
 -------------------------------------------------------------
@@ -388,7 +417,7 @@ NotScanWhenAlreadyInMem ==
         (ENABLED GetNextJob(j)) =>
             \/ mem_job[j] = nil
             \/ /\ mem_job[j] # nil
-               /\ mem_job[j].status # "Ready"
+               /\ mem_job[j].version < db_job[j].version
 
 
 TerminateInv ==
