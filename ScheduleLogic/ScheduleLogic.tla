@@ -1,7 +1,7 @@
 ---- MODULE ScheduleLogic ----
 EXTENDS TLC, Naturals
 
-CONSTANTS Job, nil, max_rerun
+CONSTANTS Job, nil, max_rerun, max_db_config
 
 VARIABLES
     db_config, db_epoch, mem_epoch,
@@ -154,6 +154,11 @@ LoadConfig ==
             /\ mem_epoch' = db_epoch'
             /\ UNCHANGED mem_job
 
+        when_smaller ==
+            /\ mem_epoch' = db_epoch
+            /\ mem_job' = [j \in Job |-> nil]
+            /\ UNCHANGED db_epoch
+
         when_normal ==
             /\ UNCHANGED mem_job
             /\ UNCHANGED mem_epoch
@@ -161,12 +166,14 @@ LoadConfig ==
     IN
     /\ pc = "Init"
     /\ pc' = "GetNextJob"
-    /\ IF mem_epoch = nil
-        THEN when_start
-        ELSE when_normal
+    /\ IF mem_epoch = nil THEN
+            when_start
+        ELSE IF mem_epoch < db_epoch THEN
+            when_smaller
+        ELSE
+            when_normal
 
     /\ UNCHANGED local_job
-    /\ UNCHANGED mem_job
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
     /\ UNCHANGED local_version
@@ -314,9 +321,12 @@ FinishScheduledJob(j) ==
 ClearInMemJob(j) ==
     /\ job_pc[j] = "ClearInMemJob"
     /\ job_pc' = [job_pc EXCEPT ![j] = "Terminated"]
-    /\ IF ~mem_job[j].need_schedule
-        THEN mem_job' = [mem_job EXCEPT ![j] = nil]
-        ELSE mem_job' = [mem_job EXCEPT ![j].scheduling = FALSE]
+    /\ IF mem_job[j] = nil THEN
+            UNCHANGED mem_job
+        ELSE IF ~mem_job[j].need_schedule THEN
+            mem_job' = [mem_job EXCEPT ![j] = nil]
+        ELSE
+            mem_job' = [mem_job EXCEPT ![j].scheduling = FALSE]
     /\ UNCHANGED db_job
     /\ runUnchanged
 
@@ -363,6 +373,26 @@ BackgroundUpdateToScheduled ==
 
 -------------------------------------------------------------
 
+IncDBConfig ==
+    LET
+        update_job(j, old) ==
+            IF old = nil
+                THEN old
+                ELSE [old EXCEPT !.config = db_config']
+    IN
+    /\ db_config < max_db_config
+    /\ db_config' = db_config + 1
+    /\ db_job' = [j \in Job |-> update_job(j, db_job[j])]
+    /\ db_epoch' = db_epoch + 1
+
+    /\ UNCHANGED <<pc, local_job, local_version>>
+    /\ UNCHANGED <<background_pc, background_job>>
+    /\ UNCHANGED num_rerun
+    /\ UNCHANGED <<mem_epoch, mem_job>>
+    /\ UNCHANGED job_pc
+
+-------------------------------------------------------------
+
 TerminateCond ==
     /\ pc = "GetNextJob"
     /\ \A j \in Job:
@@ -370,6 +400,7 @@ TerminateCond ==
         /\ db_job[j].status = "Finished"
         /\ job_pc[j] = "Terminated"
     /\ background_pc = "Init"
+    /\ mem_epoch = db_epoch
 
 Terminated ==
     /\ TerminateCond
@@ -391,10 +422,10 @@ Next ==
     \/ UpdateJobEpoch
 
     \/ BackgroundUpdateToScheduled
+    \/ IncDBConfig
 
     \/ Terminated
 
-\* TODO update db_config
 \* TODO add restart pc & background pc
 
 Spec == Init /\ [][Next]_vars
@@ -450,6 +481,16 @@ DBJobStep ==
             /\ db_job[j].status = "Scheduled"
             /\ db_job'[j].status = "Finished"
             /\ db_job'[j].epoch = 0
+
+        inc_config(j) ==
+            /\ db_job[j] # nil
+            /\ db_job'[j].config = db_job[j].config + 1
+
+        inc_epoch(j) ==
+            /\ db_job[j] # nil
+            /\ db_job[j].status = "Ready"
+            /\ db_job'[j].status = "Ready"
+            /\ db_job'[j].epoch > db_job[j].epoch
     IN
     \A j \in Job:
         \/ db_job'[j] = db_job[j]
@@ -458,6 +499,8 @@ DBJobStep ==
         \/ update_epoch(j)
         \/ rerun(j)
         \/ finish(j)
+        \/ inc_config(j)
+        \/ inc_epoch(j)
 
 DBJobProperty ==
     [][DBJobStep]_db_job
