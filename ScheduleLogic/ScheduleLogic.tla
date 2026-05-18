@@ -114,6 +114,7 @@ jobUnchanged ==
     /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
     /\ UNCHANGED job_pc
     /\ UNCHANGED <<background_pc, background_job>>
+    /\ UNCHANGED num_failure
 
 StartJob(j) ==
     LET
@@ -189,7 +190,8 @@ LoadConfig ==
     /\ UNCHANGED local_job
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
-    /\ UNCHANGED <<local_version>>
+    /\ UNCHANGED local_version
+    /\ UNCHANGED num_failure
     /\ mainUnchanged
 
 --------------------------
@@ -197,6 +199,7 @@ LoadConfig ==
 mainNormalUnchanged ==
     /\ UNCHANGED mem_epoch
     /\ UNCHANGED db_epoch
+    /\ UNCHANGED num_failure
     /\ mainUnchanged
 
 --------------------------
@@ -290,12 +293,16 @@ update_job_scheduled_and_start_success(j) ==
         ]
     /\ job_pc' = [job_pc EXCEPT ![j] = "Running"]
     /\ UNCHANGED mem_epoch
+    /\ UNCHANGED num_failure
 
 update_job_scheduled_and_start_failed ==
-    /\ mem_epoch' = nil \* reset mem epoch
+    /\ num_failure < max_failure
+    /\ num_failure' = num_failure + 1
+    /\ mem_epoch' = nil
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
 
+\* TODO add no-op case
 update_job_scheduled_and_start(j) ==
     /\ \/ update_job_scheduled_and_start_success(j)
        \/ update_job_scheduled_and_start_failed
@@ -380,7 +387,7 @@ runUnchanged ==
     /\ UNCHANGED mem_epoch
     /\ UNCHANGED <<background_pc, background_job>>
     /\ UNCHANGED <<scheduling_set, running_set>>
-    /\ UNCHANGED num_rerun
+    /\ UNCHANGED <<num_rerun, num_failure>>
 
 FinishRunningJob(j) ==
     LET
@@ -422,6 +429,7 @@ BackgroundSchedule(j) ==
 
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
+    /\ UNCHANGED num_failure
     /\ UNCHANGED <<mem_epoch, running_set>>
     /\ backgroundUnchanged
 
@@ -451,6 +459,7 @@ BackgroundUpdateRunningSet ==
     /\ background_job' = nil
 
     /\ UNCHANGED mem_epoch
+    /\ UNCHANGED num_failure
     /\ backgroundUnchanged
 
 -------------------------------------------------------------
@@ -472,6 +481,7 @@ BackgroundScanRunningSet ==
     /\ UNCHANGED job_pc
     /\ UNCHANGED <<background_pc, background_job>>
     /\ UNCHANGED mem_epoch
+    /\ UNCHANGED num_failure
     /\ backgroundUnchanged
 
 -------------------------------------------------------------
@@ -490,7 +500,7 @@ IncDBConfig ==
 
     /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
     /\ UNCHANGED <<background_pc, background_job>>
-    /\ UNCHANGED num_rerun
+    /\ UNCHANGED <<num_rerun, num_failure>>
     /\ UNCHANGED <<mem_epoch, mem_job, scheduling_set, running_set>>
     /\ UNCHANGED job_pc
 
