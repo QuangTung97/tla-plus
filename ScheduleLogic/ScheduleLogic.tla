@@ -286,12 +286,16 @@ ScheduleMemJob ==
 --------------------------
 
 update_job_scheduled_and_start_success(j) ==
-    /\ db_job' = [db_job EXCEPT
-            ![j].status = "Scheduled",
-            ![j].epoch = 0,
-            ![j].is_running = TRUE
-        ]
-    /\ job_pc' = [job_pc EXCEPT ![j] = "Running"]
+    /\ IF db_job[j].status = "Ready" THEN
+            /\ db_job' = [db_job EXCEPT
+                    ![j].status = "Scheduled",
+                    ![j].epoch = 0,
+                    ![j].is_running = TRUE
+                ]
+            /\ job_pc' = [job_pc EXCEPT ![j] = "Running"]
+        ELSE
+            /\ UNCHANGED db_job
+            /\ UNCHANGED job_pc
     /\ UNCHANGED mem_epoch
     /\ UNCHANGED num_failure
 
@@ -302,7 +306,6 @@ update_job_scheduled_and_start_failed ==
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
 
-\* TODO add no-op case
 update_job_scheduled_and_start(j) ==
     /\ \/ update_job_scheduled_and_start_success(j)
        \/ update_job_scheduled_and_start_failed
@@ -364,7 +367,7 @@ UpdateJobEpoch ==
 
         allow_update ==
             /\ db_job[j].status = "Ready"
-            /\ db_job[j].version = local_version \* TODO remove?
+            /\ db_job[j].version = local_version
     IN
     /\ pc = "UpdateJobEpoch"
     /\ pc' = "Init"
@@ -584,7 +587,7 @@ DBJobStep ==
 
         schedule_step(j) ==
             /\ db_job[j] # nil
-            /\ db_job[j].status \in {"Ready", "Finished"}
+            /\ db_job[j].status = "Ready"
             /\ db_job'[j].status = "Scheduled"
 
         update_epoch(j) ==
