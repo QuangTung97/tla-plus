@@ -215,6 +215,19 @@ GetNextJob(j) ==
     /\ UNCHANGED local_version
     /\ mainNormalUnchanged
 
+GetNextJobReloadConfig ==
+    /\ pc = "GetNextJob"
+    /\ mem_epoch # db_epoch
+    /\ pc' = "Init"
+
+    /\ UNCHANGED mem_job
+    /\ UNCHANGED local_job
+    /\ UNCHANGED db_job
+    /\ UNCHANGED job_pc
+    /\ UNCHANGED local_version
+    /\ UNCHANGED <<scheduling_set, running_set>>
+    /\ mainNormalUnchanged
+
 --------------------------
 
 is_scheduling_or_running(j) ==
@@ -489,6 +502,7 @@ Next ==
         \/ FinishRunningJob(j)
         \/ BackgroundSchedule(j)
     \/ LoadConfig
+    \/ GetNextJobReloadConfig
     \/ ScheduleMemJob
     \/ UpdateToScheduled
     \/ UpdateRunningSet
@@ -527,7 +541,6 @@ TerminateInv ==
         /\ db_job_cond
 
 
-
 SchedulingAndRunningSetDisjointed ==
     scheduling_set \intersect running_set = {}
 
@@ -541,7 +554,7 @@ DBJobStep ==
 
         schedule_step(j) ==
             /\ db_job[j] # nil
-            /\ db_job[j].status = "Ready"
+            /\ db_job[j].status \in {"Ready", "Finished"}
             /\ db_job'[j].status = "Scheduled"
 
         update_epoch(j) ==
@@ -603,5 +616,7 @@ JobIsRunningInv ==
     IN
     \A j \in Job:
         pre_cond(j) => ~db_job[j].is_running
+
+\* TODO add check mem config updated
 
 ====
