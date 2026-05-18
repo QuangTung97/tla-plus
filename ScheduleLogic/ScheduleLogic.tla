@@ -277,16 +277,24 @@ ScheduleMemJob ==
 
 --------------------------
 
-update_job_scheduled_and_start(j) ==
+update_job_scheduled_and_start_success(j) ==
     /\ db_job' = [db_job EXCEPT
             ![j].status = "Scheduled",
+            ![j].epoch = 0,
             ![j].is_running = TRUE
         ]
     /\ job_pc' = [job_pc EXCEPT ![j] = "Running"]
+
+update_job_scheduled_and_start_failed ==
+    /\ UNCHANGED db_job
+    /\ UNCHANGED job_pc
+
+update_job_scheduled_and_start(j) ==
+    /\ \/ update_job_scheduled_and_start_success(j)
+       \/ update_job_scheduled_and_start_failed
     /\ UNCHANGED mem_job
     /\ UNCHANGED <<scheduling_set, running_set>>
 
-\* TODO add failure case
 UpdateToScheduled ==
     LET
         j == local_job
@@ -617,6 +625,19 @@ JobIsRunningInv ==
     \A j \in Job:
         pre_cond(j) => ~db_job[j].is_running
 
-\* TODO add check mem config updated
+
+MemConfigAlwaysLatest ==
+    LET
+        cond(j) ==
+            mem_job[j] # nil => mem_job[j].config = db_config
+    IN
+    db_epoch = mem_epoch =>
+        \A j \in Job: cond(j)
+
+
+DBJobEpochInv ==
+    \A j \in Job:
+        db_job[j] # nil /\ db_job[j].epoch > 0 =>
+            db_job[j].status = "Ready"
 
 ====
