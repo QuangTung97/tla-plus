@@ -166,22 +166,33 @@ mainUnchanged ==
 
 --------------------------
 
+db_running_set ==
+    {j \in Job: db_job[j] # nil /\ db_job[j].is_running}
+
+new_running_set ==
+    db_running_set \ scheduling_set
+
+--------------------------
+
 LoadConfig ==
     LET
         when_start ==
             /\ db_epoch' = db_epoch + 1
             /\ mem_epoch' = db_epoch'
             /\ mem_job' = [j \in Job |-> nil]
+            /\ running_set' = new_running_set
 
         when_smaller ==
             /\ mem_epoch' = db_epoch
             /\ mem_job' = [j \in Job |-> nil]
             /\ UNCHANGED db_epoch
+            /\ UNCHANGED running_set
 
         when_normal ==
             /\ UNCHANGED mem_job
             /\ UNCHANGED mem_epoch
             /\ UNCHANGED db_epoch
+            /\ UNCHANGED running_set
     IN
     /\ pc = "Init"
     /\ pc' = "GetNextJob"
@@ -194,7 +205,6 @@ LoadConfig ==
     /\ local_epoch' = mem_epoch'
 
     /\ UNCHANGED scheduling_set
-    /\ UNCHANGED running_set
     /\ UNCHANGED local_job
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
@@ -476,13 +486,6 @@ BackgroundUpdateRunningSet ==
 -------------------------------------------------------------
 
 BackgroundScanRunningSet ==
-    LET
-        db_running_set ==
-            {j \in Job: db_job[j] # nil /\ db_job[j].is_running}
-
-        new_running_set ==
-            db_running_set \ scheduling_set
-    IN
     /\ running_set # new_running_set
     /\ running_set' = new_running_set
 
@@ -514,6 +517,26 @@ IncDBConfig ==
     /\ UNCHANGED <<num_rerun, num_failure, num_restart>>
     /\ UNCHANGED <<mem_epoch, mem_job, scheduling_set, running_set>>
     /\ UNCHANGED job_pc
+
+-------------------------------------------------------------
+
+RestartSystem ==
+    /\ num_restart < max_restart
+    /\ num_restart' = num_restart + 1
+
+    /\ mem_epoch' = nil
+    /\ mem_job' = [j \in Job |-> nil]
+    /\ scheduling_set' = {}
+    /\ running_set' = {}
+    /\ pc' = "Init"
+    /\ clear_local_vars
+
+    /\ background_pc' = "Init"
+    /\ background_job' = nil
+
+    /\ UNCHANGED <<db_config, db_job, db_epoch>>
+    /\ UNCHANGED job_pc
+    /\ UNCHANGED <<num_rerun, num_failure>>
 
 -------------------------------------------------------------
 
@@ -554,14 +577,17 @@ Next ==
     \/ BackgroundScanRunningSet
 
     \/ IncDBConfig
+    \/ RestartSystem
 
     \/ Terminated
 
-\* TODO add restart pc & background pc
-
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 -------------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
 
 NotScanWhenAlreadyInMem ==
     \A j \in Job:
@@ -675,8 +701,13 @@ DBJobEpochInv ==
 
 
 MemRunningMatchDBInv ==
+    LET
+        pre_cond(j) ==
+            /\ mem_epoch # nil
+            /\ db_job[j] # nil
+            /\ db_job[j].is_running
+    IN
     \A j \in Job:
-        db_job[j] # nil /\ db_job[j].is_running =>
-            is_scheduling_or_running(j)
+        pre_cond(j) => is_scheduling_or_running(j)
 
 ====
