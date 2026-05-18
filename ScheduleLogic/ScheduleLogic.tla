@@ -1,23 +1,23 @@
 ---- MODULE ScheduleLogic ----
 EXTENDS TLC, Naturals
 
-CONSTANTS Job, nil, max_rerun, max_db_config
+CONSTANTS Job, nil, max_rerun, max_db_config, max_failure
 
 VARIABLES
     db_config, db_epoch, mem_epoch,
     db_job, mem_job, scheduling_set, running_set,
-    pc, local_job, local_version,
+    pc, local_job, local_version, local_epoch,
     job_pc,
     background_pc, background_job,
-    num_rerun
+    num_rerun, num_failure
 
 vars == <<
     db_config, db_epoch, mem_epoch,
     db_job, mem_job, scheduling_set, running_set,
-    pc, local_job, local_version,
+    pc, local_job, local_version, local_epoch,
     job_pc,
     background_pc, background_job,
-    num_rerun
+    num_rerun, num_failure
 >>
 
 -------------------------------------------------------------
@@ -74,6 +74,7 @@ TypeOK ==
     /\ pc \in PC
     /\ local_job \in NullJob
     /\ local_version \in NullVersion
+    /\ local_epoch \in NullEpoch
 
     /\ job_pc \in [Job -> {"Init", "Running", "Terminated"}]
 
@@ -81,6 +82,7 @@ TypeOK ==
     /\ background_job \in NullJob
 
     /\ num_rerun \in 0..max_rerun
+    /\ num_failure \in 0..max_failure
 
 Init ==
     /\ db_config = 10
@@ -95,6 +97,7 @@ Init ==
     /\ pc = "Init"
     /\ local_job = nil
     /\ local_version = nil
+    /\ local_epoch = nil
 
     /\ job_pc = [j \in Job |-> "Init"]
 
@@ -102,12 +105,13 @@ Init ==
     /\ background_job = nil
 
     /\ num_rerun = 0
+    /\ num_failure = 0
 
 -------------------------------------------------------------
 
 jobUnchanged ==
     /\ UNCHANGED <<mem_epoch, mem_job, scheduling_set, running_set>>
-    /\ UNCHANGED <<pc, local_job, local_version>>
+    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
     /\ UNCHANGED job_pc
     /\ UNCHANGED <<background_pc, background_job>>
 
@@ -178,13 +182,14 @@ LoadConfig ==
             when_smaller
         ELSE
             when_normal
+    /\ local_epoch' = mem_epoch'
 
     /\ UNCHANGED scheduling_set
     /\ UNCHANGED running_set
     /\ UNCHANGED local_job
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
-    /\ UNCHANGED local_version
+    /\ UNCHANGED <<local_version>>
     /\ mainUnchanged
 
 --------------------------
@@ -199,7 +204,7 @@ mainNormalUnchanged ==
 getNextJobCond(j) ==
     /\ db_job[j] # nil
     /\ db_job[j].status = "Ready"
-    /\ db_job[j].epoch < mem_epoch
+    /\ db_job[j].epoch < local_epoch
 
 GetNextJob(j) ==
     /\ pc = "GetNextJob"
@@ -209,10 +214,10 @@ GetNextJob(j) ==
     /\ local_job' = j
 
     /\ UNCHANGED <<scheduling_set, running_set>>
+    /\ UNCHANGED <<local_version, local_epoch>>
     /\ UNCHANGED mem_job
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
-    /\ UNCHANGED local_version
     /\ mainNormalUnchanged
 
 GetNextJobReloadConfig ==
@@ -220,12 +225,12 @@ GetNextJobReloadConfig ==
     /\ mem_epoch # db_epoch
     /\ pc' = "Init"
 
+    /\ UNCHANGED <<local_version, local_epoch>>
+    /\ UNCHANGED <<scheduling_set, running_set>>
     /\ UNCHANGED mem_job
     /\ UNCHANGED local_job
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
-    /\ UNCHANGED local_version
-    /\ UNCHANGED <<scheduling_set, running_set>>
     /\ mainNormalUnchanged
 
 --------------------------
@@ -269,7 +274,7 @@ ScheduleMemJob ==
     /\ \/ when_scheduled
        \/ when_ignore
 
-    /\ UNCHANGED local_job
+    /\ UNCHANGED <<local_job, local_epoch>>
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
     /\ UNCHANGED running_set
@@ -284,8 +289,10 @@ update_job_scheduled_and_start_success(j) ==
             ![j].is_running = TRUE
         ]
     /\ job_pc' = [job_pc EXCEPT ![j] = "Running"]
+    /\ UNCHANGED mem_epoch
 
 update_job_scheduled_and_start_failed ==
+    /\ mem_epoch' = nil \* reset mem epoch
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
 
@@ -304,10 +311,16 @@ UpdateToScheduled ==
 
     /\ update_job_scheduled_and_start(j)
 
-    /\ UNCHANGED <<local_job, local_version>>
-    /\ mainNormalUnchanged
+    /\ UNCHANGED <<local_job, local_version, local_epoch>>
+    /\ UNCHANGED db_epoch
+    /\ mainUnchanged
 
 --------------------------
+
+clear_local_vars ==
+    /\ local_job' = nil
+    /\ local_version' = nil
+    /\ local_epoch' = nil
 
 clear_mem_job(j) ==
     IF mem_job[j] = nil THEN
@@ -330,10 +343,9 @@ UpdateRunningSet ==
     IN
     /\ pc = "UpdateRunningSet"
     /\ pc' = "Init"
-    /\ local_job' = nil
-    /\ local_version' = nil
 
     /\ do_update_running_set(j)
+    /\ clear_local_vars
 
     /\ mainNormalUnchanged
 
@@ -345,15 +357,14 @@ UpdateJobEpoch ==
 
         allow_update ==
             /\ db_job[j].status = "Ready"
-            /\ db_job[j].version = local_version
+            /\ db_job[j].version = local_version \* TODO remove?
     IN
     /\ pc = "UpdateJobEpoch"
     /\ pc' = "Init"
     /\ IF allow_update
-        THEN db_job' = [db_job EXCEPT ![j].epoch = mem_epoch]
+        THEN db_job' = [db_job EXCEPT ![j].epoch = local_epoch]
         ELSE UNCHANGED db_job
-    /\ local_job' = nil
-    /\ local_version' = nil
+    /\ clear_local_vars
 
     /\ UNCHANGED mem_job
     /\ UNCHANGED job_pc
@@ -363,7 +374,7 @@ UpdateJobEpoch ==
 -------------------------------------------------------------
 
 runUnchanged ==
-    /\ UNCHANGED <<pc, local_job, local_version>>
+    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
     /\ UNCHANGED db_config
     /\ UNCHANGED db_epoch
     /\ UNCHANGED mem_epoch
@@ -393,8 +404,7 @@ FinishRunningJob(j) ==
 -------------------------------------------------------------
 
 backgroundUnchanged ==
-    /\ UNCHANGED <<pc, local_job, local_version>>
-    /\ UNCHANGED mem_epoch
+    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
     /\ UNCHANGED db_config
     /\ UNCHANGED db_epoch
     /\ UNCHANGED num_rerun
@@ -412,7 +422,7 @@ BackgroundSchedule(j) ==
 
     /\ UNCHANGED db_job
     /\ UNCHANGED job_pc
-    /\ UNCHANGED <<running_set>>
+    /\ UNCHANGED <<mem_epoch, running_set>>
     /\ backgroundUnchanged
 
 --------------------------
@@ -440,6 +450,7 @@ BackgroundUpdateRunningSet ==
     /\ do_update_running_set(j)
     /\ background_job' = nil
 
+    /\ UNCHANGED mem_epoch
     /\ backgroundUnchanged
 
 -------------------------------------------------------------
@@ -460,6 +471,7 @@ BackgroundScanRunningSet ==
     /\ UNCHANGED scheduling_set
     /\ UNCHANGED job_pc
     /\ UNCHANGED <<background_pc, background_job>>
+    /\ UNCHANGED mem_epoch
     /\ backgroundUnchanged
 
 -------------------------------------------------------------
@@ -476,7 +488,7 @@ IncDBConfig ==
     /\ db_job' = [j \in Job |-> update_job(j, db_job[j])]
     /\ db_epoch' = db_epoch + 1
 
-    /\ UNCHANGED <<pc, local_job, local_version>>
+    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
     /\ UNCHANGED <<background_pc, background_job>>
     /\ UNCHANGED num_rerun
     /\ UNCHANGED <<mem_epoch, mem_job, scheduling_set, running_set>>
@@ -639,5 +651,11 @@ DBJobEpochInv ==
     \A j \in Job:
         db_job[j] # nil /\ db_job[j].epoch > 0 =>
             db_job[j].status = "Ready"
+
+
+MemRunningMatchDBInv ==
+    \A j \in Job:
+        db_job[j] # nil /\ db_job[j].is_running =>
+            is_scheduling_or_running(j)
 
 ====
