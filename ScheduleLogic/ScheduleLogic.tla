@@ -1,7 +1,10 @@
 ---- MODULE ScheduleLogic ----
 EXTENDS TLC, Naturals
 
-CONSTANTS Job, nil, max_rerun, max_db_config, max_failure
+CONSTANTS
+    Job, nil,
+    max_rerun, max_db_config,
+    max_failure, max_restart
 
 VARIABLES
     db_config, db_epoch, mem_epoch,
@@ -9,7 +12,7 @@ VARIABLES
     pc, local_job, local_version, local_epoch,
     job_pc,
     background_pc, background_job,
-    num_rerun, num_failure
+    num_rerun, num_failure, num_restart
 
 vars == <<
     db_config, db_epoch, mem_epoch,
@@ -17,7 +20,7 @@ vars == <<
     pc, local_job, local_version, local_epoch,
     job_pc,
     background_pc, background_job,
-    num_rerun, num_failure
+    num_rerun, num_failure, num_restart
 >>
 
 -------------------------------------------------------------
@@ -83,6 +86,7 @@ TypeOK ==
 
     /\ num_rerun \in 0..max_rerun
     /\ num_failure \in 0..max_failure
+    /\ num_restart \in 0..max_restart
 
 Init ==
     /\ db_config = 10
@@ -106,15 +110,19 @@ Init ==
 
     /\ num_rerun = 0
     /\ num_failure = 0
+    /\ num_restart = 0
 
 -------------------------------------------------------------
 
+localVarUnchanged ==
+    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
+
 jobUnchanged ==
     /\ UNCHANGED <<mem_epoch, mem_job, scheduling_set, running_set>>
-    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
+    /\ localVarUnchanged
     /\ UNCHANGED job_pc
     /\ UNCHANGED <<background_pc, background_job>>
-    /\ UNCHANGED num_failure
+    /\ UNCHANGED <<num_failure, num_restart>>
 
 StartJob(j) ==
     LET
@@ -154,7 +162,7 @@ ReRunJob(j) ==
 mainUnchanged ==
     /\ UNCHANGED db_config
     /\ UNCHANGED <<background_pc, background_job>>
-    /\ UNCHANGED num_rerun
+    /\ UNCHANGED <<num_rerun, num_restart>>
 
 --------------------------
 
@@ -384,13 +392,13 @@ UpdateJobEpoch ==
 -------------------------------------------------------------
 
 runUnchanged ==
-    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
+    /\ localVarUnchanged
     /\ UNCHANGED db_config
     /\ UNCHANGED db_epoch
     /\ UNCHANGED mem_epoch
     /\ UNCHANGED <<background_pc, background_job>>
     /\ UNCHANGED <<scheduling_set, running_set>>
-    /\ UNCHANGED <<num_rerun, num_failure>>
+    /\ UNCHANGED <<num_rerun, num_failure, num_restart>>
 
 FinishRunningJob(j) ==
     LET
@@ -414,10 +422,10 @@ FinishRunningJob(j) ==
 -------------------------------------------------------------
 
 backgroundUnchanged ==
-    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
+    /\ localVarUnchanged
     /\ UNCHANGED db_config
     /\ UNCHANGED db_epoch
-    /\ UNCHANGED num_rerun
+    /\ UNCHANGED <<num_rerun, num_restart>>
 
 BackgroundSchedule(j) ==
     /\ background_pc = "Init"
@@ -501,9 +509,9 @@ IncDBConfig ==
     /\ db_job' = [j \in Job |-> update_job(j, db_job[j])]
     /\ db_epoch' = db_epoch + 1
 
-    /\ UNCHANGED <<pc, local_job, local_version, local_epoch>>
+    /\ localVarUnchanged
     /\ UNCHANGED <<background_pc, background_job>>
-    /\ UNCHANGED <<num_rerun, num_failure>>
+    /\ UNCHANGED <<num_rerun, num_failure, num_restart>>
     /\ UNCHANGED <<mem_epoch, mem_job, scheduling_set, running_set>>
     /\ UNCHANGED job_pc
 
