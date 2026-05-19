@@ -49,8 +49,7 @@ NullDBJob == DBJob \union {nil}
 
 MemJob == [
     config: Config,
-    version: JobVersion,
-    need_schedule: BOOLEAN
+    version: JobVersion
 ]
 NullMemJob == MemJob \union {nil}
 
@@ -278,37 +277,34 @@ ScheduleMemJob ==
         j == local_job
         job == db_job[j]
 
+        when_scheduled ==
+            /\ ~is_scheduling_or_running(j)
+            /\ pc' = "Init"
+            /\ scheduling_set' = scheduling_set \union {j}
+            /\ mem_job' = [mem_job EXCEPT ![j] = nil]
+            /\ background_goto(j, "UpdateToScheduled")
+            /\ UNCHANGED local_version
+
         init_job == [
             config |-> job.config,
-            version |-> job.version,
-            need_schedule |-> nil
+            version |-> job.version
         ]
 
-        base_job ==
+        new_mem_job ==
             IF mem_job[j] # nil
                 THEN [mem_job[j] EXCEPT !.version = job.version]
                 ELSE init_job
 
-        scheduling_job == [base_job EXCEPT !.need_schedule = FALSE]
-        when_scheduled ==
-            /\ ~is_scheduling_or_running(j)
-            /\ pc' = "Init"
-            /\ mem_job' = [mem_job EXCEPT ![j] = scheduling_job]
-            /\ scheduling_set' = scheduling_set \union {j}
-            /\ background_goto(j, "UpdateToScheduled")
-            /\ UNCHANGED local_version
-
-        pending_job == [base_job EXCEPT !.need_schedule = TRUE]
-        when_ignore ==
+        when_delayed ==
             /\ pc' = "UpdateJobEpoch"
-            /\ mem_job' = [mem_job EXCEPT ![j] = pending_job]
+            /\ mem_job' = [mem_job EXCEPT ![j] = new_mem_job]
             /\ local_version' = job.version
             /\ UNCHANGED background_pc
             /\ UNCHANGED scheduling_set
     IN
     /\ pc = "ScheduleMemJob"
     /\ \/ when_scheduled
-       \/ when_ignore
+       \/ when_delayed
 
     /\ UNCHANGED <<local_job, local_epoch, local_scheduling_set>>
     /\ UNCHANGED db_job
@@ -353,18 +349,10 @@ clear_local_vars ==
     /\ local_epoch' = nil
     /\ local_scheduling_set' = {}
 
-clear_mem_job(j) ==
-    IF mem_job[j] = nil THEN
-        UNCHANGED mem_job
-    ELSE IF mem_job[j].need_schedule THEN
-        UNCHANGED mem_job
-    ELSE
-        mem_job' = [mem_job EXCEPT ![j] = nil]
-
 do_update_running_set(j) ==
     /\ scheduling_set' = scheduling_set \ {j}
     /\ running_set' = running_set \union {j}
-    /\ clear_mem_job(j)
+    /\ UNCHANGED mem_job
     /\ UNCHANGED job_pc
     /\ UNCHANGED db_job
 
@@ -432,11 +420,10 @@ backgroundUnchanged ==
 BackgroundSchedule(j) ==
     /\ background_pc[j] = "Init"
     /\ mem_job[j] # nil
-    /\ mem_job[j].need_schedule
     /\ ~is_scheduling_or_running(j)
 
     /\ background_goto(j, "UpdateToScheduled")
-    /\ mem_job' = [mem_job EXCEPT ![j].need_schedule = FALSE]
+    /\ mem_job' = [mem_job EXCEPT ![j] = nil]
     /\ scheduling_set' = scheduling_set \union {j}
 
     /\ UNCHANGED db_job
@@ -530,6 +517,7 @@ TerminateCond ==
         /\ ~db_job[j].is_running
         /\ job_pc[j] = "Terminated"
         /\ background_pc[j]= "Init"
+        /\ mem_job[j] = nil
     /\ mem_epoch = db_epoch
     /\ scheduling_set = {}
     /\ running_set = {}
