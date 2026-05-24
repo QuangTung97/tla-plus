@@ -10,14 +10,16 @@ VARIABLES
     state, leader_term, mem_fully_repl,
     remain_map, mem_log, commit_log, \* TODO add prepare_log
     msgs,
-    acc_term, acc_log, fully_replicated
+    acc_term, acc_log,
+    god_log
 
 leader_vars == <<
     global_term,
     state, leader_term, mem_fully_repl,
-    remain_map, mem_log, commit_log
+    remain_map, mem_log, commit_log,
+    god_log
 >>
-acceptor_vars == <<acc_term, acc_log, fully_replicated>>
+acceptor_vars == <<acc_term, acc_log>>
 
 vars == <<
     leader_vars,
@@ -174,13 +176,12 @@ TypeOK ==
     /\ remain_map \in [Node -> Null(LeaderRemainMap)]
     /\ mem_log \in [Node -> Seq(MemLogEntry)]
     /\ commit_log \in [Node -> Seq(LogValue)]
-
+    /\ god_log \in Seq(LogValue)
 
     /\ msgs \subseteq Msg
 
     /\ acc_term \in [Node -> Term]
     /\ acc_log \in [Node -> Seq(Null(LogEntry))]
-    /\ fully_replicated \in [Node -> LogPos]
 
 Init ==
     /\ global_term = 20
@@ -191,18 +192,20 @@ Init ==
     /\ remain_map = [n \in Node |-> nil]
     /\ mem_log = [n \in Node |-> <<>>]
     /\ commit_log = [n \in Node |-> <<>>]
+    /\ god_log = <<>>
 
     /\ msgs = {}
 
     /\ acc_term = [n \in Node |-> 20]
     /\ acc_log = [n \in Node |-> <<>>]
-    /\ fully_replicated = [n \in Node |-> 0]
 
 ------------------------------------------------------------------
 
 StartElection(n) ==
     LET
-        start_pos == fully_replicated[n] + 1
+        fully_replicated == 0 \* TODO
+
+        start_pos == fully_replicated + 1
 
         vote_req_to(y) == [
             type |-> "VoteReq",
@@ -217,11 +220,11 @@ StartElection(n) ==
     /\ state[n] = "Follower"
     /\ global_term' = global_term + 1
     /\ leader_term' = [leader_term EXCEPT ![n] = global_term']
-    /\ mem_fully_repl' = [mem_fully_repl EXCEPT ![n] = fully_replicated[n]]
+    /\ mem_fully_repl' = [mem_fully_repl EXCEPT ![n] = fully_replicated]
     /\ state' = [state EXCEPT ![n] = "Candidate"]
     /\ msgs' = msgs \union req_set
     /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
-    /\ UNCHANGED <<mem_log, commit_log>>
+    /\ UNCHANGED <<mem_log, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
 -----------------------
@@ -231,7 +234,7 @@ doHandleVoteResp(n, resp) ==
         y == resp.from_node
 
         new_remain_map == [remain_map EXCEPT ![n][y] = infinity]
-        inf_set == {x \in Node: remain_map[n][x] = infinity}
+        inf_set == {x \in Node: new_remain_map[n][x] = infinity}
 
         switch_to_leader ==
             inf_set \in QuorumOf(Node)
@@ -253,7 +256,7 @@ doHandleVoteResp(n, resp) ==
         THEN when_become_leader
         ELSE when_normal
 
-    /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log>>
+    /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED msgs
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED global_term
@@ -280,7 +283,7 @@ doHandleVoteReq(n, req) ==
     /\ req.term > acc_term[n]
     /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
     /\ msgs' = msgs \union {resp}
-    /\ UNCHANGED <<acc_log, fully_replicated>>
+    /\ UNCHANGED acc_log
     /\ UNCHANGED leader_vars
 
 HandleVoteReq(n) ==
@@ -315,7 +318,7 @@ doNewLeaderCmd(n, v) ==
     /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, entry)]
     /\ msgs' = msgs \union acc_req_set
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
-    /\ UNCHANGED <<mem_fully_repl, commit_log>>
+    /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
 NewLeaderCmd(n) ==
@@ -351,7 +354,6 @@ doHandleAcceptReq(n, req) ==
     /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
     /\ acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, new_entry)]
     /\ msgs' = msgs \union {acc_resp}
-    /\ UNCHANGED fully_replicated
     /\ UNCHANGED leader_vars
 
 HandleAcceptReq(n) ==
@@ -386,6 +388,9 @@ doHandleAcceptResp(n, resp) ==
     /\ y \notin mem_log[n][index].acceptors
     /\ mem_log' = [set_committed EXCEPT ![n] = RemoveSeqBefore(@, first_non_commit)]
     /\ commit_log' = [commit_log EXCEPT ![n] = @ \o new_committed_values]
+    /\ IF Len(commit_log'[n]) > Len(god_log)
+        THEN god_log' = commit_log'[n]
+        ELSE UNCHANGED god_log
     /\ UNCHANGED msgs
     /\ UNCHANGED mem_fully_repl
     /\ UNCHANGED <<leader_term, global_term, state, remain_map>>
@@ -421,7 +426,29 @@ Spec == Init /\ [][Next]_vars
 LeaderTermInv ==
     \A n \in Node: leader_term[n] <= global_term
 
+
+godLogStep ==
+    LET
+        new_len == Len(god_log')
+        old_len == Len(god_log)
+    IN
+    /\ new_len > old_len
+    /\ SubSeq(god_log', 1, old_len) = god_log
+
+GodLogProperty ==
+    [][godLogStep]_god_log
+
+
+GodLogMatchCommitLog ==
+    \A n \in Node:
+        commit_log[n] = SubSeq(god_log, 1, Len(commit_log[n]))
+
+
 \* TODO add state fields inv
 \* TODO acc_log and fully_replicated inv
+
+
+InversedInv ==
+    Len(god_log) = 0
 
 ====
