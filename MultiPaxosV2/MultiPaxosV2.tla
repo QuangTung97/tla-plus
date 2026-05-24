@@ -8,7 +8,7 @@ CONSTANTS
 VARIABLES
     global_term,
     state, leader_term, mem_fully_repl,
-    remain_map, mem_log, commit_log, \* TODO add prepare_log
+    remain_map, prepare_log, mem_log, commit_log,
     msgs,
     acc_term, acc_log,
     god_log
@@ -16,7 +16,7 @@ VARIABLES
 leader_vars == <<
     global_term,
     state, leader_term, mem_fully_repl,
-    remain_map, mem_log, commit_log,
+    remain_map, prepare_log, mem_log, commit_log,
     god_log
 >>
 acceptor_vars == <<acc_term, acc_log>>
@@ -126,7 +126,7 @@ VoteReqMsg == [
 ]
 
 VoteLogEntry == [
-    term: InfLogPos,
+    term: Term,
     value: LogValue
 ]
 
@@ -174,6 +174,7 @@ TypeOK ==
     /\ leader_term \in [Node -> Term]
     /\ mem_fully_repl \in [Node -> Null(LogPos)]
     /\ remain_map \in [Node -> Null(LeaderRemainMap)]
+    /\ prepare_log \in [Node -> Seq(VoteLogEntry)]
     /\ mem_log \in [Node -> Seq(MemLogEntry)]
     /\ commit_log \in [Node -> Seq(LogValue)]
     /\ god_log \in Seq(LogValue)
@@ -190,6 +191,7 @@ Init ==
     /\ leader_term = [n \in Node |-> 20]
     /\ mem_fully_repl = [n \in Node |-> nil]
     /\ remain_map = [n \in Node |-> nil]
+    /\ prepare_log = [n \in Node |-> <<>>]
     /\ mem_log = [n \in Node |-> <<>>]
     /\ commit_log = [n \in Node |-> <<>>]
     /\ god_log = <<>>
@@ -224,33 +226,63 @@ StartElection(n) ==
     /\ state' = [state EXCEPT ![n] = "Candidate"]
     /\ msgs' = msgs \union req_set
     /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
-    /\ UNCHANGED <<mem_log, commit_log, god_log>>
+    /\ UNCHANGED <<prepare_log, mem_log, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
 -----------------------
+
+entry_with_default_nop(entry) ==
+    IF entry = nil
+        THEN [term |-> 20, value |-> nop]
+        ELSE entry
 
 doHandleVoteResp(n, resp) ==
     LET
         y == resp.from_node
 
-        new_remain_map == [remain_map EXCEPT ![n][y] = infinity]
-        inf_set == {x \in Node: new_remain_map[n][x] = infinity}
-
-        switch_to_leader ==
-            inf_set \in QuorumOf(Node)
+        new_remain_map ==
+            IF resp.more
+                THEN [remain_map EXCEPT ![n][y] = @ + 1]
+                ELSE [remain_map EXCEPT ![n][y] = infinity]
 
         when_normal ==
             /\ remain_map' = new_remain_map
             /\ UNCHANGED state
-            /\ UNCHANGED mem_log
+
+        inf_set == {x \in Node: new_remain_map[n][x] = infinity}
+        switch_to_leader ==
+            inf_set \in QuorumOf(Node)
 
         when_become_leader ==
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ remain_map' = [remain_map EXCEPT ![n] = nil]
-            /\ UNCHANGED mem_log
+
+        start_pos == mem_fully_repl[n] + Len(commit_log[n]) + Len(mem_log[n]) + 1
+        index == resp.pos - start_pos + 1
+
+        prev_entry == GetSeqPos(prepare_log[n], index)
+        resp_entry == entry_with_default_nop(resp.entry)
+
+        new_entry == [
+            term |-> resp_entry.term,
+            value |-> resp_entry.value
+        ]
+
+        old_prepare_log == prepare_log[n]
+        new_prepare_log == PutSeqPos(old_prepare_log, index, new_entry)
+
+        old_mem_log == mem_log[n]
+        new_mem_log == old_mem_log
     IN
     /\ state[n] = "Candidate"
     /\ remain_map[n][y] = resp.pos
+
+    /\ IF resp.more THEN
+            /\ prepare_log' = [prepare_log EXCEPT ![n] = new_prepare_log]
+            /\ mem_log' = [mem_log EXCEPT ![n] = new_mem_log]
+        ELSE
+            /\ UNCHANGED prepare_log
+            /\ UNCHANGED mem_log
 
     /\ IF switch_to_leader
         THEN when_become_leader
@@ -271,18 +303,27 @@ HandleVoteResp(n) ==
 
 doHandleVoteReq(n, req) ==
     LET
-        resp == [
+        final_resp == [
             type |-> "VoteResp",
             term |-> req.term,
             from_node |-> n,
             more |-> FALSE,
-            pos |-> 1, \* TODO
+            pos |-> Len(acc_log[n]) + 1,
             entry |-> nil
         ]
+
+        normal_resp(i) == [final_resp EXCEPT
+            !.more = TRUE,
+            !.pos = i,
+            !.entry = acc_log[n][i]
+        ]
+
+        resp_pos_set == {i \in DOMAIN acc_log[n]: i >= req.from_pos}
+        normal_resp_set == {normal_resp(i): i \in resp_pos_set}
     IN
     /\ req.term > acc_term[n]
     /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
-    /\ msgs' = msgs \union {resp}
+    /\ msgs' = msgs \union normal_resp_set \union {final_resp}
     /\ UNCHANGED acc_log
     /\ UNCHANGED leader_vars
 
@@ -318,7 +359,7 @@ doNewLeaderCmd(n, v) ==
     /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, entry)]
     /\ msgs' = msgs \union acc_req_set
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
-    /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED <<prepare_log, mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
 NewLeaderCmd(n) ==
@@ -393,7 +434,7 @@ doHandleAcceptResp(n, resp) ==
         ELSE UNCHANGED god_log
     /\ UNCHANGED msgs
     /\ UNCHANGED mem_fully_repl
-    /\ UNCHANGED <<leader_term, global_term, state, remain_map>>
+    /\ UNCHANGED <<leader_term, global_term, state, prepare_log, remain_map>>
     /\ UNCHANGED acceptor_vars
 
 HandleAcceptResp(n) ==
@@ -446,6 +487,7 @@ GodLogMatchCommitLog ==
 
 \* TODO add state fields inv
 \* TODO acc_log and fully_replicated inv
+\* TODO prepare log must be empty when leader
 
 
 InversedInv ==
