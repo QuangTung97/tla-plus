@@ -68,11 +68,29 @@ ASSUME MinOf({12, 13, 14}) = 12
 
 -----------------------
 
+FindFirstIndex(s, pred(_)) ==
+    LET
+        values == {i \in DOMAIN s: pred(s[i])}
+    IN
+    MinOf(values \union {Len(s) + 1})
+
+ASSUME FindFirstIndex(<<12, 13, 14>>, LAMBDA x: x > 13) = 3
+ASSUME FindFirstIndex(<<12, 13, 14>>, LAMBDA x: x > 18) = 4
+
+-----------------------
+
 RemoveSeqBefore(s, pos) ==
     SubSeq(s, pos, Len(s))
 
 ASSUME RemoveSeqBefore(<<11, 12, 13>>, 3) = <<13>>
 ASSUME RemoveSeqBefore(<<11, 12, 13>>, 5) = <<>>
+
+-----------------------
+
+MapSeq(s, fn(_)) ==
+    [i \in DOMAIN s |-> fn(s[i])]
+
+ASSUME MapSeq(<<11, 12, 13>>, LAMBDA x: x + 10) = <<21, 22, 23>>
 
 ------------------------------------------------------------------
 
@@ -145,10 +163,6 @@ MemLogEntry == [
     committed: BOOLEAN
 ]
 
-CommitEntry == [
-    value: LogValue
-]
-
 ------------------------------------------------------------------
 
 TypeOK ==
@@ -159,7 +173,7 @@ TypeOK ==
     /\ mem_fully_repl \in [Node -> Null(LogPos)]
     /\ remain_map \in [Node -> Null(LeaderRemainMap)]
     /\ mem_log \in [Node -> Seq(MemLogEntry)]
-    /\ commit_log \in [Node -> Seq(CommitEntry)]
+    /\ commit_log \in [Node -> Seq(LogValue)]
 
 
     /\ msgs \subseteq Msg
@@ -352,26 +366,26 @@ doHandleAcceptResp(n, resp) ==
     LET
         pos == resp.pos
         y == resp.from_node
+        mem_log_start == mem_fully_repl[n] + 1 + Len(commit_log[n])
+        index == pos - mem_log_start + 1
 
-        new_mem_log == [mem_log EXCEPT ![n][pos].acceptors = @ \union {y}]
+        new_mem_log == [mem_log EXCEPT ![n][index].acceptors = @ \union {y}]
 
         is_committed ==
-            new_mem_log[n][pos].acceptors \in QuorumOf(Node)
+            new_mem_log[n][index].acceptors \in QuorumOf(Node)
 
-        set_committed == [new_mem_log EXCEPT ![n][pos].committed = is_committed]
+        set_committed == [new_mem_log EXCEPT ![n][index].committed = is_committed]
         new_log == set_committed[n]
 
-        non_committed_set_raw == {
-            i \in DOMAIN new_log: ~new_log[i].committed
-        }
-        non_committed_set == non_committed_set_raw \union {Len(new_log)}
-        first_non_commit == MinOf(non_committed_set)
+        first_non_commit == FindFirstIndex(new_log, LAMBDA entry: ~entry.committed)
 
         new_committed == SubSeq(new_log, 1, first_non_commit - 1)
+        new_committed_values == MapSeq(new_committed, LAMBDA entry: entry.value)
     IN
-    /\ y \notin mem_log[n][pos].acceptors
+    /\ pos >= mem_log_start
+    /\ y \notin mem_log[n][index].acceptors
     /\ mem_log' = [set_committed EXCEPT ![n] = RemoveSeqBefore(@, first_non_commit)]
-    /\ commit_log' = [commit_log EXCEPT ![n] = @ \o new_committed]
+    /\ commit_log' = [commit_log EXCEPT ![n] = @ \o new_committed_values]
     /\ UNCHANGED msgs
     /\ UNCHANGED mem_fully_repl
     /\ UNCHANGED <<leader_term, global_term, state, remain_map>>
