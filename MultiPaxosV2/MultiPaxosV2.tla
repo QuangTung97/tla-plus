@@ -540,6 +540,9 @@ CandidateStateInv ==
 
         cond(n) ==
             /\ start_prepare_pos(n) = computed_pos(n)
+            /\ \A y \in Node:
+                remain_map[n][y] # infinity =>
+                    remain_map[n][y] >= start_prepare_pos(n)
     IN
     \A n \in Node:
         state[n] = "Candidate" => cond(n)
@@ -547,7 +550,6 @@ CandidateStateInv ==
 
 \* TODO add state fields inv
 \* TODO acc_log and fully_replicated inv
-\* TODO remain_map and start_prepare_pos inv
 
 
 InversedInv ==
