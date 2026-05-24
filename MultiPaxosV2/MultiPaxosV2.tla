@@ -3,16 +3,16 @@ EXTENDS TLC, Naturals, FiniteSets, Sequences
 
 CONSTANTS
     Node, nil, infinity,
-    Value, nop, max_mem_log_len
+    Value, nop, max_log_len
 
 VARIABLES
     global_term,
     state, leader_term, remain_map, mem_log, \* TODO add prepare_log
     msgs,
-    term, log, fully_replicated
+    acc_term, acc_log, fully_replicated
 
 leader_vars == <<global_term, state, leader_term, remain_map, mem_log>>
-acceptor_vars == <<term, log, fully_replicated>>
+acceptor_vars == <<acc_term, acc_log, fully_replicated>>
 
 vars == <<
     leader_vars,
@@ -33,11 +33,34 @@ QuorumOf(S) ==
 ASSUME QuorumOf({11, 12, 13}) = {{11, 12}, {12, 13}, {13, 11}}
 ASSUME QuorumOf({11, 12}) = {{11, 12}}
 
+-----------------------
+
+PutSeqPos(s, pos, x) ==
+    LET
+        nil_list_len == pos - Len(s) - 1
+        nil_list == [i \in 1..nil_list_len |-> nil]
+    IN
+    IF Len(s) >= pos
+        THEN [s EXCEPT ![pos] = x]
+        ELSE s \o nil_list \o <<x>>
+
+GetSeqPos(s, pos) ==
+    IF Len(s) >= pos
+        THEN s[pos]
+        ELSE nil
+
+ASSUME PutSeqPos(<<12>>, 3, 10) = <<12, nil, 10>>
+ASSUME PutSeqPos(<<11, 12, 13>>, 2, 22) = <<11, 22, 13>>
+ASSUME GetSeqPos(<<11, 12, 13>>, 2) = 12
+ASSUME GetSeqPos(<<11, 12, 13>>, 3) = 13
+ASSUME GetSeqPos(<<11, 12, 13>>, 4) = nil
+
 ------------------------------------------------------------------
 
 Null(S) == S \union {nil}
 
 Term == 20..29
+InfTerm == Term \union {infinity}
 
 LogPos == 0..9
 
@@ -50,7 +73,7 @@ LeaderRemainMap == [Node -> Null(InfLogPos)]
 LogValue == Value \union {nop}
 
 LogEntry == [
-    term: InfLogPos,
+    term: InfTerm,
     value: LogValue
 ]
 
@@ -85,8 +108,15 @@ AcceptReqMsg == [
     value: LogValue
 ]
 
+AcceptRespMsg == [
+    type: {"AcceptResp"},
+    term: Term,
+    from_node: Node,
+    pos: LogPos
+]
+
 Msg ==
-    UNION {VoteReqMsg, VoteRespMsg, AcceptReqMsg}
+    UNION {VoteReqMsg, VoteRespMsg, AcceptReqMsg, AcceptRespMsg}
 
 -----------------------
 
@@ -107,8 +137,8 @@ TypeOK ==
 
     /\ msgs \subseteq Msg
 
-    /\ term \in [Node -> Term]
-    /\ log \in Seq(LogEntry)
+    /\ acc_term \in [Node -> Term]
+    /\ acc_log \in [Node -> Seq(Null(LogEntry))]
     /\ fully_replicated \in [Node -> LogPos]
 
 Init ==
@@ -121,8 +151,8 @@ Init ==
 
     /\ msgs = {}
 
-    /\ term = [n \in Node |-> 20]
-    /\ log = <<>>
+    /\ acc_term = [n \in Node |-> 20]
+    /\ acc_log = [n \in Node |-> <<>>]
     /\ fully_replicated = [n \in Node |-> 0]
 
 ------------------------------------------------------------------
@@ -201,10 +231,10 @@ doHandleVoteReq(n, req) ==
             entry |-> nil
         ]
     IN
-    /\ req.term > term[n]
-    /\ term' = [term EXCEPT ![n] = req.term]
+    /\ req.term > acc_term[n]
+    /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
     /\ msgs' = msgs \union {resp}
-    /\ UNCHANGED <<log, fully_replicated>>
+    /\ UNCHANGED <<acc_log, fully_replicated>>
     /\ UNCHANGED leader_vars
 
 HandleVoteReq(n) ==
@@ -234,7 +264,7 @@ doNewLeaderCmd(n, v) ==
         acc_req_set == {acc_req(y): y \in Node}
     IN
     /\ state[n] = "Leader"
-    /\ Len(mem_log[n]) < max_mem_log_len
+    /\ pos <= max_log_len
     /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, entry)]
     /\ msgs' = msgs \union acc_req_set
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
@@ -246,8 +276,33 @@ NewLeaderCmd(n) ==
 ------------------------------------------------------------------
 
 doHandleAcceptReq(n, req) ==
-    /\ req.term >= term[n]
-    /\ term' = [term EXCEPT ![n] = req.term]
+    LET
+        pos == req.pos
+        log == acc_log[n]
+
+        prev_entry == GetSeqPos(log, pos)
+        new_entry == [
+            term |-> req.term,
+            value |-> req.value
+        ]
+
+        not_allow_update ==
+            /\ prev_entry # nil
+            /\ \/ prev_entry.term = infinity
+               \/ prev_entry.term = req.term
+
+        acc_resp == [
+            type |-> "AcceptResp",
+            term |-> req.term,
+            pos |-> pos,
+            from_node |-> n
+        ]
+    IN
+    /\ req.term >= acc_term[n]
+    /\ ~not_allow_update
+    /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
+    /\ acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, new_entry)]
+    /\ msgs' = msgs \union {acc_resp}
     /\ UNCHANGED fully_replicated
     /\ UNCHANGED leader_vars
 
