@@ -86,6 +86,7 @@ RemoveSeqBefore(s, pos) ==
 
 ASSUME RemoveSeqBefore(<<11, 12, 13>>, 3) = <<13>>
 ASSUME RemoveSeqBefore(<<11, 12, 13>>, 5) = <<>>
+ASSUME RemoveSeqBefore(<<>>, 2) = <<>>
 
 -----------------------
 
@@ -236,20 +237,67 @@ entry_with_default_nop(entry) ==
         THEN [term |-> 20, value |-> nop]
         ELSE entry
 
+start_prepare_pos(n) ==
+    mem_fully_repl[n] + Len(commit_log[n]) + Len(mem_log[n]) + 1
+
+end_prepare_pos(n, input_prepare_log) ==
+    start_prepare_pos(n) + Len(input_prepare_log)
+
+\* TODO use quorum
+computed_start_prepare_pos(n, input_remain_map, input_prepare_log) ==
+    LET
+        tmp_pos_set == {input_remain_map[y]: y \in Node}
+        pos_set == {p \in tmp_pos_set: p # infinity}
+    IN
+        MinOf(pos_set \union {end_prepare_pos(n, input_prepare_log)})
+
+-----------------------
+
+append_mem_log(n, values) ==
+    LET
+        new_entry_fn(v) == [
+            value |-> v,
+            acceptors |-> {},
+            committed |-> FALSE
+        ]
+        entry_list == MapSeq(values, new_entry_fn)
+
+        compute_pos(i) == mem_fully_repl[n] + Len(mem_log[n]) + i
+
+        acc_req(y, i, v) == [
+            type |-> "AcceptReq",
+            term |-> leader_term[n],
+            to_node |-> y,
+            pos |-> compute_pos(i),
+            value |-> v
+        ]
+
+        acc_req_set_to_node(y) == {
+            acc_req(y, i, values[i]): i \in DOMAIN values
+        }
+
+        acc_req_set == UNION {acc_req_set_to_node(y): y \in Node}
+    IN
+    /\ mem_log' = [mem_log EXCEPT ![n] = @ \o entry_list]
+    /\ msgs' = msgs \union acc_req_set
+
+-----------------------
+
 doHandleVoteResp(n, resp) ==
     LET
         y == resp.from_node
 
+        old_remain_map == remain_map[n]
         new_remain_map ==
             IF resp.more
-                THEN [remain_map EXCEPT ![n][y] = @ + 1]
-                ELSE [remain_map EXCEPT ![n][y] = infinity]
+                THEN [old_remain_map EXCEPT ![y] = @ + 1]
+                ELSE [old_remain_map EXCEPT ![y] = infinity]
 
         when_normal ==
-            /\ remain_map' = new_remain_map
+            /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
             /\ UNCHANGED state
 
-        inf_set == {x \in Node: new_remain_map[n][x] = infinity}
+        inf_set == {x \in Node: new_remain_map[x] = infinity}
         switch_to_leader ==
             inf_set \in QuorumOf(Node)
 
@@ -257,10 +305,10 @@ doHandleVoteResp(n, resp) ==
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ remain_map' = [remain_map EXCEPT ![n] = nil]
 
-        start_pos == mem_fully_repl[n] + Len(commit_log[n]) + Len(mem_log[n]) + 1
+        start_pos == start_prepare_pos(n)
         index == resp.pos - start_pos + 1
 
-        prev_entry == GetSeqPos(prepare_log[n], index)
+        prev_entry == GetSeqPos(prepare_log[n], index) \* TODO use
         resp_entry == entry_with_default_nop(resp.entry)
 
         new_entry == [
@@ -269,27 +317,32 @@ doHandleVoteResp(n, resp) ==
         ]
 
         old_prepare_log == prepare_log[n]
-        new_prepare_log == PutSeqPos(old_prepare_log, index, new_entry)
+        put_prepare_log ==
+            IF resp.more
+                THEN PutSeqPos(old_prepare_log, index, new_entry)
+                ELSE old_prepare_log
 
-        old_mem_log == mem_log[n]
-        new_mem_log == old_mem_log
+        new_start_pos == computed_start_prepare_pos(
+            n, new_remain_map, put_prepare_log
+        )
+
+        new_start_index == new_start_pos - start_pos + 1
+        new_prepare_log == RemoveSeqBefore(put_prepare_log, new_start_index)
+
+        removed_prepare_log == SubSeq(put_prepare_log, 1, new_start_index - 1)
+        mem_values == MapSeq(removed_prepare_log, LAMBDA entry: entry.value)
     IN
     /\ state[n] = "Candidate"
     /\ remain_map[n][y] = resp.pos
 
-    /\ IF resp.more THEN
-            /\ prepare_log' = [prepare_log EXCEPT ![n] = new_prepare_log]
-            /\ mem_log' = [mem_log EXCEPT ![n] = new_mem_log]
-        ELSE
-            /\ UNCHANGED prepare_log
-            /\ UNCHANGED mem_log
+    /\ prepare_log' = [prepare_log EXCEPT ![n] = new_prepare_log]
+    /\ append_mem_log(n, mem_values)
 
     /\ IF switch_to_leader
         THEN when_become_leader
         ELSE when_normal
 
     /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log, god_log>>
-    /\ UNCHANGED msgs
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED global_term
 
@@ -337,27 +390,11 @@ HandleVoteReq(n) ==
 
 doNewLeaderCmd(n, v) ==
     LET
-        entry == [
-            value |-> v,
-            acceptors |-> {},
-            committed |-> FALSE
-        ]
-
-        pos == Len(mem_log[n]) + 1 \* TODO with fully replicated
-
-        acc_req(y) == [
-            type |-> "AcceptReq",
-            term |-> leader_term[n],
-            to_node |-> y,
-            pos |-> pos,
-            value |-> v
-        ]
-        acc_req_set == {acc_req(y): y \in Node}
+        pos == mem_fully_repl[n] + Len(mem_log[n]) + 1
     IN
     /\ state[n] = "Leader"
     /\ pos <= max_log_len
-    /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, entry)]
-    /\ msgs' = msgs \union acc_req_set
+    /\ append_mem_log(n, <<v>>)
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
     /\ UNCHANGED <<prepare_log, mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
@@ -485,9 +522,32 @@ GodLogMatchCommitLog ==
         commit_log[n] = SubSeq(god_log, 1, Len(commit_log[n]))
 
 
+NonCandidateStateInv ==
+    LET
+        cond(n) ==
+            /\ prepare_log[n] = <<>>
+            /\ remain_map[n] = nil
+    IN
+    \A n \in Node:
+        state[n] # "Candidate" => cond(n)
+
+
+CandidateStateInv ==
+    LET
+        computed_pos(n) == computed_start_prepare_pos(
+            n, remain_map[n], prepare_log[n]
+        )
+
+        cond(n) ==
+            /\ start_prepare_pos(n) = computed_pos(n)
+    IN
+    \A n \in Node:
+        state[n] = "Candidate" => cond(n)
+
+
 \* TODO add state fields inv
 \* TODO acc_log and fully_replicated inv
-\* TODO prepare log must be empty when leader
+\* TODO remain_map and start_prepare_pos inv
 
 
 InversedInv ==
