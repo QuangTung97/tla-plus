@@ -1,15 +1,17 @@
 ---- MODULE MultiPaxosV2 ----
 EXTENDS TLC, Naturals, FiniteSets, Sequences
 
-CONSTANTS Node, nil, infinity, LogValue
+CONSTANTS
+    Node, nil, infinity,
+    Value, nop, max_mem_log_len
 
 VARIABLES
     global_term,
-    state, leader_term, remain_map,
+    state, leader_term, remain_map, mem_log, \* TODO add prepare_log
     msgs,
     term, log, fully_replicated
 
-leader_vars == <<global_term, state, leader_term, remain_map>>
+leader_vars == <<global_term, state, leader_term, remain_map, mem_log>>
 acceptor_vars == <<term, log, fully_replicated>>
 
 vars == <<
@@ -45,6 +47,8 @@ LeaderRemainMap == [Node -> Null(InfLogPos)]
 
 -----------------------
 
+LogValue == Value \union {nop}
+
 LogEntry == [
     term: InfLogPos,
     value: LogValue
@@ -59,25 +63,48 @@ VoteReqMsg == [
     to_node: Node
 ]
 
+VoteLogEntry == [
+    term: InfLogPos,
+    value: LogValue
+]
+
 VoteRespMsg == [
     type: {"VoteResp"},
     term: Term,
     from_node: Node,
     more: BOOLEAN,
     pos: LogPos,
-    entry: Null(LogEntry)
+    entry: Null(VoteLogEntry)
+]
+
+AcceptReqMsg == [
+    type: {"AcceptReq"},
+    term: Term,
+    to_node: Node,
+    pos: LogPos,
+    value: LogValue
 ]
 
 Msg ==
-    UNION {VoteReqMsg, VoteRespMsg}
+    UNION {VoteReqMsg, VoteRespMsg, AcceptReqMsg}
+
+-----------------------
+
+MemLogEntry == [
+    value: LogValue,
+    acceptors: SUBSET Node
+]
 
 ------------------------------------------------------------------
 
 TypeOK ==
     /\ global_term \in Term
+
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
     /\ leader_term \in [Node -> Term]
     /\ remain_map \in [Node -> Null(LeaderRemainMap)]
+    /\ mem_log \in [Node -> Seq(MemLogEntry)]
+
     /\ msgs \subseteq Msg
 
     /\ term \in [Node -> Term]
@@ -90,6 +117,7 @@ Init ==
     /\ state = [n \in Node |-> "Follower"]
     /\ leader_term = [n \in Node |-> 20]
     /\ remain_map = [n \in Node |-> nil]
+    /\ mem_log = [n \in Node |-> <<>>]
 
     /\ msgs = {}
 
@@ -117,6 +145,7 @@ StartElection(n) ==
     /\ state' = [state EXCEPT ![n] = "Candidate"]
     /\ msgs' = msgs \union req_set
     /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
+    /\ UNCHANGED mem_log
     /\ UNCHANGED acceptor_vars
 
 -----------------------
@@ -134,10 +163,12 @@ doHandleVoteResp(n, resp) ==
         when_normal ==
             /\ remain_map' = new_remain_map
             /\ UNCHANGED state
+            /\ UNCHANGED mem_log
 
         when_become_leader ==
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ remain_map' = [remain_map EXCEPT ![n] = nil]
+            /\ UNCHANGED mem_log
     IN
     /\ state[n] = "Candidate"
     /\ remain_map[n][y] = resp.pos
@@ -184,6 +215,50 @@ HandleVoteReq(n) ==
 
 ------------------------------------------------------------------
 
+doNewLeaderCmd(n, v) ==
+    LET
+        entry == [
+            value |-> v,
+            acceptors |-> {}
+        ]
+
+        pos == Len(mem_log[n]) + 1 \* TODO with fully replicated
+
+        acc_req(y) == [
+            type |-> "AcceptReq",
+            term |-> leader_term[n],
+            to_node |-> y,
+            pos |-> pos,
+            value |-> v
+        ]
+        acc_req_set == {acc_req(y): y \in Node}
+    IN
+    /\ state[n] = "Leader"
+    /\ Len(mem_log[n]) < max_mem_log_len
+    /\ mem_log' = [mem_log EXCEPT ![n] = Append(@, entry)]
+    /\ msgs' = msgs \union acc_req_set
+    /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
+    /\ UNCHANGED acceptor_vars
+
+NewLeaderCmd(n) ==
+    \E v \in Value: doNewLeaderCmd(n, v)
+
+------------------------------------------------------------------
+
+doHandleAcceptReq(n, req) ==
+    /\ req.term >= term[n]
+    /\ term' = [term EXCEPT ![n] = req.term]
+    /\ UNCHANGED fully_replicated
+    /\ UNCHANGED leader_vars
+
+HandleAcceptReq(n) ==
+    \E req \in msgs:
+        /\ req.type = "AcceptReq"
+        /\ req.to_node = n
+        /\ doHandleAcceptReq(n, req)
+
+------------------------------------------------------------------
+
 Terminated ==
     /\ UNCHANGED vars
 
@@ -194,6 +269,8 @@ Next ==
         \/ StartElection(n)
         \/ HandleVoteReq(n)
         \/ HandleVoteResp(n)
+        \/ NewLeaderCmd(n)
+        \/ HandleAcceptReq(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
