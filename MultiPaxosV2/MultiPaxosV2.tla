@@ -305,18 +305,14 @@ doHandleVoteResp(n, resp) ==
                 THEN [old_remain_map EXCEPT ![y] = @ + 1]
                 ELSE [old_remain_map EXCEPT ![y] = infinity]
 
-        when_normal ==
-            /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
-            /\ UNCHANGED state
-
+        \* check become leader
         inf_set == {x \in Node: new_remain_map[x] = infinity}
-        switch_to_leader ==
-            inf_set \in QuorumOf(Node)
-
+        switch_to_leader == inf_set \in QuorumOf(Node)
         when_become_leader ==
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ remain_map' = [remain_map EXCEPT ![n] = nil]
 
+        \* put entry to prepare_log
         index == resp.pos - end_mem_pos(n)
 
         prev_entry == entry_with_default_nop(GetSeqPos(prepare_log[n], index))
@@ -332,6 +328,7 @@ doHandleVoteResp(n, resp) ==
                 THEN PutSeqPos(old_prepare_log, index, put_entry)
                 ELSE old_prepare_log
 
+        \* move from prepare_log to mem_log
         new_start_pos == computed_start_prepare_pos(
             n, new_remain_map, put_prepare_log
         )
@@ -341,6 +338,19 @@ doHandleVoteResp(n, resp) ==
 
         removed_prepare_log == SubSeq(put_prepare_log, 1, new_start_index - 1)
         mem_values == MapSeq(removed_prepare_log, LAMBDA entry: entry.value)
+
+        \* set all remain pos to be >= new_start_pos
+        update_final_pos(old_pos) ==
+            IF old_pos # infinity /\ old_pos < new_start_pos
+                THEN new_start_pos
+                ELSE old_pos
+
+        final_remain_map ==
+            [z \in DOMAIN new_remain_map |-> update_final_pos(new_remain_map[z])]
+
+        when_normal ==
+            /\ remain_map' = [remain_map EXCEPT ![n] = final_remain_map]
+            /\ UNCHANGED state
     IN
     /\ state[n] = "Candidate"
     /\ remain_map[n][y] = resp.pos
