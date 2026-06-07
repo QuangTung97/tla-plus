@@ -68,6 +68,10 @@ MinOf(S) == CHOOSE x \in S: (\A y \in S: y >= x)
 
 ASSUME MinOf({12, 13, 14}) = 12
 
+MaxOf(S) == CHOOSE x \in S: (\A y \in S: y <= x)
+
+ASSUME MaxOf({12, 13, 14}) = 14
+
 -----------------------
 
 FindFirstIndex(s, pred(_)) ==
@@ -242,13 +246,25 @@ end_mem_pos(n) ==
 end_prepare_pos(n, input_prepare_log) ==
     end_mem_pos(n) + Len(input_prepare_log)
 
-\* TODO use quorum
-computed_start_prepare_pos(n, input_remain_map, input_prepare_log) ==
+start_prepare_pos_of_nodes(n, input_remain_map, input_prepare_log, node_set) ==
     LET
-        tmp_pos_set == {input_remain_map[y]: y \in Node}
+        tmp_pos_set == {input_remain_map[y]: y \in node_set}
         pos_set == {p \in tmp_pos_set: p # infinity}
     IN
         MinOf(pos_set \union {end_prepare_pos(n, input_prepare_log) + 1})
+
+computed_start_prepare_pos(n, input_remain_map, input_prepare_log) ==
+    LET
+        quorum_set == QuorumOf(Node)
+
+        pos_fn(nodes) ==
+            start_prepare_pos_of_nodes(
+                n, input_remain_map, input_prepare_log, nodes
+            )
+
+        pos_set == {pos_fn(nodes): nodes \in quorum_set}
+    IN
+    MaxOf(pos_set)
 
 -----------------------
 
