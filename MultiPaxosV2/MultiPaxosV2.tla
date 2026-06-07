@@ -122,8 +122,7 @@ LogEntry == [
 VoteReqMsg == [
     type: {"VoteReq"},
     term: Term,
-    from_pos: LogPos,
-    to_node: Node
+    from_pos: LogPos
 ]
 
 VoteLogEntry == [
@@ -143,7 +142,6 @@ VoteRespMsg == [
 AcceptReqMsg == [
     type: {"AcceptReq"},
     term: Term,
-    to_node: Node,
     pos: LogPos,
     value: LogValue
 ]
@@ -210,13 +208,11 @@ StartElection(n) ==
 
         start_pos == fully_replicated + 1
 
-        vote_req_to(y) == [
+        vote_req == [
             type |-> "VoteReq",
             term |-> leader_term'[n],
-            from_pos |-> start_pos,
-            to_node |-> y
+            from_pos |-> start_pos
         ]
-        req_set == {vote_req_to(y): y \in Node}
 
         new_remain_map == [y \in Node |-> start_pos]
     IN
@@ -225,7 +221,7 @@ StartElection(n) ==
     /\ leader_term' = [leader_term EXCEPT ![n] = global_term']
     /\ mem_fully_repl' = [mem_fully_repl EXCEPT ![n] = fully_replicated]
     /\ state' = [state EXCEPT ![n] = "Candidate"]
-    /\ msgs' = msgs \union req_set
+    /\ msgs' = msgs \union {vote_req}
     /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
     /\ UNCHANGED <<prepare_log, mem_log, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
@@ -264,19 +260,16 @@ append_mem_log(n, values) ==
 
         compute_pos(i) == mem_fully_repl[n] + Len(mem_log[n]) + i
 
-        acc_req(y, i, v) == [
+        acc_req(i, v) == [
             type |-> "AcceptReq",
             term |-> leader_term[n],
-            to_node |-> y,
             pos |-> compute_pos(i),
             value |-> v
         ]
 
-        acc_req_set_to_node(y) == {
-            acc_req(y, i, values[i]): i \in DOMAIN values
+        acc_req_set == {
+            acc_req(i, values[i]): i \in DOMAIN values
         }
-
-        acc_req_set == UNION {acc_req_set_to_node(y): y \in Node}
     IN
     /\ mem_log' = [mem_log EXCEPT ![n] = @ \o entry_list]
     /\ msgs' = msgs \union acc_req_set
@@ -382,7 +375,6 @@ doHandleVoteReq(n, req) ==
 HandleVoteReq(n) ==
     \E req \in msgs:
         /\ req.type = "VoteReq"
-        /\ req.to_node = n
         /\ doHandleVoteReq(n, req)
 
 ------------------------------------------------------------------
@@ -436,7 +428,6 @@ doHandleAcceptReq(n, req) ==
 HandleAcceptReq(n) ==
     \E req \in msgs:
         /\ req.type = "AcceptReq"
-        /\ req.to_node = n
         /\ doHandleAcceptReq(n, req)
 
 ------------------------------------------------------------------
