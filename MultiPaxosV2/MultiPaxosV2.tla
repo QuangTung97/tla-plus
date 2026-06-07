@@ -234,7 +234,7 @@ StartElection(n) ==
 
 entry_with_default_nop(entry) ==
     IF entry = nil
-        THEN [term |-> 20, value |-> nop]
+        THEN [term |-> 20, value |-> nop] \* smallest possible term
         ELSE entry
 
 start_prepare_pos(n) ==
@@ -308,18 +308,17 @@ doHandleVoteResp(n, resp) ==
         start_pos == start_prepare_pos(n)
         index == resp.pos - start_pos + 1
 
-        prev_entry == GetSeqPos(prepare_log[n], index) \* TODO use
+        prev_entry == entry_with_default_nop(GetSeqPos(prepare_log[n], index))
         resp_entry == entry_with_default_nop(resp.entry)
-
-        new_entry == [
-            term |-> resp_entry.term,
-            value |-> resp_entry.value
-        ]
+        put_entry ==
+            IF prev_entry.term > resp_entry.term
+                THEN prev_entry
+                ELSE resp_entry
 
         old_prepare_log == prepare_log[n]
         put_prepare_log ==
             IF resp.more
-                THEN PutSeqPos(old_prepare_log, index, new_entry)
+                THEN PutSeqPos(old_prepare_log, index, put_entry)
                 ELSE old_prepare_log
 
         new_start_pos == computed_start_prepare_pos(
