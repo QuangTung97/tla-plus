@@ -233,11 +233,14 @@ entry_with_default_nop(entry) ==
         THEN [term |-> 20, value |-> nop] \* smallest possible term
         ELSE entry
 
-start_prepare_pos(n) ==
-    mem_fully_repl[n] + Len(commit_log[n]) + Len(mem_log[n]) + 1
+end_commit_pos(n) ==
+    mem_fully_repl[n] + Len(commit_log[n])
+
+end_mem_pos(n) ==
+    end_commit_pos(n) + Len(mem_log[n])
 
 end_prepare_pos(n, input_prepare_log) ==
-    start_prepare_pos(n) + Len(input_prepare_log)
+    end_mem_pos(n) + Len(input_prepare_log)
 
 \* TODO use quorum
 computed_start_prepare_pos(n, input_remain_map, input_prepare_log) ==
@@ -245,7 +248,7 @@ computed_start_prepare_pos(n, input_remain_map, input_prepare_log) ==
         tmp_pos_set == {input_remain_map[y]: y \in Node}
         pos_set == {p \in tmp_pos_set: p # infinity}
     IN
-        MinOf(pos_set \union {end_prepare_pos(n, input_prepare_log)})
+        MinOf(pos_set \union {end_prepare_pos(n, input_prepare_log) + 1})
 
 -----------------------
 
@@ -258,7 +261,7 @@ append_mem_log(n, values) ==
         ]
         entry_list == MapSeq(values, new_entry_fn)
 
-        compute_pos(i) == mem_fully_repl[n] + Len(mem_log[n]) + i
+        compute_pos(i) == end_mem_pos(n) + i
 
         acc_req(i, v) == [
             type |-> "AcceptReq",
@@ -298,8 +301,7 @@ doHandleVoteResp(n, resp) ==
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ remain_map' = [remain_map EXCEPT ![n] = nil]
 
-        start_pos == start_prepare_pos(n)
-        index == resp.pos - start_pos + 1
+        index == resp.pos - end_mem_pos(n)
 
         prev_entry == entry_with_default_nop(GetSeqPos(prepare_log[n], index))
         resp_entry == entry_with_default_nop(resp.entry)
@@ -318,7 +320,7 @@ doHandleVoteResp(n, resp) ==
             n, new_remain_map, put_prepare_log
         )
 
-        new_start_index == new_start_pos - start_pos + 1
+        new_start_index == new_start_pos - end_mem_pos(n)
         new_prepare_log == RemoveSeqBefore(put_prepare_log, new_start_index)
 
         removed_prepare_log == SubSeq(put_prepare_log, 1, new_start_index - 1)
@@ -381,7 +383,7 @@ HandleVoteReq(n) ==
 
 doNewLeaderCmd(n, v) ==
     LET
-        pos == mem_fully_repl[n] + Len(mem_log[n]) + 1
+        pos == end_mem_pos(n) + 1
     IN
     /\ state[n] = "Leader"
     /\ pos <= max_log_len
@@ -436,8 +438,7 @@ doHandleAcceptResp(n, resp) ==
     LET
         pos == resp.pos
         y == resp.from_node
-        mem_log_start == mem_fully_repl[n] + 1 + Len(commit_log[n])
-        index == pos - mem_log_start + 1
+        index == pos - end_commit_pos(n)
 
         new_mem_log == [mem_log EXCEPT ![n][index].acceptors = @ \union {y}]
 
@@ -452,7 +453,7 @@ doHandleAcceptResp(n, resp) ==
         new_committed == SubSeq(new_log, 1, first_non_commit - 1)
         new_committed_values == MapSeq(new_committed, LAMBDA entry: entry.value)
     IN
-    /\ pos >= mem_log_start
+    /\ pos > end_commit_pos(n)
     /\ y \notin mem_log[n][index].acceptors
     /\ mem_log' = [set_committed EXCEPT ![n] = RemoveSeqBefore(@, first_non_commit)]
     /\ commit_log' = [commit_log EXCEPT ![n] = @ \o new_committed_values]
@@ -521,6 +522,9 @@ NonCandidateStateInv ==
     \A n \in Node:
         state[n] # "Candidate" => cond(n)
 
+
+start_prepare_pos(n) ==
+    end_mem_pos(n) + 1
 
 CandidateStateInv ==
     LET
