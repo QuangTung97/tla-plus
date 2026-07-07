@@ -40,7 +40,19 @@ LeaderRemainMap == [Node -> Null(InfLogPos)]
 
 -----------------------
 
-LogValue == Value \union {nop}
+LogValue ==
+    LET
+        cmdValue == [
+            type: {"Cmd"},
+            val: Value \union {nop}
+        ]
+    IN
+    UNION {cmdValue}
+
+newCmd(v) == [
+    type |-> "Cmd",
+    val |-> v
+]
 
 LogEntry == [
     term: InfTerm,
@@ -169,7 +181,7 @@ StartElection(n) ==
 
 entry_with_default_nop(entry) ==
     IF entry = nil
-        THEN [term |-> 20, value |-> nop] \* smallest possible term
+        THEN [term |-> 20, value |-> newCmd(nop)] \* smallest possible term
         ELSE entry
 
 end_commit_pos(n) ==
@@ -177,9 +189,6 @@ end_commit_pos(n) ==
 
 end_mem_pos(n) ==
     end_commit_pos(n) + Len(mem_log[n])
-
-end_prepare_pos(n, input_prepare_log) ==
-    end_mem_pos(n) + Len(input_prepare_log)
 
 -----------------------
 
@@ -354,13 +363,26 @@ HandleVoteReq(n) ==
 
 ------------------------------------------------------------------
 
-doNewLeaderCmd(n, v) ==
+leader_commit_log_values(n) ==
     LET
-        pos == end_mem_pos(n) + 1
+        fully_repl == mem_fully_repl[n]
+        acc_log_entries == SubSeq(acc_log[n], 1, fully_repl)
+        acc_log_values == MapSeq(acc_log_entries, LAMBDA entry: entry.value)
     IN
+        acc_log_values \o commit_log[n]
+
+num_cmd_entries(n) ==
+    LET
+        mem_values == MapSeq(mem_log[n], LAMBDA entry: entry.value)
+        values == leader_commit_log_values(n) \o mem_values
+        cmd_set == {pos \in DOMAIN values: values[pos].type = "Cmd"}
+    IN
+        Cardinality(cmd_set)
+
+doNewLeaderCmd(n, v) ==
     /\ state[n] = "Leader"
-    /\ pos <= max_log_len
-    /\ append_mem_log(n, <<v>>)
+    /\ num_cmd_entries(n) < max_log_len
+    /\ append_mem_log(n, <<newCmd(v)>>)
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
     /\ UNCHANGED <<prepare_log, mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
@@ -518,16 +540,8 @@ GodLogProperty ==
 GodLogMatchCommitLog ==
     \A n \in Node:
         LET
-            fully_repl == mem_fully_repl[n]
-
-            acc_log_entries == SubSeq(acc_log[n], 1, fully_repl)
-            acc_log_values == MapSeq(acc_log_entries, LAMBDA entry: entry.value)
-
             cond ==
-                /\ commit_log[n] = SubSeqSafe(
-                        god_log, fully_repl + 1, end_commit_pos(n)
-                    )
-                /\ SubSeq(god_log, 1, fully_repl) = acc_log_values
+                leader_commit_log_values(n) = SubSeq(god_log, 1, end_commit_pos(n))
         IN
             state[n] \in {"Leader", "Candidate"} => cond
 
@@ -553,7 +567,8 @@ CandidateStateInv ==
             )
 
         cond(n) ==
-            /\ non_proposed_index(n)= 1
+            /\ non_proposed_index(n) = 1
+            /\ mem_fully_repl[n] # nil
             /\ \A y \in Node:
                 remain_map[n][y] # infinity =>
                     /\ remain_map[n][y] # nil
@@ -570,6 +585,7 @@ FollowerStateInv ==
             /\ mem_log[n] = <<>>
             /\ prepare_log[n] = <<>>
             /\ commit_log[n] = <<>>
+            /\ mem_fully_repl[n] = nil
     IN
     \A n \in Node:
         state[n] = "Follower" => cond(n)
@@ -580,6 +596,7 @@ LeaderStateInv ==
         cond(n) ==
             /\ remain_map[n] = nil
             /\ prepare_log[n] = <<>>
+            /\ mem_fully_repl[n] # nil
     IN
     \A n \in Node:
         state[n] = "Leader" => cond(n)
