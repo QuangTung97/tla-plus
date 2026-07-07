@@ -74,6 +74,7 @@ ASSUME MaxOf({12, 13, 14}) = 14
 
 -----------------------
 
+\* return Len(s) + 1 if no elem matched
 FindFirstIndex(s, pred(_)) ==
     LET
         values == {i \in DOMAIN s: pred(s[i])}
@@ -214,9 +215,18 @@ Init ==
 
 ------------------------------------------------------------------
 
+acceptor_fully_replicated(n) ==
+    LET
+        pred(e) ==
+            IF e = nil
+                THEN TRUE
+                ELSE e.term # infinity
+    IN
+        FindFirstIndex(acc_log[n], pred) - 1
+
 StartElection(n) ==
     LET
-        fully_replicated == 0 \* TODO
+        fully_replicated == acceptor_fully_replicated(n)
 
         start_pos == fully_replicated + 1
 
@@ -513,6 +523,32 @@ HandleAcceptResp(n) ==
 
 ------------------------------------------------------------------
 
+doReplicateCommittedEntry(n, l) ==
+    LET
+        pos == acceptor_fully_replicated(n) + 1
+
+        leader_val == commit_log[l][pos - mem_fully_repl[l]]
+
+        entry == [
+            term |-> infinity,
+            value |-> leader_val
+        ]
+    IN
+    /\ pos <= end_commit_pos(l)
+    /\ acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, entry)]
+
+    /\ UNCHANGED acc_term
+    /\ UNCHANGED leader_vars
+    /\ UNCHANGED msgs
+
+ReplicateCommittedEntry(n) ==
+    \E l \in Node:
+        /\ leader_term[l] = acc_term[n]
+        /\ state[l] \in {"Leader", "Candidate"}
+        /\ doReplicateCommittedEntry(n, l)
+
+------------------------------------------------------------------
+
 Terminated ==
     /\ UNCHANGED vars
 
@@ -526,6 +562,7 @@ Next ==
         \/ NewLeaderCmd(n)
         \/ HandleAcceptReq(n)
         \/ HandleAcceptResp(n)
+        \/ ReplicateCommittedEntry(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
