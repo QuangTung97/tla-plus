@@ -102,6 +102,13 @@ ASSUME MapSeq(<<11, 12, 13>>, LAMBDA x: x + 10) = <<21, 22, 23>>
 
 -----------------------
 
+SubSeqSafe(s, i, j) ==
+    IF i > Len(s)
+        THEN <<>>
+        ELSE SubSeq(s, i, j)
+
+-----------------------
+
 \* Allow b to be infinity
 log_pos_less(a, b) ==
     IF b = infinity
@@ -513,9 +520,11 @@ doHandleAcceptResp(n, resp) ==
     /\ y \notin mem_log[n][index].acceptors
     /\ mem_log' = [set_committed EXCEPT ![n] = RemoveSeqBefore(@, first_non_commit)]
     /\ commit_log' = [commit_log EXCEPT ![n] = @ \o new_committed_values]
-    /\ IF Len(commit_log'[n]) > Len(god_log)
-        THEN god_log' = commit_log'[n]
+
+    /\ IF mem_fully_repl[n] + Len(commit_log'[n]) > Len(god_log)
+        THEN god_log' = SubSeq(god_log, 1, mem_fully_repl[n]) \o commit_log'[n]
         ELSE UNCHANGED god_log
+
     /\ UNCHANGED msgs
     /\ UNCHANGED mem_fully_repl
     /\ UNCHANGED <<leader_term, global_term, state, prepare_log, remain_map>>
@@ -598,7 +607,19 @@ GodLogProperty ==
 
 GodLogMatchCommitLog ==
     \A n \in Node:
-        commit_log[n] = SubSeq(god_log, 1, Len(commit_log[n]))
+        LET
+            fully_repl == mem_fully_repl[n]
+
+            acc_log_entries == SubSeq(acc_log[n], 1, fully_repl)
+            acc_log_values == MapSeq(acc_log_entries, LAMBDA entry: entry.value)
+
+            cond ==
+                /\ commit_log[n] = SubSeqSafe(
+                        god_log, fully_repl + 1, end_commit_pos(n)
+                    )
+                /\ SubSeq(god_log, 1, fully_repl) = acc_log_values
+        IN
+            state[n] \in {"Leader", "Candidate"} => cond
 
 
 NonCandidateStateInv ==
