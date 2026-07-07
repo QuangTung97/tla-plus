@@ -149,7 +149,7 @@ VoteRespMsg == [
     from_node: Node,
     more: BOOLEAN,
     pos: LogPos,
-    entry: Null(VoteLogEntry) \* null <=> more = FALSE
+    entry: Null(VoteLogEntry) \* (more = FALSE => entry = nil) (reverse not true)
 ]
 
 AcceptReqMsg == [
@@ -409,10 +409,16 @@ doHandleVoteReq(n, req) ==
             entry |-> nil
         ]
 
+        log_entry(i) ==
+            LET e == acc_log[n][i] IN
+            IF e # nil /\ e.term = infinity
+                THEN [e EXCEPT !.term = req.term]
+                ELSE e
+
         normal_resp(i) == [final_resp EXCEPT
             !.more = TRUE,
             !.pos = i,
-            !.entry = acc_log[n][i]
+            !.entry = log_entry(i)
         ]
 
         resp_pos_set == {i \in DOMAIN acc_log[n]: i >= req.from_pos}
@@ -527,7 +533,12 @@ doReplicateCommittedEntry(n, l) ==
     LET
         pos == acceptor_fully_replicated(n) + 1
 
-        leader_val == commit_log[l][pos - mem_fully_repl[l]]
+        commit_index == pos - mem_fully_repl[l]
+
+        leader_val ==
+            IF pos <= mem_fully_repl[l]
+                THEN acc_log[l][pos].value
+                ELSE commit_log[l][commit_index]
 
         entry == [
             term |-> infinity,
