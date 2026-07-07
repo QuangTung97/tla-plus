@@ -99,6 +99,14 @@ MapSeq(s, fn(_)) ==
 
 ASSUME MapSeq(<<11, 12, 13>>, LAMBDA x: x + 10) = <<21, 22, 23>>
 
+-----------------------
+
+\* Allow b to be infinity
+log_pos_less(a, b) ==
+    IF b = infinity
+        THEN TRUE
+        ELSE a < b
+
 ------------------------------------------------------------------
 
 Null(S) == S \union {nil}
@@ -140,7 +148,7 @@ VoteRespMsg == [
     from_node: Node,
     more: BOOLEAN,
     pos: LogPos,
-    entry: Null(VoteLogEntry)
+    entry: Null(VoteLogEntry) \* null <=> more = FALSE
 ]
 
 AcceptReqMsg == [
@@ -246,25 +254,36 @@ end_mem_pos(n) ==
 end_prepare_pos(n, input_prepare_log) ==
     end_mem_pos(n) + Len(input_prepare_log)
 
-start_prepare_pos_of_nodes(n, input_remain_map, input_prepare_log, node_set) ==
+-----------------------
+
+RECURSIVE start_non_proposed_entry_index(_, _, _, _)
+
+start_non_proposed_entry_index(n, pos, input_remain_map, input_prepare_log) ==
     LET
-        tmp_pos_set == {input_remain_map[y]: y \in node_set}
-        pos_set == {p \in tmp_pos_set: p # infinity}
+        entry == input_prepare_log[1]
+        acceptors == {y \in Node: log_pos_less(pos, input_remain_map[y])}
+        is_proposed == acceptors \in QuorumOf(Node)
     IN
-        MinOf(pos_set \union {end_prepare_pos(n, input_prepare_log) + 1})
+    IF Len(input_prepare_log) = 0 THEN
+        1
+    ELSE IF is_proposed THEN
+        1 + start_non_proposed_entry_index(
+            n, pos + 1, input_remain_map, Tail(input_prepare_log)
+        )
+    ELSE
+        1
 
-computed_start_prepare_pos(n, input_remain_map, input_prepare_log) ==
+-----------------------
+
+\* set all remain pos to be >= new_start_pos
+set_remain_map_not_less_than(new_remain_map, new_start_pos) ==
     LET
-        quorum_set == QuorumOf(Node)
-
-        pos_fn(nodes) ==
-            start_prepare_pos_of_nodes(
-                n, input_remain_map, input_prepare_log, nodes
-            )
-
-        pos_set == {pos_fn(nodes): nodes \in quorum_set}
+        update_final_pos(old_pos) ==
+            IF old_pos # infinity /\ old_pos < new_start_pos
+                THEN new_start_pos
+                ELSE old_pos
     IN
-    MaxOf(pos_set)
+        [n \in DOMAIN new_remain_map |-> update_final_pos(new_remain_map[n])]
 
 -----------------------
 
@@ -329,24 +348,19 @@ doHandleVoteResp(n, resp) ==
                 ELSE old_prepare_log
 
         \* move from prepare_log to mem_log
-        new_start_pos == computed_start_prepare_pos(
-            n, new_remain_map, put_prepare_log
+        new_start_index == start_non_proposed_entry_index(
+            n, end_mem_pos(n) + 1, new_remain_map, put_prepare_log
         )
+        new_start_pos == end_mem_pos(n) + new_start_index
 
-        new_start_index == new_start_pos - end_mem_pos(n)
         new_prepare_log == RemoveSeqBefore(put_prepare_log, new_start_index)
 
         removed_prepare_log == SubSeq(put_prepare_log, 1, new_start_index - 1)
         mem_values == MapSeq(removed_prepare_log, LAMBDA entry: entry.value)
 
-        \* set all remain pos to be >= new_start_pos
-        update_final_pos(old_pos) ==
-            IF old_pos # infinity /\ old_pos < new_start_pos
-                THEN new_start_pos
-                ELSE old_pos
-
-        final_remain_map ==
-            [z \in DOMAIN new_remain_map |-> update_final_pos(new_remain_map[z])]
+        final_remain_map == set_remain_map_not_less_than(
+            new_remain_map, new_start_pos
+        )
 
         when_normal ==
             /\ remain_map' = [remain_map EXCEPT ![n] = final_remain_map]
@@ -554,12 +568,13 @@ start_prepare_pos(n) ==
 
 CandidateStateInv ==
     LET
-        computed_pos(n) == computed_start_prepare_pos(
-            n, remain_map[n], prepare_log[n]
-        )
+        non_proposed_index(n) ==
+            start_non_proposed_entry_index(
+                n, start_prepare_pos(n), remain_map[n], prepare_log[n]
+            )
 
         cond(n) ==
-            /\ start_prepare_pos(n) = computed_pos(n)
+            /\ non_proposed_index(n)= 1
             /\ \A y \in Node:
                 remain_map[n][y] # infinity =>
                     remain_map[n][y] >= start_prepare_pos(n)
