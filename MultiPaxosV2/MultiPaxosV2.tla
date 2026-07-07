@@ -577,15 +577,35 @@ CandidateStateInv ==
             /\ non_proposed_index(n)= 1
             /\ \A y \in Node:
                 remain_map[n][y] # infinity =>
-                    remain_map[n][y] >= start_prepare_pos(n)
+                    /\ remain_map[n][y] # nil
+                    /\ remain_map[n][y] >= start_prepare_pos(n)
     IN
     \A n \in Node:
         state[n] = "Candidate" => cond(n)
 
 
-\* TODO add state fields inv
-\* TODO acc_log and fully_replicated inv
+FollowerStateInv ==
+    LET
+        cond(n) ==
+            /\ remain_map[n] = nil
+            /\ mem_log[n] = <<>>
+            /\ prepare_log[n] = <<>>
+            /\ commit_log[n] = <<>>
+    IN
+    \A n \in Node:
+        state[n] = "Follower" => cond(n)
 
+
+LeaderStateInv ==
+    LET
+        cond(n) ==
+            /\ remain_map[n] = nil
+            /\ prepare_log[n] = <<>>
+    IN
+    \A n \in Node:
+        state[n] = "Leader" => cond(n)
+
+\* TODO acc_log and fully_replicated inv
 
 InversedInv ==
     Len(god_log) = 0
