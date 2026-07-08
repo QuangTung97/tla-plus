@@ -446,12 +446,17 @@ HandleVoteResp(n) ==
 
 doHandleVoteReq(n, req) ==
     LET
+        final_pos ==
+            IF req.from_pos > Len(acc_log[n])
+                THEN req.from_pos
+                ELSE Len(acc_log[n]) + 1
+
         final_resp == [
             type |-> "VoteResp",
             term |-> req.term,
             from_node |-> n,
             more |-> FALSE,
-            pos |-> Len(acc_log[n]) + 1,
+            pos |-> final_pos,
             entry |-> nil
         ]
 
@@ -689,7 +694,7 @@ TerminateCond ==
     /\ state[l] = "Leader"
     /\ prepare_log[l] = <<>>
     /\ mem_log[l] = <<>>
-    /\ Len(god_log) = max_cmd_len + max_member_len
+    /\ Len(god_log) = max_cmd_len + (max_member_len - 1) * 2 + 1
     /\ Len(members_info[l]) = 1
 
 Terminated ==
