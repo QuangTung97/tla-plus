@@ -212,23 +212,24 @@ latest_members_info(current_info, input_log) ==
 
 -----------------------
 
-RECURSIVE is_quorum_of_members(_, _)
+RECURSIVE is_quorum_of_members(_, _, _)
 
-is_quorum_of_members(nodes, input_members) ==
+is_quorum_of_members(nodes, pos, input_members) ==
     LET
         e == input_members[1]
         success ==
-           \E S \in QuorumOf(e.nodes): S \subseteq nodes
+            pos >= e.from =>
+                \E S \in QuorumOf(e.nodes): S \subseteq nodes
     IN
     IF Len(input_members) = 0 THEN
         TRUE
     ELSE IF success THEN
-        is_quorum_of_members(nodes, Tail(input_members))
+        is_quorum_of_members(nodes, pos, Tail(input_members))
     ELSE
         FALSE
 
-is_quorum_of(n, nodes) == \* TODO support pos
-    is_quorum_of_members(nodes, members_info[n])
+is_quorum_of(n, nodes, pos) ==
+    is_quorum_of_members(nodes, pos, members_info[n])
 
 -----------------------
 
@@ -296,6 +297,9 @@ end_commit_pos(n) ==
 end_mem_pos(n) ==
     end_commit_pos(n) + Len(mem_log[n])
 
+end_prepare_log(n) ==
+    end_mem_pos(n) + Len(prepare_log[n])
+
 -----------------------
 
 RECURSIVE start_non_proposed_entry_index(_, _, _, _)
@@ -304,7 +308,7 @@ start_non_proposed_entry_index(n, pos, input_remain_map, input_prepare_log) ==
     LET
         entry == input_prepare_log[1]
         acceptors == {y \in all_nodes_of(n): log_pos_less(pos, input_remain_map[y])}
-        is_proposed == is_quorum_of(n, acceptors)
+        is_proposed == is_quorum_of(n, acceptors, pos)
     IN
     IF Len(input_prepare_log) = 0 THEN
         1
@@ -375,7 +379,7 @@ doHandleVoteResp(n, resp) ==
 
         \* check become leader
         inf_set == {x \in all_nodes_of(n): new_remain_map[x] = infinity}
-        switch_to_leader == is_quorum_of(n, inf_set)
+        switch_to_leader == is_quorum_of(n, inf_set, end_prepare_log(n) + 1) \* TODO
         when_become_leader ==
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ remain_map' = [remain_map EXCEPT ![n] = nil]
@@ -586,7 +590,7 @@ doHandleAcceptResp(n, resp) ==
         new_mem_log == [mem_log EXCEPT ![n][index].acceptors = @ \union {y}]
 
         is_committed ==
-            is_quorum_of(n, new_mem_log[n][index].acceptors)
+            is_quorum_of(n, new_mem_log[n][index].acceptors, pos)
 
         set_committed == [new_mem_log EXCEPT ![n][index].committed = is_committed]
         new_log == set_committed[n]
