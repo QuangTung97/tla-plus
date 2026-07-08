@@ -516,6 +516,8 @@ HandleVoteReq(n) ==
 
 candidate_vars == <<prepare_log, state, leader_term, global_term, remain_map>>
 
+-----------------------
+
 leader_commit_log_values(n) ==
     LET
         fully_repl == mem_fully_repl[n]
@@ -524,13 +526,19 @@ leader_commit_log_values(n) ==
     IN
         acc_log_values \o commit_log[n]
 
+leader_commit_and_mem_log_values(n) ==
+    leader_commit_log_values(n) \o log_to_values(mem_log[n])
+
+-----------------------
+
 num_entries_by_type(n, cmd_type) ==
     LET
-        mem_values == log_to_values(mem_log[n])
-        values == leader_commit_log_values(n) \o mem_values
+        values == leader_commit_and_mem_log_values(n)
         cmd_set == {pos \in DOMAIN values: values[pos].type = cmd_type}
     IN
         Cardinality(cmd_set)
+
+-----------------------
 
 doLeaderNewCmd(n, v) ==
     /\ state[n] = "Leader"
@@ -750,6 +758,7 @@ Spec == Init /\ [][Next]_vars
 LeaderTermInv ==
     \A n \in Node: leader_term[n] <= global_term
 
+-----------------------
 
 godLogStep ==
     LET
@@ -762,6 +771,7 @@ godLogStep ==
 GodLogProperty ==
     [][godLogStep]_god_log
 
+-----------------------
 
 GodLogMatchCommitLog ==
     \A n \in Node:
@@ -772,6 +782,7 @@ GodLogMatchCommitLog ==
         IN
             state[n] \in {"Leader", "Candidate"} => cond
 
+-----------------------
 
 NonCandidateStateInv ==
     LET
@@ -782,6 +793,7 @@ NonCandidateStateInv ==
     \A n \in Node:
         state[n] # "Candidate" => cond(n)
 
+-----------------------
 
 start_prepare_pos(n) ==
     end_mem_pos(n) + 1
@@ -818,6 +830,7 @@ CandidateStateInv ==
     \A n \in Node:
         state[n] = "Candidate" => cond(n)
 
+-----------------------
 
 FollowerStateInv ==
     LET
@@ -832,6 +845,7 @@ FollowerStateInv ==
     \A n \in Node:
         state[n] = "Follower" => cond(n)
 
+-----------------------
 
 LeaderStateInv ==
     LET
@@ -843,6 +857,17 @@ LeaderStateInv ==
     \A n \in Node:
         state[n] = "Leader" => cond(n)
 
+-----------------------
+
+InMemMembersInfoInv ==
+    LET
+        log_values(n) == leader_commit_and_mem_log_values(n)
+        cond(n) == latest_members_info(nil, log_values(n)) = members_info[n]
+    IN
+    \A n \in Node:
+        state[n] # "Follower" => cond(n)
+
+-----------------------
 
 InversedInv ==
     Len(god_log) = 0
