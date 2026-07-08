@@ -195,20 +195,23 @@ acceptor_fully_replicated(n) ==
 
 -----------------------
 
+log_to_values(input_log) ==
+    MapSeq(input_log, LAMBDA e: e.value)
+
 RECURSIVE latest_members_info(_, _)
 
-latest_members_info(current_info, input_log) ==
+latest_members_info(current_info, input_values) ==
     LET
-        e == input_log[1]
-        is_members == e.value.type = "Membership"
-        new_info == e.value.members
+        v == input_values[1]
+        is_members == v.type = "Membership"
+        new_info == v.members
     IN
-    IF Len(input_log) = 0 THEN
+    IF Len(input_values) = 0 THEN
         current_info
     ELSE IF is_members THEN
-        latest_members_info(new_info, Tail(input_log))
+        latest_members_info(new_info, Tail(input_values))
     ELSE
-        latest_members_info(current_info, Tail(input_log))
+        latest_members_info(current_info, Tail(input_values))
 
 -----------------------
 
@@ -256,7 +259,7 @@ StartElection(n) ==
         start_pos == fully_replicated + 1
 
         fully_log == SubSeq(acc_log[n], 1, fully_replicated)
-        new_members == latest_members_info(nil, fully_log)
+        new_members == latest_members_info(nil, log_to_values(fully_log))
         all_nodes == all_nodes_of_members({}, new_members)
 
         vote_req == [
@@ -412,7 +415,7 @@ doHandleVoteResp(n, resp) ==
         new_prepare_log == RemoveSeqBefore(put_prepare_log, new_start_index)
 
         removed_prepare_log == SubSeq(put_prepare_log, 1, new_start_index - 1)
-        mem_values == MapSeq(removed_prepare_log, LAMBDA entry: entry.value)
+        mem_values == log_to_values(removed_prepare_log)
 
         final_remain_map == set_remain_map_not_less_than(
             new_remain_map, new_start_pos
@@ -495,13 +498,13 @@ leader_commit_log_values(n) ==
     LET
         fully_repl == mem_fully_repl[n]
         acc_log_entries == SubSeq(acc_log[n], 1, fully_repl)
-        acc_log_values == MapSeq(acc_log_entries, LAMBDA entry: entry.value)
+        acc_log_values == log_to_values(acc_log_entries)
     IN
         acc_log_values \o commit_log[n]
 
 num_entries_by_type(n, cmd_type) ==
     LET
-        mem_values == MapSeq(mem_log[n], LAMBDA entry: entry.value)
+        mem_values == log_to_values(mem_log[n])
         values == leader_commit_log_values(n) \o mem_values
         cmd_set == {pos \in DOMAIN values: values[pos].type = cmd_type}
     IN
@@ -627,7 +630,7 @@ doHandleAcceptResp(n, resp) ==
         first_non_commit == FindFirstIndex(new_log, LAMBDA entry: ~entry.committed)
 
         new_committed == SubSeq(new_log, 1, first_non_commit - 1)
-        new_committed_values == MapSeq(new_committed, LAMBDA entry: entry.value)
+        new_committed_values == log_to_values(new_committed)
     IN
     /\ state[n] \in {"Candidate", "Leader"}
     /\ pos > end_commit_pos(n)
@@ -815,6 +818,8 @@ InversedInv ==
     Len(god_log) = 0
 
 
+\* TODO add invariant mem_log and members_info
 \* TODO add property eventually state = Leader and mem_log = <<>>
+\* TODO allow to disable a Node mid way
 
 ====
