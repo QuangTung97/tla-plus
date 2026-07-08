@@ -347,26 +347,21 @@ move_from_prepare_log_to_mem_log(st) ==
         is_moved == is_quorum_of_members(acceptors, st.pos, st.members_info)
 
         new_members_info ==
-            IF is_moved /\ e.value.type = "Membership"
+            IF e.value.type = "Membership"
                 THEN e.value.members
                 ELSE st.members_info
-
-        new_mem_log ==
-            IF is_moved
-                THEN Append(st.mem_log, e.value)
-                ELSE st.mem_log
 
         new_state == [st EXCEPT
             !.pos = @ + 1,
             !.prepare_log = Tail(@),
-            !.mem_log = new_mem_log,
+            !.mem_log = Append(st.mem_log, e.value),
             !.members_info = new_members_info
         ]
     IN
-    IF Len(st.prepare_log) = 0 THEN
-        st
-    ELSE
+    IF Len(st.prepare_log) > 0 /\ is_moved THEN
         move_from_prepare_log_to_mem_log(new_state)
+    ELSE
+        st
 
 -----------------------
 
