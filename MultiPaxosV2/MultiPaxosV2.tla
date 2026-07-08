@@ -231,7 +231,7 @@ is_quorum_of_members(nodes, pos, input_members) ==
     ELSE
         FALSE
 
-is_quorum_of(n, nodes, pos) == \* TODO check usage
+is_quorum_of(n, nodes, pos) ==
     is_quorum_of_members(nodes, pos, members_info[n])
 
 -----------------------
@@ -246,9 +246,6 @@ all_nodes_of_members(result, input_members) ==
     IF Len(input_members) = 0
         THEN result
         ELSE all_nodes_of_members(new_result, Tail(input_members))
-
-all_nodes_of(n) == \* TODO check usage
-    all_nodes_of_members({}, members_info[n])
 
 -----------------------
 
@@ -308,26 +305,6 @@ end_prepare_log(n) ==
 
 -----------------------
 
-RECURSIVE start_non_proposed_entry_index(_, _, _, _)
-
-\* TODO delete
-start_non_proposed_entry_index(n, pos, input_remain_map, input_prepare_log) ==
-    LET
-        entry == input_prepare_log[1]
-        acceptors == {y \in all_nodes_of(n): log_pos_less(pos, input_remain_map[y])}
-        is_proposed == is_quorum_of(n, acceptors, pos)
-    IN
-    IF Len(input_prepare_log) = 0 THEN
-        1
-    ELSE IF is_proposed THEN
-        1 + start_non_proposed_entry_index(
-            n, pos + 1, input_remain_map, Tail(input_prepare_log)
-        )
-    ELSE
-        1
-
------------------------
-
 \* state includes:
 \* - pos
 \* - remain_map
@@ -365,19 +342,20 @@ move_from_prepare_log_to_mem_log(st) ==
 
 -----------------------
 
-remain_pos_is_number(pos) ==
-    /\ pos # nil
-    /\ pos # infinity
-
 \* set all remain pos to be >= new_start_pos
-set_remain_map_not_less_than(new_remain_map, new_start_pos) ==
+set_remain_map_not_less_than(new_remain_map, new_start_pos, input_all_nodes) ==
     LET
-        update_final_pos(old_pos) ==
-            IF remain_pos_is_number(old_pos) /\ old_pos < new_start_pos
-                THEN new_start_pos
-                ELSE old_pos
+        update_final_pos(n, old_pos) ==
+            IF n \notin input_all_nodes THEN
+                nil
+            ELSE IF old_pos = infinity THEN
+                old_pos
+            ELSE IF old_pos < new_start_pos THEN
+                new_start_pos
+            ELSE
+                old_pos
     IN
-        [n \in DOMAIN new_remain_map |-> update_final_pos(new_remain_map[n])]
+        [n \in DOMAIN new_remain_map |-> update_final_pos(n, new_remain_map[n])]
 
 -----------------------
 
@@ -447,12 +425,14 @@ doHandleVoteResp(n, resp) ==
         ]
         result_state == move_from_prepare_log_to_mem_log(move_state)
 
+        new_all_nodes == all_nodes_of_members({}, result_state.members_info)
+
         final_remain_map == set_remain_map_not_less_than(
-            new_remain_map, result_state.pos
+            new_remain_map, result_state.pos, new_all_nodes
         )
 
         \* check become leader
-        inf_set == {x \in all_nodes_of(n): final_remain_map[x] = infinity}
+        inf_set == {x \in new_all_nodes: final_remain_map[x] = infinity}
 
         switch_to_leader == is_quorum_of_members(
             inf_set, result_state.pos, result_state.members_info
@@ -812,13 +792,21 @@ leader_candidate_inv_cond(n) ==
 
 CandidateStateInv ==
     LET
-        non_proposed_index(n) ==
-            start_non_proposed_entry_index(
-                n, start_prepare_pos(n), remain_map[n], prepare_log[n]
-            )
+        all_nodes_of(n) ==
+            all_nodes_of_members({}, members_info[n])
+
+        move_state(n) == [
+            pos |-> start_prepare_pos(n),
+            remain_map |-> remain_map[n],
+            prepare_log |-> prepare_log[n],
+            mem_log |-> <<>>,
+            members_info |-> members_info[n]
+        ]
+
+        result_state(n) == move_from_prepare_log_to_mem_log(move_state(n))
 
         cond(n) ==
-            /\ non_proposed_index(n) = 1
+            /\ result_state(n).mem_log = <<>>
             /\ leader_candidate_inv_cond(n)
             /\ \A y \in Node:
                 y \in all_nodes_of(n) <=> remain_map[n][y] # nil
