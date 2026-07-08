@@ -213,7 +213,8 @@ RECURSIVE is_quorum_of_members(_, _)
 is_quorum_of_members(nodes, input_members) ==
     LET
         e == input_members[1]
-        success == nodes \in QuorumOf(e.nodes)
+        success ==
+           \E S \in QuorumOf(e.nodes): S \subseteq nodes
     IN
     IF Len(input_members) = 0 THEN
         FALSE
@@ -328,7 +329,7 @@ set_remain_map_not_less_than(new_remain_map, new_start_pos) ==
 
 -----------------------
 
-append_mem_log(n, values) ==
+append_mem_log(n, values, members) ==
     LET
         new_entry_fn(v) == [
             value |-> v,
@@ -339,7 +340,7 @@ append_mem_log(n, values) ==
 
         compute_pos(i) == end_mem_pos(n) + i
 
-        all_nodes == all_nodes_of(n)
+        all_nodes == all_nodes_of_members({}, members)
 
         acc_req(i, v) == [
             type |-> "AcceptReq",
@@ -414,7 +415,7 @@ doHandleVoteResp(n, resp) ==
     /\ remain_map[n][y] = resp.pos
 
     /\ prepare_log' = [prepare_log EXCEPT ![n] = new_prepare_log]
-    /\ append_mem_log(n, mem_values)
+    /\ append_mem_log(n, mem_values, members_info[n])
 
     /\ IF switch_to_leader
         THEN when_become_leader
@@ -488,16 +489,16 @@ num_entries_by_type(n, cmd_type) ==
     IN
         Cardinality(cmd_set)
 
-doNewLeaderCmd(n, v) ==
+doLeaderNewCmd(n, v) ==
     /\ state[n] = "Leader"
     /\ num_entries_by_type(n, "Cmd") < max_cmd_len
-    /\ append_mem_log(n, <<newCmd(v)>>)
+    /\ append_mem_log(n, <<newCmd(v)>>, members_info[n])
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
     /\ UNCHANGED <<prepare_log, mem_fully_repl, members_info, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
-NewLeaderCmd(n) ==
-    \E v \in Value: doNewLeaderCmd(n, v)
+LeaderNewCmd(n) ==
+    \E v \in Value: doLeaderNewCmd(n, v)
 
 ------------------------------------------------------------------
 
@@ -519,7 +520,7 @@ doChangeMembers(n, nodes) ==
     /\ Len(members_info[n]) <= 1
     /\ num_entries_by_type(n, "Membership") < max_member_len
 
-    /\ append_mem_log(n, <<cmd>>)
+    /\ append_mem_log(n, <<cmd>>, new_members)
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
 
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
@@ -653,7 +654,7 @@ Next ==
         \/ HandleVoteReq(n)
         \/ HandleVoteResp(n)
 
-        \/ NewLeaderCmd(n)
+        \/ LeaderNewCmd(n)
         \/ LeaderChangeMembers(n)
 
         \/ HandleAcceptReq(n)
