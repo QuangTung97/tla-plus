@@ -274,6 +274,8 @@ StartElection(n) ==
         new_remain_map == [y \in Node |-> init_remain_pos(y)]
     IN
     /\ state[n] = "Follower"
+    /\ n \in all_nodes
+
     /\ global_term' = global_term + 1
     /\ leader_term' = [leader_term EXCEPT ![n] = global_term']
     /\ mem_fully_repl' = [mem_fully_repl EXCEPT ![n] = fully_replicated]
@@ -281,6 +283,7 @@ StartElection(n) ==
     /\ msgs' = msgs \union {vote_req}
     /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
+
     /\ UNCHANGED <<prepare_log, mem_log, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
@@ -379,7 +382,7 @@ doHandleVoteResp(n, resp) ==
 
         \* check become leader
         inf_set == {x \in all_nodes_of(n): new_remain_map[x] = infinity}
-        switch_to_leader == is_quorum_of(n, inf_set, end_prepare_log(n) + 1) \* TODO
+        switch_to_leader == is_quorum_of(n, inf_set, end_prepare_log(n))
         when_become_leader ==
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ remain_map' = [remain_map EXCEPT ![n] = nil]
