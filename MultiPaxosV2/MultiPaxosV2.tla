@@ -872,8 +872,8 @@ InMemMembersInfoInv ==
 InversedInv ==
     Len(god_log) = 0
 
+-----------------------
 
-\* TODO add invariant mem_log and members_info
 \* TODO add property eventually state = Leader and mem_log = <<>>
 \* TODO allow to disable a Node mid way
 
