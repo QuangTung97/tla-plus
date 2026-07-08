@@ -231,7 +231,7 @@ is_quorum_of_members(nodes, pos, input_members) ==
     ELSE
         FALSE
 
-is_quorum_of(n, nodes, pos) ==
+is_quorum_of(n, nodes, pos) == \* TODO check usage
     is_quorum_of_members(nodes, pos, members_info[n])
 
 -----------------------
@@ -247,7 +247,7 @@ all_nodes_of_members(result, input_members) ==
         THEN result
         ELSE all_nodes_of_members(new_result, Tail(input_members))
 
-all_nodes_of(n) ==
+all_nodes_of(n) == \* TODO check usage
     all_nodes_of_members({}, members_info[n])
 
 -----------------------
@@ -310,6 +310,7 @@ end_prepare_log(n) ==
 
 RECURSIVE start_non_proposed_entry_index(_, _, _, _)
 
+\* TODO delete
 start_non_proposed_entry_index(n, pos, input_remain_map, input_prepare_log) ==
     LET
         entry == input_prepare_log[1]
@@ -324,6 +325,48 @@ start_non_proposed_entry_index(n, pos, input_remain_map, input_prepare_log) ==
         )
     ELSE
         1
+
+-----------------------
+
+\* state includes:
+\* - pos
+\* - remain_map
+\* - prepare_log
+\* - mem_log
+\* - members_info
+
+RECURSIVE move_from_prepare_log_to_mem_log(_)
+
+move_from_prepare_log_to_mem_log(st) ==
+    LET
+        e == st.prepare_log[1]
+
+        all_nodes == all_nodes_of_members({}, st.members_info)
+        acceptors == {y \in all_nodes: log_pos_less(st.pos, st.remain_map[y])}
+
+        is_moved == is_quorum_of_members(acceptors, st.pos, st.members_info)
+
+        new_members_info ==
+            IF is_moved /\ e.value.type = "Membership"
+                THEN e.value.members
+                ELSE st.members_info
+
+        new_mem_log ==
+            IF is_moved
+                THEN Append(st.mem_log, e.value)
+                ELSE st.mem_log
+
+        new_state == [st EXCEPT
+            !.pos = @ + 1,
+            !.prepare_log = Tail(@),
+            !.mem_log = new_mem_log,
+            !.members_info = new_members_info
+        ]
+    IN
+    IF Len(st.prepare_log) = 0 THEN
+        st
+    ELSE
+        move_from_prepare_log_to_mem_log(new_state)
 
 -----------------------
 
@@ -383,13 +426,6 @@ doHandleVoteResp(n, resp) ==
                 THEN [old_remain_map EXCEPT ![y] = @ + 1]
                 ELSE [old_remain_map EXCEPT ![y] = infinity]
 
-        \* check become leader
-        inf_set == {x \in all_nodes_of(n): new_remain_map[x] = infinity}
-        switch_to_leader == is_quorum_of(n, inf_set, end_prepare_log(n))
-        when_become_leader ==
-            /\ state' = [state EXCEPT ![n] = "Leader"]
-            /\ remain_map' = [remain_map EXCEPT ![n] = nil]
-
         \* put entry to prepare_log
         index == resp.pos - end_mem_pos(n)
 
@@ -407,19 +443,29 @@ doHandleVoteResp(n, resp) ==
                 ELSE old_prepare_log
 
         \* move from prepare_log to mem_log
-        new_start_index == start_non_proposed_entry_index(
-            n, end_mem_pos(n) + 1, new_remain_map, put_prepare_log
-        )
-        new_start_pos == end_mem_pos(n) + new_start_index
-
-        new_prepare_log == RemoveSeqBefore(put_prepare_log, new_start_index)
-
-        removed_prepare_log == SubSeq(put_prepare_log, 1, new_start_index - 1)
-        mem_values == log_to_values(removed_prepare_log)
+        move_state == [
+            pos |-> end_mem_pos(n) + 1,
+            remain_map |-> new_remain_map,
+            prepare_log |-> put_prepare_log,
+            mem_log |-> <<>>,
+            members_info |-> members_info[n]
+        ]
+        result_state == move_from_prepare_log_to_mem_log(move_state)
 
         final_remain_map == set_remain_map_not_less_than(
-            new_remain_map, new_start_pos
+            new_remain_map, result_state.pos
         )
+
+        \* check become leader
+        inf_set == {x \in all_nodes_of(n): final_remain_map[x] = infinity}
+
+        switch_to_leader == is_quorum_of_members(
+            inf_set, result_state.pos, result_state.members_info
+        )
+
+        when_become_leader ==
+            /\ state' = [state EXCEPT ![n] = "Leader"]
+            /\ remain_map' = [remain_map EXCEPT ![n] = nil]
 
         when_normal ==
             /\ remain_map' = [remain_map EXCEPT ![n] = final_remain_map]
@@ -428,14 +474,15 @@ doHandleVoteResp(n, resp) ==
     /\ state[n] = "Candidate"
     /\ remain_map[n][y] = resp.pos
 
-    /\ prepare_log' = [prepare_log EXCEPT ![n] = new_prepare_log]
-    /\ append_mem_log(n, mem_values, members_info[n])
+    /\ prepare_log' = [prepare_log EXCEPT ![n] = result_state.prepare_log]
+    /\ append_mem_log(n, result_state.mem_log, result_state.members_info)
+    /\ members_info' = [members_info EXCEPT ![n] = result_state.members_info]
 
     /\ IF switch_to_leader
         THEN when_become_leader
         ELSE when_normal
 
-    /\ UNCHANGED <<leader_term, mem_fully_repl, members_info, commit_log, god_log>>
+    /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED global_term
 
