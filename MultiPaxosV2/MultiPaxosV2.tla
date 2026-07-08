@@ -32,7 +32,7 @@ Null(S) == S \union {nil}
 Term == 20..29
 InfTerm == Term \union {infinity}
 
-LogPos == 0..9
+LogPos == 0..4
 
 InfLogPos == LogPos \union {infinity}
 
@@ -40,14 +40,26 @@ LeaderRemainMap == [Node -> Null(InfLogPos)]
 
 -----------------------
 
+NonEmpty(S) == S \ {}
+
+MemberNodes == [
+    nodes: NonEmpty(SUBSET Node),
+    from: LogPos \ {0}
+]
+
 LogValue ==
     LET
         cmdValue == [
             type: {"Cmd"},
             val: Value \union {nop}
         ]
+
+        memberValue == [
+            type: {"Membership"},
+            members: FiniteSeq(MemberNodes, 2)
+        ]
     IN
-    UNION {cmdValue}
+    UNION {cmdValue, memberValue}
 
 newCmd(v) == [
     type |-> "Cmd",
@@ -108,6 +120,23 @@ MemLogEntry == [
 
 ------------------------------------------------------------------
 
+init_member_nodes(nodes) == [
+    nodes |-> nodes,
+    from |-> 1
+]
+
+init_log_value(nodes) == [
+    type |-> "Membership",
+    members |-> <<init_member_nodes(nodes)>>
+]
+
+init_log_entry(nodes) == [
+    term |-> infinity,
+    value |-> init_log_value(nodes)
+]
+
+------------------------------------------------------------------
+
 TypeOK ==
     /\ global_term \in Term
 
@@ -118,12 +147,12 @@ TypeOK ==
     /\ prepare_log \in [Node -> Seq(VoteLogEntry)]
     /\ mem_log \in [Node -> Seq(MemLogEntry)]
     /\ commit_log \in [Node -> Seq(LogValue)]
-    /\ god_log \in Seq(LogValue)
 
     /\ msgs \subseteq Msg
 
     /\ acc_term \in [Node -> Term]
     /\ acc_log \in [Node -> Seq(Null(LogEntry))]
+    /\ god_log \in Seq(LogValue)
 
 Init ==
     /\ global_term = 20
@@ -135,12 +164,13 @@ Init ==
     /\ prepare_log = [n \in Node |-> <<>>]
     /\ mem_log = [n \in Node |-> <<>>]
     /\ commit_log = [n \in Node |-> <<>>]
-    /\ god_log = <<>>
 
     /\ msgs = {}
 
     /\ acc_term = [n \in Node |-> 20]
-    /\ acc_log = [n \in Node |-> <<>>]
+    /\ \E nodes \in NonEmpty(SUBSET Node):
+        /\ acc_log = [n \in Node |-> <<init_log_entry(nodes)>>]
+        /\ god_log = <<init_log_value(nodes)>>
 
 ------------------------------------------------------------------
 
@@ -540,8 +570,9 @@ GodLogProperty ==
 GodLogMatchCommitLog ==
     \A n \in Node:
         LET
+            god_values == SubSeqSafe(god_log, 1, end_commit_pos(n))
             cond ==
-                leader_commit_log_values(n) = SubSeq(god_log, 1, end_commit_pos(n))
+                leader_commit_log_values(n) = god_values
         IN
             state[n] \in {"Leader", "Candidate"} => cond
 
