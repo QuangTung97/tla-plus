@@ -348,6 +348,8 @@ set_remain_map_not_less_than(new_remain_map, new_start_pos, input_all_nodes) ==
         update_final_pos(n, old_pos) ==
             IF n \notin input_all_nodes THEN
                 nil
+            ELSE IF old_pos = nil THEN
+                new_start_pos
             ELSE IF old_pos = infinity THEN
                 old_pos
             ELSE IF old_pos < new_start_pos THEN
