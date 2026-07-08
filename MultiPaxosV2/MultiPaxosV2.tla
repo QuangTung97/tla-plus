@@ -32,7 +32,7 @@ Null(S) == S \union {nil}
 Term == 20..29
 InfTerm == Term \union {infinity}
 
-LogPos == 0..4
+LogPos == 0..6
 
 InfLogPos == LogPos \union {infinity}
 
@@ -501,6 +501,36 @@ NewLeaderCmd(n) ==
 
 ------------------------------------------------------------------
 
+doChangeMembers(n, nodes) ==
+    LET
+        new_nodes_entry == [
+            nodes |-> nodes,
+            from |-> end_mem_pos(n) + 1
+        ]
+
+        new_members == Append(members_info[n], new_nodes_entry)
+
+        cmd == [
+            type |-> "Membership",
+            members |-> new_members
+        ]
+    IN
+    /\ state[n] = "Leader"
+    /\ Len(members_info[n]) <= 1
+
+    /\ append_mem_log(n, <<cmd>>)
+    /\ members_info' = [members_info EXCEPT ![n] = new_members]
+
+    /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
+    /\ UNCHANGED <<prepare_log, mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED acceptor_vars
+
+LeaderChangeMembers(n) ==
+    \E nodes \in NonEmptySubSet(Node):
+        doChangeMembers(n, nodes)
+
+------------------------------------------------------------------
+
 doHandleAcceptReq(n, req) ==
     LET
         pos == req.pos
@@ -621,7 +651,10 @@ Next ==
         \/ StartElection(n)
         \/ HandleVoteReq(n)
         \/ HandleVoteResp(n)
+
         \/ NewLeaderCmd(n)
+        \/ LeaderChangeMembers(n)
+
         \/ HandleAcceptReq(n)
         \/ HandleAcceptResp(n)
         \/ ReplicateCommittedEntry(n)
