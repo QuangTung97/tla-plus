@@ -40,10 +40,10 @@ LeaderRemainMap == [Node -> Null(InfLogPos)]
 
 -----------------------
 
-NonEmpty(S) == S \ {{}}
+NonEmptySubSet(S) == (SUBSET S) \ {{}}
 
 MemberNodes == [
-    nodes: NonEmpty(SUBSET Node),
+    nodes: NonEmptySubSet(Node),
     from: LogPos \ {0}
 ]
 
@@ -78,7 +78,8 @@ LogEntry == [
 VoteReqMsg == [
     type: {"VoteReq"},
     term: Term,
-    from_pos: LogPos
+    from_pos: LogPos,
+    recv: NonEmptySubSet(Node)
 ]
 
 VoteLogEntry == [
@@ -99,7 +100,8 @@ AcceptReqMsg == [
     type: {"AcceptReq"},
     term: Term,
     pos: LogPos,
-    value: LogValue
+    value: LogValue,
+    recv: NonEmptySubSet(Node)
 ]
 
 AcceptRespMsg == [
@@ -172,7 +174,7 @@ Init ==
     /\ msgs = {}
 
     /\ acc_term = [n \in Node |-> 20]
-    /\ \E nodes \in NonEmpty(SUBSET Node):
+    /\ \E nodes \in NonEmptySubSet(Node):
         /\ acc_log = [n \in Node |-> <<init_log_entry(nodes)>>]
         /\ god_log = <<init_log_value(nodes)>>
 
@@ -247,16 +249,23 @@ StartElection(n) ==
 
         start_pos == fully_replicated + 1
 
+        fully_log == SubSeq(acc_log[n], 1, fully_replicated)
+        new_members == latest_members_info(nil, fully_log)
+        all_nodes == all_nodes_of_members({}, new_members)
+
         vote_req == [
             type |-> "VoteReq",
             term |-> leader_term'[n],
-            from_pos |-> start_pos
+            from_pos |-> start_pos,
+            recv |-> all_nodes
         ]
 
-        new_remain_map == [y \in Node |-> start_pos]
+        init_remain_pos(y) ==
+            IF y \in all_nodes
+                THEN start_pos
+                ELSE nil
 
-        fully_log == SubSeq(acc_log[n], 1, fully_replicated)
-        new_members == latest_members_info(nil, fully_log)
+        new_remain_map == [y \in Node |-> init_remain_pos(y)]
     IN
     /\ state[n] = "Follower"
     /\ global_term' = global_term + 1
@@ -289,7 +298,7 @@ RECURSIVE start_non_proposed_entry_index(_, _, _, _)
 start_non_proposed_entry_index(n, pos, input_remain_map, input_prepare_log) ==
     LET
         entry == input_prepare_log[1]
-        acceptors == {y \in Node: log_pos_less(pos, input_remain_map[y])}
+        acceptors == {y \in all_nodes_of(n): log_pos_less(pos, input_remain_map[y])}
         is_proposed == is_quorum_of(n, acceptors)
     IN
     IF Len(input_prepare_log) = 0 THEN
@@ -303,11 +312,15 @@ start_non_proposed_entry_index(n, pos, input_remain_map, input_prepare_log) ==
 
 -----------------------
 
+remain_pos_is_number(pos) ==
+    /\ pos # nil
+    /\ pos # infinity
+
 \* set all remain pos to be >= new_start_pos
 set_remain_map_not_less_than(new_remain_map, new_start_pos) ==
     LET
         update_final_pos(old_pos) ==
-            IF old_pos # infinity /\ old_pos < new_start_pos
+            IF remain_pos_is_number(old_pos) /\ old_pos < new_start_pos
                 THEN new_start_pos
                 ELSE old_pos
     IN
@@ -326,11 +339,14 @@ append_mem_log(n, values) ==
 
         compute_pos(i) == end_mem_pos(n) + i
 
+        all_nodes == all_nodes_of(n)
+
         acc_req(i, v) == [
             type |-> "AcceptReq",
             term |-> leader_term[n],
             pos |-> compute_pos(i),
-            value |-> v
+            value |-> v,
+            recv |-> all_nodes
         ]
 
         acc_req_set == {
@@ -353,8 +369,8 @@ doHandleVoteResp(n, resp) ==
                 ELSE [old_remain_map EXCEPT ![y] = infinity]
 
         \* check become leader
-        inf_set == {x \in Node: new_remain_map[x] = infinity}
-        switch_to_leader == inf_set \in QuorumOf(Node)
+        inf_set == {x \in all_nodes_of(n): new_remain_map[x] = infinity}
+        switch_to_leader == is_quorum_of(n, inf_set)
         when_become_leader ==
             /\ state' = [state EXCEPT ![n] = "Leader"]
             /\ remain_map' = [remain_map EXCEPT ![n] = nil]
@@ -451,6 +467,7 @@ doHandleVoteReq(n, req) ==
 HandleVoteReq(n) ==
     \E req \in msgs:
         /\ req.type = "VoteReq"
+        /\ n \in req.recv
         /\ doHandleVoteReq(n, req)
 
 ------------------------------------------------------------------
@@ -517,6 +534,7 @@ doHandleAcceptReq(n, req) ==
 HandleAcceptReq(n) ==
     \E req \in msgs:
         /\ req.type = "AcceptReq"
+        /\ n \in req.recv
         /\ doHandleAcceptReq(n, req)
 
 ------------------------------------------------------------------
@@ -530,7 +548,7 @@ doHandleAcceptResp(n, resp) ==
         new_mem_log == [mem_log EXCEPT ![n][index].acceptors = @ \union {y}]
 
         is_committed ==
-            new_mem_log[n][index].acceptors \in QuorumOf(Node)
+            is_quorum_of(n, new_mem_log[n][index].acceptors)
 
         set_committed == [new_mem_log EXCEPT ![n][index].committed = is_committed]
         new_log == set_committed[n]
@@ -668,7 +686,7 @@ CandidateStateInv ==
             /\ leader_candidate_inv_cond(n)
             /\ \A y \in Node:
                 y \in all_nodes_of(n) <=> remain_map[n][y] # nil
-            /\ \A y \in Node:
+            /\ \A y \in all_nodes_of(n):
                 remain_map[n][y] # infinity =>
                     /\ remain_map[n][y] # nil
                     /\ remain_map[n][y] >= start_prepare_pos(n)
