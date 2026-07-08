@@ -217,11 +217,11 @@ is_quorum_of_members(nodes, input_members) ==
            \E S \in QuorumOf(e.nodes): S \subseteq nodes
     IN
     IF Len(input_members) = 0 THEN
-        FALSE
-    ELSE IF success
-        THEN TRUE
-    ELSE
+        TRUE
+    ELSE IF success THEN
         is_quorum_of_members(nodes, Tail(input_members))
+    ELSE
+        FALSE
 
 is_quorum_of(n, nodes) ==
     is_quorum_of_members(nodes, members_info[n])
@@ -544,11 +544,6 @@ doHandleAcceptReq(n, req) ==
             value |-> req.value
         ]
 
-        not_allow_update ==
-            /\ prev_entry # nil
-            /\ \/ prev_entry.term = infinity
-               \/ prev_entry.term = req.term
-
         acc_resp == [
             type |-> "AcceptResp",
             term |-> req.term,
@@ -557,7 +552,7 @@ doHandleAcceptReq(n, req) ==
         ]
     IN
     /\ req.term >= acc_term[n]
-    /\ ~not_allow_update
+    /\ prev_entry # new_entry
     /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
     /\ acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, new_entry)]
     /\ msgs' = msgs \union {acc_resp}
@@ -757,5 +752,8 @@ LeaderStateInv ==
 
 InversedInv ==
     Len(god_log) = 0
+
+
+\* TODO add property eventually state = Leader and mem_log = <<>>
 
 ====
