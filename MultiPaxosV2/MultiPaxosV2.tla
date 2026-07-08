@@ -1,7 +1,7 @@
 ---- MODULE MultiPaxosV2 ----
 EXTENDS PaxosUtil
 
-CONSTANTS Node, Value, nop, max_log_len
+CONSTANTS Node, Value, nop, max_cmd_len, max_member_len
 
 VARIABLES
     global_term,
@@ -480,17 +480,17 @@ leader_commit_log_values(n) ==
     IN
         acc_log_values \o commit_log[n]
 
-num_cmd_entries(n) ==
+num_entries_by_type(n, cmd_type) ==
     LET
         mem_values == MapSeq(mem_log[n], LAMBDA entry: entry.value)
         values == leader_commit_log_values(n) \o mem_values
-        cmd_set == {pos \in DOMAIN values: values[pos].type = "Cmd"}
+        cmd_set == {pos \in DOMAIN values: values[pos].type = cmd_type}
     IN
         Cardinality(cmd_set)
 
 doNewLeaderCmd(n, v) ==
     /\ state[n] = "Leader"
-    /\ num_cmd_entries(n) < max_log_len
+    /\ num_entries_by_type(n, "Cmd") < max_cmd_len
     /\ append_mem_log(n, <<newCmd(v)>>)
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
     /\ UNCHANGED <<prepare_log, mem_fully_repl, members_info, commit_log, god_log>>
@@ -517,6 +517,7 @@ doChangeMembers(n, nodes) ==
     IN
     /\ state[n] = "Leader"
     /\ Len(members_info[n]) <= 1
+    /\ num_entries_by_type(n, "Membership") < max_member_len
 
     /\ append_mem_log(n, <<cmd>>)
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
