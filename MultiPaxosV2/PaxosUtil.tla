@@ -93,10 +93,10 @@ log_pos_less(a, b) ==
 
 -----------------------
 
-FiniteSeq(S, n) ==
+FiniteSeq(S, min, max) ==
     LET
         seq_of(k) == [1..k -> S]
     IN
-        UNION {seq_of(k): k \in 0..n}
+        UNION {seq_of(k): k \in min..max}
 
 ====

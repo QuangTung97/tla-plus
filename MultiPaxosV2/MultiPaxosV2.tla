@@ -5,7 +5,7 @@ CONSTANTS Node, Value, nop, max_log_len
 
 VARIABLES
     global_term,
-    state, leader_term, mem_fully_repl,
+    state, leader_term, mem_fully_repl, members_info,
     remain_map, prepare_log, mem_log, commit_log,
     msgs,
     acc_term, acc_log,
@@ -13,7 +13,7 @@ VARIABLES
 
 leader_vars == <<
     global_term,
-    state, leader_term, mem_fully_repl,
+    state, leader_term, mem_fully_repl, members_info,
     remain_map, prepare_log, mem_log, commit_log,
     god_log
 >>
@@ -40,12 +40,14 @@ LeaderRemainMap == [Node -> Null(InfLogPos)]
 
 -----------------------
 
-NonEmpty(S) == S \ {}
+NonEmpty(S) == S \ {{}}
 
 MemberNodes == [
     nodes: NonEmpty(SUBSET Node),
     from: LogPos \ {0}
 ]
+
+MembersInfo == FiniteSeq(MemberNodes, 1, 2)
 
 LogValue ==
     LET
@@ -56,7 +58,7 @@ LogValue ==
 
         memberValue == [
             type: {"Membership"},
-            members: FiniteSeq(MemberNodes, 2)
+            members: MembersInfo
         ]
     IN
     UNION {cmdValue, memberValue}
@@ -143,6 +145,7 @@ TypeOK ==
     /\ state \in [Node -> {"Follower", "Candidate", "Leader"}]
     /\ leader_term \in [Node -> Term]
     /\ mem_fully_repl \in [Node -> Null(LogPos)]
+    /\ members_info \in [Node -> Null(MembersInfo)]
     /\ remain_map \in [Node -> Null(LeaderRemainMap)]
     /\ prepare_log \in [Node -> Seq(VoteLogEntry)]
     /\ mem_log \in [Node -> Seq(MemLogEntry)]
@@ -160,6 +163,7 @@ Init ==
     /\ state = [n \in Node |-> "Follower"]
     /\ leader_term = [n \in Node |-> 20]
     /\ mem_fully_repl = [n \in Node |-> nil]
+    /\ members_info = [n \in Node |-> nil]
     /\ remain_map = [n \in Node |-> nil]
     /\ prepare_log = [n \in Node |-> <<>>]
     /\ mem_log = [n \in Node |-> <<>>]
@@ -183,6 +187,60 @@ acceptor_fully_replicated(n) ==
     IN
         FindFirstIndex(acc_log[n], pred) - 1
 
+-----------------------
+
+RECURSIVE latest_members_info(_, _)
+
+latest_members_info(current_info, input_log) ==
+    LET
+        e == input_log[1]
+        is_members == e.value.type = "Membership"
+        new_info == e.value.members
+    IN
+    IF Len(input_log) = 0 THEN
+        current_info
+    ELSE IF is_members THEN
+        latest_members_info(new_info, Tail(input_log))
+    ELSE
+        latest_members_info(current_info, Tail(input_log))
+
+-----------------------
+
+RECURSIVE is_quorum_of_members(_, _)
+
+is_quorum_of_members(nodes, input_members) ==
+    LET
+        e == input_members[1]
+        success == nodes \in QuorumOf(e.nodes)
+    IN
+    IF Len(input_members) = 0 THEN
+        FALSE
+    ELSE IF success
+        THEN TRUE
+    ELSE
+        is_quorum_of_members(nodes, Tail(input_members))
+
+is_quorum_of(n, nodes) ==
+    is_quorum_of_members(nodes, members_info[n])
+
+-----------------------
+
+RECURSIVE all_nodes_of_members(_, _)
+
+all_nodes_of_members(result, input_members) ==
+    LET
+        e == input_members[1]
+        new_result == result \union e.nodes
+    IN
+    IF Len(input_members) = 0
+        THEN result
+        ELSE all_nodes_of_members(new_result, Tail(input_members))
+
+all_nodes_of(n) ==
+    all_nodes_of_members({}, members_info[n])
+
+-----------------------
+
 StartElection(n) ==
     LET
         fully_replicated == acceptor_fully_replicated(n)
@@ -196,6 +254,9 @@ StartElection(n) ==
         ]
 
         new_remain_map == [y \in Node |-> start_pos]
+
+        fully_log == SubSeq(acc_log[n], 1, fully_replicated)
+        new_members == latest_members_info(nil, fully_log)
     IN
     /\ state[n] = "Follower"
     /\ global_term' = global_term + 1
@@ -204,6 +265,7 @@ StartElection(n) ==
     /\ state' = [state EXCEPT ![n] = "Candidate"]
     /\ msgs' = msgs \union {vote_req}
     /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
+    /\ members_info' = [members_info EXCEPT ![n] = new_members]
     /\ UNCHANGED <<prepare_log, mem_log, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
@@ -228,7 +290,7 @@ start_non_proposed_entry_index(n, pos, input_remain_map, input_prepare_log) ==
     LET
         entry == input_prepare_log[1]
         acceptors == {y \in Node: log_pos_less(pos, input_remain_map[y])}
-        is_proposed == acceptors \in QuorumOf(Node)
+        is_proposed == is_quorum_of(n, acceptors)
     IN
     IF Len(input_prepare_log) = 0 THEN
         1
@@ -342,7 +404,7 @@ doHandleVoteResp(n, resp) ==
         THEN when_become_leader
         ELSE when_normal
 
-    /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED <<leader_term, mem_fully_repl, members_info, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED global_term
 
@@ -414,7 +476,7 @@ doNewLeaderCmd(n, v) ==
     /\ num_cmd_entries(n) < max_log_len
     /\ append_mem_log(n, <<newCmd(v)>>)
     /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
-    /\ UNCHANGED <<prepare_log, mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED <<prepare_log, mem_fully_repl, members_info, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
 NewLeaderCmd(n) ==
@@ -488,7 +550,7 @@ doHandleAcceptResp(n, resp) ==
         ELSE UNCHANGED god_log
 
     /\ UNCHANGED msgs
-    /\ UNCHANGED mem_fully_repl
+    /\ UNCHANGED <<mem_fully_repl, members_info>>
     /\ UNCHANGED <<leader_term, global_term, state, prepare_log, remain_map>>
     /\ UNCHANGED acceptor_vars
 
@@ -590,6 +652,10 @@ NonCandidateStateInv ==
 start_prepare_pos(n) ==
     end_mem_pos(n) + 1
 
+leader_candidate_inv_cond(n) ==
+    /\ mem_fully_repl[n] # nil
+    /\ members_info[n] # nil
+
 CandidateStateInv ==
     LET
         non_proposed_index(n) ==
@@ -599,7 +665,9 @@ CandidateStateInv ==
 
         cond(n) ==
             /\ non_proposed_index(n) = 1
-            /\ mem_fully_repl[n] # nil
+            /\ leader_candidate_inv_cond(n)
+            /\ \A y \in Node:
+                y \in all_nodes_of(n) <=> remain_map[n][y] # nil
             /\ \A y \in Node:
                 remain_map[n][y] # infinity =>
                     /\ remain_map[n][y] # nil
@@ -617,6 +685,7 @@ FollowerStateInv ==
             /\ prepare_log[n] = <<>>
             /\ commit_log[n] = <<>>
             /\ mem_fully_repl[n] = nil
+            /\ members_info[n] = nil
     IN
     \A n \in Node:
         state[n] = "Follower" => cond(n)
@@ -627,7 +696,7 @@ LeaderStateInv ==
         cond(n) ==
             /\ remain_map[n] = nil
             /\ prepare_log[n] = <<>>
-            /\ mem_fully_repl[n] # nil
+            /\ leader_candidate_inv_cond(n)
     IN
     \A n \in Node:
         state[n] = "Leader" => cond(n)
