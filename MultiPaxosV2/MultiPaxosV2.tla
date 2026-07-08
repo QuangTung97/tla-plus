@@ -111,8 +111,12 @@ AcceptRespMsg == [
     pos: LogPos
 ]
 
-Msg ==
-    UNION {VoteReqMsg, VoteRespMsg, AcceptReqMsg, AcceptRespMsg}
+IsValidMsgSet(set) ==
+    \A m \in set:
+        \/ m \in VoteReqMsg
+        \/ m \in VoteRespMsg
+        \/ m \in AcceptReqMsg
+        \/ m \in AcceptRespMsg
 
 -----------------------
 
@@ -153,7 +157,7 @@ TypeOK ==
     /\ mem_log \in [Node -> Seq(MemLogEntry)]
     /\ commit_log \in [Node -> Seq(LogValue)]
 
-    /\ msgs \subseteq Msg
+    /\ IsValidMsgSet(msgs)
 
     /\ acc_term \in [Node -> Term]
     /\ acc_log \in [Node -> Seq(Null(LogEntry))]
@@ -223,7 +227,7 @@ is_quorum_of_members(nodes, input_members) ==
     ELSE
         FALSE
 
-is_quorum_of(n, nodes) ==
+is_quorum_of(n, nodes) == \* TODO support pos
     is_quorum_of_members(nodes, members_info[n])
 
 -----------------------
@@ -533,6 +537,13 @@ LeaderChangeMembers(n) ==
 
 ------------------------------------------------------------------
 
+FinishChangeMembers(n) ==
+    /\ state[n] = "Leader"
+    /\ Len(members_info[n]) > 1
+    /\ UNCHANGED acceptor_vars
+
+------------------------------------------------------------------
+
 doHandleAcceptReq(n, req) ==
     LET
         pos == req.pos
@@ -554,7 +565,7 @@ doHandleAcceptReq(n, req) ==
     /\ req.term >= acc_term[n]
     /\ prev_entry # new_entry
     /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
-    /\ acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, new_entry)]
+    /\ acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, new_entry)] \* TODO
     /\ msgs' = msgs \union {acc_resp}
     /\ UNCHANGED leader_vars
 
@@ -585,8 +596,10 @@ doHandleAcceptResp(n, resp) ==
         new_committed == SubSeq(new_log, 1, first_non_commit - 1)
         new_committed_values == MapSeq(new_committed, LAMBDA entry: entry.value)
     IN
+    /\ state[n] \in {"Candidate", "Leader"}
     /\ pos > end_commit_pos(n)
     /\ y \notin mem_log[n][index].acceptors
+
     /\ mem_log' = [set_committed EXCEPT ![n] = RemoveSeqBefore(@, first_non_commit)]
     /\ commit_log' = [commit_log EXCEPT ![n] = @ \o new_committed_values]
 
@@ -638,7 +651,20 @@ ReplicateCommittedEntry(n) ==
 
 ------------------------------------------------------------------
 
+TerminateCond ==
+    LET
+        is_max_term(n) ==
+            \A y \in Node: leader_term[n] >= leader_term[y]
+
+        l == CHOOSE n \in Node: is_max_term(n)
+    IN
+    /\ state[l] = "Leader"
+    /\ prepare_log[l] = <<>>
+    /\ mem_log[l] = <<>>
+    /\ Len(god_log) = max_cmd_len + max_member_len
+
 Terminated ==
+    /\ TerminateCond
     /\ UNCHANGED vars
 
 -----------------------
@@ -651,6 +677,7 @@ Next ==
 
         \/ LeaderNewCmd(n)
         \/ LeaderChangeMembers(n)
+        \* \/ FinishChangeMembers(n)
 
         \/ HandleAcceptReq(n)
         \/ HandleAcceptResp(n)
