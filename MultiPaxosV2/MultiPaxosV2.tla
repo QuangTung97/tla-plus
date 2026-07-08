@@ -484,6 +484,8 @@ HandleVoteReq(n) ==
 
 ------------------------------------------------------------------
 
+candidate_vars == <<prepare_log, state, leader_term, global_term, remain_map>>
+
 leader_commit_log_values(n) ==
     LET
         fully_repl == mem_fully_repl[n]
@@ -504,8 +506,8 @@ doLeaderNewCmd(n, v) ==
     /\ state[n] = "Leader"
     /\ num_entries_by_type(n, "Cmd") < max_cmd_len
     /\ append_mem_log(n, <<newCmd(v)>>, members_info[n])
-    /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
-    /\ UNCHANGED <<prepare_log, mem_fully_repl, members_info, commit_log, god_log>>
+    /\ UNCHANGED <<mem_fully_repl, members_info, commit_log, god_log>>
+    /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
 
 LeaderNewCmd(n) ==
@@ -534,8 +536,8 @@ doChangeMembers(n, nodes) ==
     /\ append_mem_log(n, <<cmd>>, new_members)
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
 
-    /\ UNCHANGED <<state, leader_term, global_term, remain_map>>
-    /\ UNCHANGED <<prepare_log, mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
 
 LeaderChangeMembers(n) ==
@@ -545,8 +547,27 @@ LeaderChangeMembers(n) ==
 ------------------------------------------------------------------
 
 FinishChangeMembers(n) ==
+    LET
+        old_members == members_info[n]
+        from_pos == old_members[2].from
+
+        tmp_members == Tail(old_members)
+        new_members == [tmp_members EXCEPT ![1].from = 1]
+
+        cmd == [
+            type |-> "Membership",
+            members |-> new_members
+        ]
+    IN
     /\ state[n] = "Leader"
     /\ Len(members_info[n]) > 1
+    /\ from_pos <= end_commit_pos(n)
+
+    /\ append_mem_log(n, <<cmd>>, new_members)
+    /\ members_info' = [members_info EXCEPT ![n] = new_members]
+
+    /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
 
 ------------------------------------------------------------------
@@ -669,6 +690,7 @@ TerminateCond ==
     /\ prepare_log[l] = <<>>
     /\ mem_log[l] = <<>>
     /\ Len(god_log) = max_cmd_len + max_member_len
+    /\ Len(members_info[l]) = 1
 
 Terminated ==
     /\ TerminateCond
@@ -684,7 +706,7 @@ Next ==
 
         \/ LeaderNewCmd(n)
         \/ LeaderChangeMembers(n)
-        \* \/ FinishChangeMembers(n)
+        \/ FinishChangeMembers(n)
 
         \/ HandleAcceptReq(n)
         \/ HandleAcceptResp(n)
