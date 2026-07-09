@@ -3,6 +3,8 @@ EXTENDS PaxosUtil
 
 CONSTANTS Node, Value, nop, max_cmd_len, max_member_len
 
+ASSUME max_member_len >= 1
+
 VARIABLES
     global_term,
     state, leader_term, mem_fully_repl, members_info,
@@ -433,6 +435,7 @@ doHandleVoteResp(n, resp) ==
         ]
         result_state == move_from_prepare_log_to_mem_log(move_state)
 
+        old_all_nodes == all_nodes_of_members({}, move_state.members_info)
         new_all_nodes == all_nodes_of_members({}, result_state.members_info)
 
         final_remain_map == set_remain_map_not_less_than(
@@ -752,7 +755,7 @@ TerminateCond ==
     /\ state[l] = "Leader"
     /\ prepare_log[l] = <<>>
     /\ mem_log[l] = <<>>
-    /\ Len(god_log) = max_cmd_len + (max_member_len - 1) * 2 + 1
+    /\ Len(god_log) >= max_cmd_len + (max_member_len - 1) * 2 + 1
     /\ Len(members_info[l]) = 1
 
 Terminated ==
