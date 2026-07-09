@@ -85,11 +85,14 @@ SubSeqSafe(s, i, j) ==
 
 -----------------------
 
-\* Allow b to be infinity
+\* Allow b to be infinity or nil
 log_pos_less(a, b) ==
-    IF b = infinity
-        THEN TRUE
-        ELSE a < b
+    IF b = nil THEN
+        FALSE
+    ELSE IF b = infinity THEN
+        TRUE
+    ELSE
+        a < b
 
 -----------------------
 
