@@ -456,6 +456,13 @@ doHandleVoteResp(n, resp) ==
         when_normal ==
             /\ remain_map' = [remain_map EXCEPT ![n] = final_remain_map]
             /\ UNCHANGED state
+
+        new_vote_req == [
+            type |-> "VoteReq",
+            term |-> leader_term[n],
+            from_pos |-> result_state.pos,
+            recv |-> new_all_nodes
+        ]
     IN
     /\ state[n] = "Candidate"
     /\ remain_map[n][y] = resp.pos
@@ -464,11 +471,15 @@ doHandleVoteResp(n, resp) ==
     /\ append_mem_log(n, result_state.mem_log, result_state.members_info)
     /\ members_info' = [members_info EXCEPT ![n] = result_state.members_info]
 
+    /\ IF new_all_nodes \ old_all_nodes = {}
+        THEN UNCHANGED vote_req_msgs
+        ELSE vote_req_msgs' = vote_req_msgs \union {new_vote_req}
+
     /\ IF switch_to_leader
         THEN when_become_leader
         ELSE when_normal
 
-    /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
+    /\ UNCHANGED <<vote_resp_msgs, acc_resp_msgs>>
     /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED global_term
@@ -922,7 +933,6 @@ InversedInv ==
 
 -----------------------
 
-\* TODO add another vote request when membership is changed
 \* TODO add property eventually state = Leader and mem_log = <<>>
 \* TODO allow to disable a Node mid way
 
