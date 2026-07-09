@@ -7,7 +7,7 @@ VARIABLES
     global_term,
     state, leader_term, mem_fully_repl, members_info,
     remain_map, prepare_log, mem_log, commit_log,
-    msgs,
+    vote_req_msgs, vote_resp_msgs, acc_req_msgs, acc_resp_msgs,
     acc_term, acc_log,
     god_log
 
@@ -17,11 +17,14 @@ leader_vars == <<
     remain_map, prepare_log, mem_log, commit_log,
     god_log
 >>
+
 acceptor_vars == <<acc_term, acc_log>>
+
+msg_vars == <<vote_req_msgs, vote_resp_msgs, acc_req_msgs, acc_resp_msgs>>
 
 vars == <<
     leader_vars,
-    msgs,
+    msg_vars,
     acceptor_vars
 >>
 
@@ -111,13 +114,6 @@ AcceptRespMsg == [
     pos: LogPos
 ]
 
-IsValidMsgSet(set) ==
-    \A m \in set:
-        \/ m \in VoteReqMsg
-        \/ m \in VoteRespMsg
-        \/ m \in AcceptReqMsg
-        \/ m \in AcceptRespMsg
-
 -----------------------
 
 MemLogEntry == [
@@ -157,7 +153,10 @@ TypeOK ==
     /\ mem_log \in [Node -> Seq(MemLogEntry)]
     /\ commit_log \in [Node -> Seq(LogValue)]
 
-    /\ IsValidMsgSet(msgs)
+    /\ vote_req_msgs \subseteq VoteReqMsg
+    /\ vote_resp_msgs \subseteq VoteRespMsg
+    /\ acc_req_msgs \subseteq AcceptReqMsg
+    /\ acc_resp_msgs \subseteq AcceptRespMsg
 
     /\ acc_term \in [Node -> Term]
     /\ acc_log \in [Node -> Seq(Null(LogEntry))]
@@ -175,7 +174,10 @@ Init ==
     /\ mem_log = [n \in Node |-> <<>>]
     /\ commit_log = [n \in Node |-> <<>>]
 
-    /\ msgs = {}
+    /\ vote_req_msgs = {}
+    /\ vote_resp_msgs = {}
+    /\ acc_req_msgs = {}
+    /\ acc_resp_msgs = {}
 
     /\ acc_term = [n \in Node |-> 20]
     /\ \E nodes \in NonEmptySubSet(Node):
@@ -283,10 +285,11 @@ StartElection(n) ==
     /\ leader_term' = [leader_term EXCEPT ![n] = global_term']
     /\ mem_fully_repl' = [mem_fully_repl EXCEPT ![n] = fully_replicated]
     /\ state' = [state EXCEPT ![n] = "Candidate"]
-    /\ msgs' = msgs \union {vote_req}
+    /\ vote_req_msgs' = vote_req_msgs \union {vote_req}
     /\ remain_map' = [remain_map EXCEPT ![n] = new_remain_map]
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
 
+    /\ UNCHANGED <<vote_resp_msgs, acc_req_msgs, acc_resp_msgs>>
     /\ UNCHANGED <<prepare_log, mem_log, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
 
@@ -390,7 +393,7 @@ append_mem_log(n, values, members) ==
         }
     IN
     /\ mem_log' = [mem_log EXCEPT ![n] = @ \o entry_list]
-    /\ msgs' = msgs \union acc_req_set
+    /\ acc_req_msgs' = acc_req_msgs \union acc_req_set
 
 -----------------------
 
@@ -462,12 +465,13 @@ doHandleVoteResp(n, resp) ==
         THEN when_become_leader
         ELSE when_normal
 
+    /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
     /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED global_term
 
 HandleVoteResp(n) ==
-    \E resp \in msgs:
+    \E resp \in vote_resp_msgs:
         /\ resp.type = "VoteResp"
         /\ resp.term = leader_term[n]
         /\ doHandleVoteResp(n, resp)
@@ -507,12 +511,14 @@ doHandleVoteReq(n, req) ==
     IN
     /\ req.term > acc_term[n]
     /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
-    /\ msgs' = msgs \union normal_resp_set \union {final_resp}
+    /\ vote_resp_msgs' = vote_resp_msgs \union normal_resp_set \union {final_resp}
+
+    /\ UNCHANGED <<vote_req_msgs, acc_req_msgs, acc_resp_msgs>>
     /\ UNCHANGED acc_log
     /\ UNCHANGED leader_vars
 
 HandleVoteReq(n) ==
-    \E req \in msgs:
+    \E req \in vote_req_msgs:
         /\ req.type = "VoteReq"
         /\ n \in req.recv
         /\ doHandleVoteReq(n, req)
@@ -549,6 +555,8 @@ doLeaderNewCmd(n, v) ==
     /\ state[n] = "Leader"
     /\ num_entries_by_type(n, "Cmd") < max_cmd_len
     /\ append_mem_log(n, <<newCmd(v)>>, members_info[n])
+
+    /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
     /\ UNCHANGED <<mem_fully_repl, members_info, commit_log, god_log>>
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
@@ -579,6 +587,7 @@ doChangeMembers(n, nodes) ==
     /\ append_mem_log(n, <<cmd>>, new_members)
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
 
+    /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
     /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
@@ -609,6 +618,7 @@ FinishChangeMembers(n) ==
     /\ append_mem_log(n, <<cmd>>, new_members)
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
 
+    /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
     /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
@@ -638,18 +648,19 @@ doHandleAcceptReq(n, req) ==
             /\ prev_entry.term = infinity
     IN
     /\ req.term >= acc_term[n]
-    /\ acc_resp \notin msgs
+    /\ acc_resp \notin acc_resp_msgs
 
-    /\ msgs' = msgs \union {acc_resp}
+    /\ acc_resp_msgs' = acc_resp_msgs \union {acc_resp}
     /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
     /\ IF already_committed
         THEN UNCHANGED acc_log
         ELSE acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, new_entry)]
 
+    /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_req_msgs>>
     /\ UNCHANGED leader_vars
 
 HandleAcceptReq(n) ==
-    \E req \in msgs:
+    \E req \in acc_req_msgs:
         /\ req.type = "AcceptReq"
         /\ n \in req.recv
         /\ doHandleAcceptReq(n, req)
@@ -687,13 +698,13 @@ doHandleAcceptResp(n, resp) ==
         THEN god_log' = SubSeq(god_log, 1, mem_fully_repl[n]) \o commit_log'[n]
         ELSE UNCHANGED god_log
 
-    /\ UNCHANGED msgs
+    /\ UNCHANGED msg_vars
     /\ UNCHANGED <<mem_fully_repl, members_info>>
     /\ UNCHANGED <<leader_term, global_term, state, prepare_log, remain_map>>
     /\ UNCHANGED acceptor_vars
 
 HandleAcceptResp(n) ==
-    \E resp \in msgs:
+    \E resp \in acc_resp_msgs:
         /\ resp.type = "AcceptResp"
         /\ resp.term = leader_term[n]
         /\ doHandleAcceptResp(n, resp)
@@ -721,7 +732,7 @@ doReplicateCommittedEntry(n, l) ==
 
     /\ UNCHANGED acc_term
     /\ UNCHANGED leader_vars
-    /\ UNCHANGED msgs
+    /\ UNCHANGED msg_vars
 
 ReplicateCommittedEntry(n) ==
     \E l \in Node:
