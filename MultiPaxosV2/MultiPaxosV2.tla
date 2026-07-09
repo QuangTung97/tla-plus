@@ -37,7 +37,7 @@ Null(S) == S \union {nil}
 Term == 20..29
 InfTerm == Term \union {infinity}
 
-LogPos == 0..6
+LogPos == 0..9
 
 InfLogPos == LogPos \union {infinity}
 
@@ -523,7 +523,9 @@ doHandleVoteReq(n, req) ==
         resp_pos_set == {i \in DOMAIN acc_log[n]: i >= req.from_pos}
         normal_resp_set == {normal_resp(i): i \in resp_pos_set}
     IN
-    /\ req.term > acc_term[n]
+    /\ req.term >= acc_term[n]
+    /\ final_resp \notin vote_resp_msgs
+
     /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
     /\ vote_resp_msgs' = vote_resp_msgs \union normal_resp_set \union {final_resp}
 
