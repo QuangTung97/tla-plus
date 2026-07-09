@@ -184,14 +184,17 @@ Init ==
 
 ------------------------------------------------------------------
 
-acceptor_fully_replicated(n) ==
+acceptor_fully_replicated_input_log(input_acc_log) ==
     LET
         pred(e) ==
             IF e = nil
                 THEN TRUE
                 ELSE e.term # infinity
     IN
-        FindFirstIndex(acc_log[n], pred) - 1
+        FindFirstIndex(input_acc_log, pred) - 1
+
+acceptor_fully_replicated(n) ==
+    acceptor_fully_replicated_input_log(acc_log[n])
 
 -----------------------
 
@@ -629,12 +632,20 @@ doHandleAcceptReq(n, req) ==
             pos |-> pos,
             from_node |-> n
         ]
+
+        already_committed ==
+            /\ prev_entry # nil
+            /\ prev_entry.term = infinity
     IN
     /\ req.term >= acc_term[n]
-    /\ prev_entry # new_entry
-    /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
-    /\ acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, new_entry)] \* TODO
+    /\ acc_resp \notin msgs
+
     /\ msgs' = msgs \union {acc_resp}
+    /\ acc_term' = [acc_term EXCEPT ![n] = req.term]
+    /\ IF already_committed
+        THEN UNCHANGED acc_log
+        ELSE acc_log' = [acc_log EXCEPT ![n] = PutSeqPos(@, pos, new_entry)]
+
     /\ UNCHANGED leader_vars
 
 HandleAcceptReq(n) ==
@@ -667,6 +678,7 @@ doHandleAcceptResp(n, resp) ==
     /\ state[n] \in {"Candidate", "Leader"}
     /\ pos > end_commit_pos(n)
     /\ y \notin mem_log[n][index].acceptors
+    /\ ~mem_log[n][index].committed
 
     /\ mem_log' = [set_committed EXCEPT ![n] = RemoveSeqBefore(@, first_non_commit)]
     /\ commit_log' = [commit_log EXCEPT ![n] = @ \o new_committed_values]
@@ -871,11 +883,30 @@ InMemMembersInfoInv ==
 
 -----------------------
 
+accLogStepNode(n) ==
+    LET
+        before_pos == acceptor_fully_replicated_input_log(acc_log[n])
+        after_pos == acceptor_fully_replicated_input_log(acc_log'[n])
+
+        before_log == SubSeqSafe(acc_log[n], 1, before_pos)
+        after_log == SubSeqSafe(acc_log'[n], 1, before_pos)
+    IN
+        /\ before_pos <= after_pos
+        /\ before_log = after_log
+
+accLogStep ==
+    \A n \in Node: accLogStepNode(n)
+
+AccLogProperty == [][accLogStep]_acc_log
+
+-----------------------
+
 InversedInv ==
     Len(god_log) = 0
 
 -----------------------
 
+\* TODO add another vote request when membership is changed
 \* TODO add property eventually state = Leader and mem_log = <<>>
 \* TODO allow to disable a Node mid way
 
