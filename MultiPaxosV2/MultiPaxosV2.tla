@@ -569,6 +569,8 @@ LeaderNewCmd(n) ==
 
 ------------------------------------------------------------------
 
+max_actual_member_len == (max_member_len - 1) * 2 + 1
+
 doChangeMembers(n, nodes) ==
     LET
         new_nodes_entry == [
@@ -585,7 +587,7 @@ doChangeMembers(n, nodes) ==
     IN
     /\ state[n] = "Leader"
     /\ Len(members_info[n]) <= 1
-    /\ num_entries_by_type(n, "Membership") < max_member_len
+    /\ num_entries_by_type(n, "Membership") < max_actual_member_len
 
     /\ append_mem_log(n, <<cmd>>, new_members)
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
@@ -755,7 +757,7 @@ TerminateCond ==
     /\ state[l] = "Leader"
     /\ prepare_log[l] = <<>>
     /\ mem_log[l] = <<>>
-    /\ Len(god_log) >= max_cmd_len + (max_member_len - 1) * 2 + 1
+    /\ Len(god_log) >= max_cmd_len + max_actual_member_len
     /\ Len(members_info[l]) = 1
 
 Terminated ==
