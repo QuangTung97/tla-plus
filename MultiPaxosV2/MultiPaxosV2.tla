@@ -935,6 +935,10 @@ InversedInv ==
 
 -----------------------
 
+Perms == Permutations(Node) \union Permutations(Value)
+
+-----------------------
+
 \* TODO add property eventually state = Leader and mem_log = <<>>
 \* TODO allow to disable a Node mid way
 
