@@ -1,4 +1,6 @@
 #!/bin/bash
+set -euo pipefail
+
 java \
     -Xmx12g \
     -cp /home/quangtung/.vscode/extensions/tlaplus.vscode-ide-2026.6.242335/tools/tla2tools.jar \

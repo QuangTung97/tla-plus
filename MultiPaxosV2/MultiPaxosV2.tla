@@ -11,6 +11,7 @@ VARIABLES
     remain_map, prepare_log, mem_log, commit_log,
     vote_req_msgs, vote_resp_msgs, acc_req_msgs, acc_resp_msgs,
     acc_term, acc_log,
+    term_all_nodes,
     god_log
 
 leader_vars == <<
@@ -27,6 +28,7 @@ msg_vars == <<vote_req_msgs, vote_resp_msgs, acc_req_msgs, acc_resp_msgs>>
 vars == <<
     leader_vars,
     msg_vars,
+    term_all_nodes,
     acceptor_vars
 >>
 
@@ -34,8 +36,10 @@ vars == <<
 
 Null(S) == S \union {nil}
 
-Term == 20..29
-InfTerm == Term \union {infinity}
+max_term_num == 20 + Cardinality(Node)
+Term == 20..max_term_num
+NonZeroTerm == Term \ {20}
+InfTerm == NonZeroTerm \union {infinity}
 
 LogPos == 0..9
 
@@ -82,9 +86,7 @@ LogEntry == [
 
 VoteReqMsg == [
     type: {"VoteReq"},
-    term: Term,
-    from_pos: LogPos,
-    recv: NonEmptySubSet(Node)
+    term: Term
 ]
 
 VoteLogEntry == [
@@ -105,8 +107,7 @@ AcceptReqMsg == [
     type: {"AcceptReq"},
     term: Term,
     pos: LogPos,
-    value: LogValue,
-    recv: NonEmptySubSet(Node)
+    value: LogValue
 ]
 
 AcceptRespMsg == [
@@ -124,6 +125,13 @@ MemLogEntry == [
     committed: BOOLEAN
 ]
 
+-----------------------
+
+TermNodes == [
+    all_nodes: SUBSET Node,
+    from_pos: LogPos
+]
+
 ------------------------------------------------------------------
 
 init_member_nodes(nodes) == [
@@ -139,6 +147,11 @@ init_log_value(nodes) == [
 init_log_entry(nodes) == [
     term |-> infinity,
     value |-> init_log_value(nodes)
+]
+
+init_term_nodes == [
+    all_nodes |-> {},
+    from_pos |-> 0
 ]
 
 ------------------------------------------------------------------
@@ -164,6 +177,8 @@ TypeOK ==
     /\ acc_log \in [Node -> Seq(Null(LogEntry))]
     /\ god_log \in Seq(LogValue)
 
+    /\ term_all_nodes \in [NonZeroTerm -> TermNodes]
+
 Init ==
     /\ global_term = 20
 
@@ -185,6 +200,8 @@ Init ==
     /\ \E nodes \in NonEmptySubSet(Node):
         /\ acc_log = [n \in Node |-> <<init_log_entry(nodes)>>]
         /\ god_log = <<init_log_value(nodes)>>
+
+    /\ term_all_nodes = [t \in NonZeroTerm |-> init_term_nodes]
 
 ------------------------------------------------------------------
 
@@ -222,24 +239,23 @@ latest_members_info(current_info, input_values) ==
 
 -----------------------
 
-RECURSIVE is_quorum_of_members(_, _, _)
+RECURSIVE is_quorum_of_members(_, _)
 
-is_quorum_of_members(nodes, pos, input_members) ==
+is_quorum_of_members(nodes, input_members) ==
     LET
         e == input_members[1]
         success ==
-            pos >= e.from =>
-                \E S \in QuorumOf(e.nodes): S \subseteq nodes
+            \E S \in QuorumOf(e.nodes): S \subseteq nodes
     IN
     IF Len(input_members) = 0 THEN
         TRUE
     ELSE IF success THEN
-        is_quorum_of_members(nodes, pos, Tail(input_members))
+        is_quorum_of_members(nodes, Tail(input_members))
     ELSE
         FALSE
 
-is_quorum_of(n, nodes, pos) ==
-    is_quorum_of_members(nodes, pos, members_info[n])
+is_quorum_of(n, nodes) ==
+    is_quorum_of_members(nodes, members_info[n])
 
 -----------------------
 
@@ -268,9 +284,7 @@ StartElection(n) ==
 
         vote_req == [
             type |-> "VoteReq",
-            term |-> leader_term'[n],
-            from_pos |-> start_pos,
-            recv |-> all_nodes
+            term |-> leader_term'[n]
         ]
 
         init_remain_pos(y) ==
@@ -294,6 +308,7 @@ StartElection(n) ==
     /\ UNCHANGED <<vote_resp_msgs, acc_req_msgs, acc_resp_msgs>>
     /\ UNCHANGED <<prepare_log, mem_log, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED term_all_nodes
 
 -----------------------
 
@@ -329,7 +344,7 @@ move_from_prepare_log_to_mem_log(st) ==
         all_nodes == all_nodes_of_members({}, st.members_info)
         acceptors == {y \in all_nodes: log_pos_less(st.pos, st.remain_map[y])}
 
-        is_moved == is_quorum_of_members(acceptors, st.pos, st.members_info)
+        is_moved == is_quorum_of_members(acceptors, st.members_info)
 
         new_members_info ==
             IF e.value.type = "Membership"
@@ -380,14 +395,11 @@ append_mem_log(n, values, members) ==
 
         compute_pos(i) == end_mem_pos(n) + i
 
-        all_nodes == all_nodes_of_members({}, members)
-
         acc_req(i, v) == [
             type |-> "AcceptReq",
             term |-> leader_term[n],
             pos |-> compute_pos(i),
-            value |-> v,
-            recv |-> all_nodes
+            value |-> v
         ]
 
         acc_req_set == {
@@ -446,7 +458,7 @@ doHandleVoteResp(n, resp) ==
         inf_set == {x \in new_all_nodes: final_remain_map[x] = infinity}
 
         switch_to_leader == is_quorum_of_members(
-            inf_set, result_state.pos, result_state.members_info
+            inf_set, result_state.members_info
         )
 
         when_become_leader ==
@@ -483,6 +495,7 @@ doHandleVoteResp(n, resp) ==
     /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED global_term
+    /\ UNCHANGED term_all_nodes
 
 HandleVoteResp(n) ==
     \E resp \in vote_resp_msgs:
@@ -492,11 +505,11 @@ HandleVoteResp(n) ==
 
 ------------------------------------------------------------------
 
-doHandleVoteReq(n, req) ==
+doHandleVoteReq(n, req, from_pos) ==
     LET
         final_pos ==
-            IF req.from_pos > Len(acc_log[n])
-                THEN req.from_pos
+            IF from_pos > Len(acc_log[n])
+                THEN from_pos
                 ELSE Len(acc_log[n]) + 1
 
         final_resp == [
@@ -520,7 +533,7 @@ doHandleVoteReq(n, req) ==
             !.entry = log_entry(i)
         ]
 
-        resp_pos_set == {i \in DOMAIN acc_log[n]: i >= req.from_pos}
+        resp_pos_set == {i \in DOMAIN acc_log[n]: i >= from_pos}
         normal_resp_set == {normal_resp(i): i \in resp_pos_set}
     IN
     /\ req.term >= acc_term[n]
@@ -532,12 +545,13 @@ doHandleVoteReq(n, req) ==
     /\ UNCHANGED <<vote_req_msgs, acc_req_msgs, acc_resp_msgs>>
     /\ UNCHANGED acc_log
     /\ UNCHANGED leader_vars
+    /\ UNCHANGED term_all_nodes
 
 HandleVoteReq(n) ==
     \E req \in vote_req_msgs:
         /\ req.type = "VoteReq"
-        /\ n \in req.recv
-        /\ doHandleVoteReq(n, req)
+        /\ n \in term_all_nodes[req.term].all_nodes
+        /\ doHandleVoteReq(n, req, term_all_nodes[req.term].from_pos)
 
 ------------------------------------------------------------------
 
@@ -576,6 +590,7 @@ doLeaderNewCmd(n, v) ==
     /\ UNCHANGED <<mem_fully_repl, members_info, commit_log, god_log>>
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED term_all_nodes
 
 LeaderNewCmd(n) ==
     \E v \in Value: doLeaderNewCmd(n, v)
@@ -609,6 +624,7 @@ doChangeMembers(n, nodes) ==
     /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED term_all_nodes
 
 LeaderChangeMembers(n) ==
     \E nodes \in NonEmptySubSet(Node):
@@ -640,6 +656,7 @@ FinishChangeMembers(n) ==
     /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED term_all_nodes
 
 ------------------------------------------------------------------
 
@@ -676,11 +693,12 @@ doHandleAcceptReq(n, req) ==
 
     /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_req_msgs>>
     /\ UNCHANGED leader_vars
+    /\ UNCHANGED term_all_nodes
 
 HandleAcceptReq(n) ==
     \E req \in acc_req_msgs:
         /\ req.type = "AcceptReq"
-        /\ n \in req.recv
+        /\ n \in term_all_nodes[req.term].all_nodes
         /\ doHandleAcceptReq(n, req)
 
 ------------------------------------------------------------------
@@ -694,7 +712,7 @@ doHandleAcceptResp(n, resp) ==
         new_mem_log == [mem_log EXCEPT ![n][index].acceptors = @ \union {y}]
 
         is_committed ==
-            is_quorum_of(n, new_mem_log[n][index].acceptors, pos)
+            is_quorum_of(n, new_mem_log[n][index].acceptors)
 
         set_committed == [new_mem_log EXCEPT ![n][index].committed = is_committed]
         new_log == set_committed[n]
@@ -720,6 +738,7 @@ doHandleAcceptResp(n, resp) ==
     /\ UNCHANGED <<mem_fully_repl, members_info>>
     /\ UNCHANGED <<leader_term, global_term, state, prepare_log, remain_map>>
     /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED term_all_nodes
 
 HandleAcceptResp(n) ==
     \E resp \in acc_resp_msgs:
@@ -751,12 +770,37 @@ doReplicateCommittedEntry(n, l) ==
     /\ UNCHANGED acc_term
     /\ UNCHANGED leader_vars
     /\ UNCHANGED msg_vars
+    /\ UNCHANGED term_all_nodes
 
 ReplicateCommittedEntry(n) ==
     \E l \in Node:
         /\ leader_term[l] = acc_term[n]
         /\ state[l] \in {"Leader", "Candidate"}
         /\ doReplicateCommittedEntry(n, l)
+
+------------------------------------------------------------------
+
+doUpdateTermNodes(t, n) ==
+    LET
+        all_nodes == all_nodes_of_members({}, members_info[n])
+        new_val == [
+            all_nodes |-> all_nodes,
+            from_pos |-> end_mem_pos(n) + 1
+        ]
+    IN
+    /\ all_nodes # term_all_nodes[t].all_nodes
+    /\ term_all_nodes' = [term_all_nodes EXCEPT ![t] = new_val]
+
+    /\ UNCHANGED leader_vars
+    /\ UNCHANGED acceptor_vars
+    /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs>>
+    /\ UNCHANGED <<acc_req_msgs, acc_resp_msgs>>
+
+UpdateTermNodes ==
+    \E t \in Term, n \in Node:
+        /\ leader_term[n] = t
+        /\ state[n] # "Follower"
+        /\ doUpdateTermNodes(t, n)
 
 ------------------------------------------------------------------
 
@@ -792,6 +836,7 @@ Next ==
         \/ HandleAcceptReq(n)
         \/ HandleAcceptResp(n)
         \/ ReplicateCommittedEntry(n)
+    \/ UpdateTermNodes
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -931,7 +976,7 @@ AccLogProperty == [][accLogStep]_acc_log
 -----------------------
 
 InversedInv ==
-    Len(god_log) = 0
+    Len(god_log) = 1
 
 -----------------------
 
