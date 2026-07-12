@@ -432,6 +432,13 @@ move_from_mem_log_to_commit_log(input_log, input_members) ==
 
 -----------------------
 
+append_commit_log(n, values) ==
+    /\ commit_log' = [commit_log EXCEPT ![n] = @ \o values]
+    /\ IF mem_fully_repl[n] + Len(commit_log'[n]) > Len(god_log)
+        THEN god_log' = SubSeq(god_log, 1, mem_fully_repl[n]) \o commit_log'[n]
+        ELSE UNCHANGED god_log
+
+-----------------------
 
 doHandleVoteResp(n, resp) ==
     LET
@@ -678,10 +685,10 @@ FinishChangeMembers(n) ==
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
     /\ acc_req_msgs' = acc_req_msgs \union result.acc_req
     /\ mem_log' = [mem_log EXCEPT ![n] = move_result.mem_log]
-    /\ commit_log' = [commit_log EXCEPT ![n] = @ \o move_result.commit_log]
+    /\ append_commit_log(n, move_result.commit_log)
 
     /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
-    /\ UNCHANGED <<mem_fully_repl, god_log>>
+    /\ UNCHANGED <<mem_fully_repl>>
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED term_all_nodes
@@ -745,11 +752,7 @@ doHandleAcceptResp(n, resp) ==
     /\ y \notin mem_log[n][index].acceptors
 
     /\ mem_log' = [mem_log EXCEPT ![n] = result.mem_log]
-    /\ commit_log' = [commit_log EXCEPT ![n] = @ \o result.commit_log]
-
-    /\ IF mem_fully_repl[n] + Len(commit_log'[n]) > Len(god_log)
-        THEN god_log' = SubSeq(god_log, 1, mem_fully_repl[n]) \o commit_log'[n]
-        ELSE UNCHANGED god_log
+    /\ append_commit_log(n, result.commit_log)
 
     /\ UNCHANGED msg_vars
     /\ UNCHANGED <<mem_fully_repl, members_info>>
@@ -883,7 +886,8 @@ GodLogMatchCommitLog ==
         LET
             god_values == SubSeqSafe(god_log, 1, end_commit_pos(n))
             cond ==
-                leader_commit_log_values(n) = god_values
+                /\ end_commit_pos(n) <= Len(god_log)
+                /\ leader_commit_log_values(n) = god_values
         IN
             state[n] \in {"Leader", "Candidate"} => cond
 
