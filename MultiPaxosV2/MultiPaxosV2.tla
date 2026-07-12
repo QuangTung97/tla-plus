@@ -482,6 +482,12 @@ doHandleVoteResp(n, resp) ==
             new_remain_map, result_state.pos, new_all_nodes
         )
 
+        mem_result == append_mem_log_result(n, result_state.mem_log)
+        new_mem_log == mem_log[n] \o mem_result.mem_log
+        commit_result == move_from_mem_log_to_commit_log(
+            new_mem_log, result_state.members_info
+        )
+
         \* check become leader
         inf_set == {x \in new_all_nodes: final_remain_map[x] = infinity}
 
@@ -501,15 +507,17 @@ doHandleVoteResp(n, resp) ==
     /\ remain_map[n][y] = resp.pos
 
     /\ prepare_log' = [prepare_log EXCEPT ![n] = result_state.prepare_log]
-    /\ append_mem_log(n, result_state.mem_log)
     /\ members_info' = [members_info EXCEPT ![n] = result_state.members_info]
+    /\ acc_req_msgs' = acc_req_msgs \union mem_result.acc_req
+    /\ mem_log' = [mem_log EXCEPT ![n] = commit_result.mem_log]
+    /\ append_commit_log(n, commit_result.commit_log)
 
     /\ IF switch_to_leader
         THEN when_become_leader
         ELSE when_normal
 
     /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
-    /\ UNCHANGED <<leader_term, mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED <<leader_term, mem_fully_repl>>
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED global_term
     /\ UNCHANGED term_all_nodes
