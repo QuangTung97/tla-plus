@@ -380,7 +380,7 @@ set_remain_map_not_less_than(new_remain_map, new_start_pos, input_all_nodes) ==
 
 -----------------------
 
-append_mem_log(n, values, members) ==
+append_mem_log_result(n, values) ==
     LET
         new_entry_fn(v) == [
             value |-> v,
@@ -400,9 +400,17 @@ append_mem_log(n, values, members) ==
         acc_req_set == {
             acc_req(i, values[i]): i \in DOMAIN values
         }
+    IN [
+        mem_log |-> entry_list,
+        acc_req |-> acc_req_set
+    ]
+
+append_mem_log(n, values) ==
+    LET
+        result == append_mem_log_result(n, values)
     IN
-    /\ mem_log' = [mem_log EXCEPT ![n] = @ \o entry_list]
-    /\ acc_req_msgs' = acc_req_msgs \union acc_req_set
+    /\ mem_log' = [mem_log EXCEPT ![n] = @ \o result.mem_log]
+    /\ acc_req_msgs' = acc_req_msgs \union result.acc_req
 
 -----------------------
 
@@ -494,7 +502,7 @@ doHandleVoteResp(n, resp) ==
     /\ remain_map[n][y] = resp.pos
 
     /\ prepare_log' = [prepare_log EXCEPT ![n] = result_state.prepare_log]
-    /\ append_mem_log(n, result_state.mem_log, result_state.members_info)
+    /\ append_mem_log(n, result_state.mem_log)
     /\ members_info' = [members_info EXCEPT ![n] = result_state.members_info]
 
     /\ IF new_all_nodes \ old_all_nodes = {}
@@ -598,7 +606,7 @@ num_entries_by_type(n, cmd_type) ==
 doLeaderNewCmd(n, v) ==
     /\ state[n] = "Leader"
     /\ num_entries_by_type(n, "Cmd") < max_cmd_len
-    /\ append_mem_log(n, <<newCmd(v)>>, members_info[n])
+    /\ append_mem_log(n, <<newCmd(v)>>)
 
     /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
     /\ UNCHANGED <<mem_fully_repl, members_info, commit_log, god_log>>
@@ -631,7 +639,7 @@ doChangeMembers(n, nodes) ==
     /\ Len(members_info[n]) <= 1
     /\ num_entries_by_type(n, "Membership") < max_actual_member_len
 
-    /\ append_mem_log(n, <<cmd>>, new_members)
+    /\ append_mem_log(n, <<cmd>>)
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
 
     /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
@@ -658,16 +666,22 @@ FinishChangeMembers(n) ==
             type |-> "Membership",
             members |-> new_members
         ]
+
+        result == append_mem_log_result(n, <<cmd>>)
+        new_mem_log == mem_log[n] \o result.mem_log
+        move_result == move_from_mem_log_to_commit_log(new_mem_log, new_members)
     IN
     /\ state[n] = "Leader"
     /\ Len(members_info[n]) > 1
     /\ from_pos <= end_commit_pos(n)
 
-    /\ append_mem_log(n, <<cmd>>, new_members)
     /\ members_info' = [members_info EXCEPT ![n] = new_members]
+    /\ acc_req_msgs' = acc_req_msgs \union result.acc_req
+    /\ mem_log' = [mem_log EXCEPT ![n] = move_result.mem_log]
+    /\ commit_log' = [commit_log EXCEPT ![n] = @ \o move_result.commit_log]
 
     /\ UNCHANGED <<vote_req_msgs, vote_resp_msgs, acc_resp_msgs>>
-    /\ UNCHANGED <<mem_fully_repl, commit_log, god_log>>
+    /\ UNCHANGED <<mem_fully_repl, god_log>>
     /\ UNCHANGED candidate_vars
     /\ UNCHANGED acceptor_vars
     /\ UNCHANGED term_all_nodes
