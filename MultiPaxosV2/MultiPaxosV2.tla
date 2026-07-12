@@ -121,8 +121,7 @@ AcceptRespMsg == [
 
 MemLogEntry == [
     value: LogValue,
-    acceptors: SUBSET Node,
-    committed: BOOLEAN
+    acceptors: SUBSET Node
 ]
 
 -----------------------
@@ -253,9 +252,6 @@ is_quorum_of_members(nodes, input_members) ==
         is_quorum_of_members(nodes, Tail(input_members))
     ELSE
         FALSE
-
-is_quorum_of(n, nodes) ==
-    is_quorum_of_members(nodes, members_info[n])
 
 -----------------------
 
@@ -388,8 +384,7 @@ append_mem_log(n, values, members) ==
     LET
         new_entry_fn(v) == [
             value |-> v,
-            acceptors |-> {},
-            committed |-> FALSE
+            acceptors |-> {}
         ]
         entry_list == MapSeq(values, new_entry_fn)
 
@@ -410,6 +405,25 @@ append_mem_log(n, values, members) ==
     /\ acc_req_msgs' = acc_req_msgs \union acc_req_set
 
 -----------------------
+
+move_from_mem_log_to_commit_log(input_log, input_members) ==
+    LET
+        is_quorum(entry) ==
+            is_quorum_of_members(entry.acceptors, input_members)
+
+        first_non_commit == FindFirstIndex(
+            input_log, LAMBDA entry: ~is_quorum(entry)
+        )
+
+        new_committed == SubSeq(input_log, 1, first_non_commit - 1)
+        new_committed_values == log_to_values(new_committed)
+    IN [
+        mem_log |-> RemoveSeqBefore(input_log, first_non_commit),
+        commit_log |-> new_committed_values
+    ]
+
+-----------------------
+
 
 doHandleVoteResp(n, resp) ==
     LET
@@ -710,25 +724,14 @@ doHandleAcceptResp(n, resp) ==
         index == pos - end_commit_pos(n)
 
         new_mem_log == [mem_log EXCEPT ![n][index].acceptors = @ \union {y}]
-
-        is_committed ==
-            is_quorum_of(n, new_mem_log[n][index].acceptors)
-
-        set_committed == [new_mem_log EXCEPT ![n][index].committed = is_committed]
-        new_log == set_committed[n]
-
-        first_non_commit == FindFirstIndex(new_log, LAMBDA entry: ~entry.committed)
-
-        new_committed == SubSeq(new_log, 1, first_non_commit - 1)
-        new_committed_values == log_to_values(new_committed)
+        result == move_from_mem_log_to_commit_log(new_mem_log[n], members_info[n])
     IN
     /\ state[n] \in {"Candidate", "Leader"}
     /\ pos > end_commit_pos(n)
     /\ y \notin mem_log[n][index].acceptors
-    /\ ~mem_log[n][index].committed
 
-    /\ mem_log' = [set_committed EXCEPT ![n] = RemoveSeqBefore(@, first_non_commit)]
-    /\ commit_log' = [commit_log EXCEPT ![n] = @ \o new_committed_values]
+    /\ mem_log' = [mem_log EXCEPT ![n] = result.mem_log]
+    /\ commit_log' = [commit_log EXCEPT ![n] = @ \o result.commit_log]
 
     /\ IF mem_fully_repl[n] + Len(commit_log'[n]) > Len(god_log)
         THEN god_log' = SubSeq(god_log, 1, mem_fully_repl[n]) \o commit_log'[n]
@@ -972,6 +975,22 @@ accLogStep ==
     \A n \in Node: accLogStepNode(n)
 
 AccLogProperty == [][accLogStep]_acc_log
+
+-----------------------
+
+MemLogFirstEntryInv ==
+    LET
+        pre_cond(n) ==
+            /\ state[n] # "Follower"
+            /\ mem_log[n] # <<>>
+
+        entry(n) == mem_log[n][1]
+
+        cond(n) ==
+            ~is_quorum_of_members(entry(n).acceptors, members_info[n])
+    IN
+    \A n \in Node:
+        pre_cond(n) => cond(n)
 
 -----------------------
 
