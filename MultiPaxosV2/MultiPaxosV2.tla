@@ -41,7 +41,7 @@ Term == 20..max_term_num
 NonZeroTerm == Term \ {20}
 InfTerm == NonZeroTerm \union {infinity}
 
-LogPos == 0..9
+LogPos == 0..19
 
 InfLogPos == LogPos \union {infinity}
 
