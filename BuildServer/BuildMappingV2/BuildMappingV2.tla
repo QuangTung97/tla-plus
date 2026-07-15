@@ -1,19 +1,21 @@
 ---- MODULE BuildMappingV2 ----
 EXTENDS TLC, Naturals, FiniteSets
 
-CONSTANT Workspace, Value, nil, max_build_num
+CONSTANT Workspace, Value, nil, max_build_num, max_num_remove
 
 VARIABLES
     pc,
     last_build_id, build_id_list, build_state_map,
     current_build_id, last_bazel_pid,
-    god_bazel_id, bazel_pid_map, bazel_pid_list
+    god_bazel_id, bazel_pid_map, bazel_pid_list,
+    num_remove
 
 vars == <<
     pc,
     last_build_id, build_id_list, build_state_map,
     current_build_id, last_bazel_pid,
-    god_bazel_id, bazel_pid_map, bazel_pid_list
+    god_bazel_id, bazel_pid_map, bazel_pid_list,
+    num_remove
 >>
 
 ---------------------------------------------------------
@@ -57,6 +59,8 @@ TypeOK ==
     /\ bazel_pid_map \in [BazelPID -> Null(BazelState)]
     /\ bazel_pid_list \subseteq BazelPID
 
+    /\ num_remove \in 0..max_num_remove
+
 Init ==
     /\ pc = [w \in Workspace |-> "Init"]
 
@@ -70,6 +74,8 @@ Init ==
     /\ last_bazel_pid = 30
     /\ bazel_pid_map = [pid \in BazelPID |-> nil]
     /\ bazel_pid_list = {}
+
+    /\ num_remove = 0
 
 ---------------------------------------------------------
 
@@ -128,8 +134,34 @@ StartBuild(w) ==
     /\ bazel_pid_map' = update_bazel_map
 
     /\ UNCHANGED bazel_pid_list
+    /\ UNCHANGED num_remove
 
 ---------------------------------------------------------
+
+get_bazel_state(pid) ==
+    LET
+        normal_case == [
+            pid_map |-> bazel_pid_map[pid],
+            pid_list |-> bazel_pid_list
+        ]
+
+        init_map == [
+            build_id |-> nil,
+            recv |-> FALSE,
+            pending |-> nil
+        ]
+
+        missing_case == [
+            pid_map |-> init_map,
+            pid_list |-> bazel_pid_list \union {pid}
+        ]
+    IN
+    IF bazel_pid_map[pid] # nil THEN
+        normal_case
+    ELSE
+        missing_case
+
+---------------------------------
 
 SetBazelPID(w) ==
     LET
@@ -138,41 +170,23 @@ SetBazelPID(w) ==
 
         old_state == build_state_map[id]
 
-        init_bazel_state == [
-            build_id |-> id,
-            recv |-> FALSE,
-            pending |-> nil
-        ]
+        get_result == get_bazel_state(pid)
 
-        old_bazel_state ==
-            IF bazel_pid_map[pid] = nil
-                THEN init_bazel_state
-                ELSE bazel_pid_map[pid]
-
-        new_bazel_state == [old_bazel_state EXCEPT
+        new_bazel_state == [get_result.pid_map EXCEPT
             !.build_id = id,
             !.pending = nil
         ]
 
-        new_value == old_bazel_state.pending
-
         new_state == [old_state EXCEPT
             !.bazel_pid = pid,
-            !.value = new_value
+            !.value = get_result.pid_map.pending
         ]
-
-        old_pid_list == bazel_pid_list
-        new_pid_list ==
-            IF old_bazel_state.pending # nil THEN
-                old_pid_list \ {pid}
-            ELSE
-                old_pid_list
     IN
     /\ pc[w] = "SetBazelPID"
 
     /\ goto(w, "Init")
     /\ build_state_map' = [build_state_map EXCEPT ![id] = new_state]
-    /\ bazel_pid_list' = new_pid_list
+    /\ bazel_pid_list' = get_result.pid_list \ {pid}
     /\ bazel_pid_map' = [bazel_pid_map EXCEPT ![pid] = new_bazel_state]
 
     /\ UNCHANGED current_build_id
@@ -180,40 +194,33 @@ SetBazelPID(w) ==
     /\ UNCHANGED god_bazel_id
     /\ UNCHANGED last_bazel_pid
     /\ UNCHANGED last_build_id
+    /\ UNCHANGED num_remove
 
 ---------------------------------------------------------
 
 SetBuildValue(pid, v) ==
     LET
-        old_bazel_state == bazel_pid_map[pid]
+        get_result == get_bazel_state(pid)
 
-        allow_cond ==
-            old_bazel_state # nil => old_bazel_state.recv = FALSE
+        set_recv == [get_result.pid_map EXCEPT !.recv = TRUE]
+        id == set_recv.build_id
 
         new_bazel_state ==
-            IF old_bazel_state = nil
-                THEN [build_id |-> nil, recv |-> TRUE, pending |-> v]
-                ELSE [old_bazel_state EXCEPT !.recv = TRUE]
+            IF id # nil
+                THEN set_recv
+                ELSE [set_recv EXCEPT !.pending = v]
 
-        id == new_bazel_state.build_id
         update_state ==
             IF id # nil THEN
                 build_state_map' = [build_state_map EXCEPT ![id].value = v]
             ELSE
                 UNCHANGED build_state_map
-
-        new_list == bazel_pid_list \union{pid}
-        update_pid_list ==
-            IF id # nil THEN
-                bazel_pid_list' = new_list \ {pid}
-            ELSE
-                bazel_pid_list' = new_list
     IN
-    /\ allow_cond
+    /\ get_result.pid_map.recv = FALSE
 
     /\ bazel_pid_map' = [bazel_pid_map EXCEPT ![pid] = new_bazel_state]
     /\ update_state
-    /\ update_pid_list
+    /\ bazel_pid_list' = get_result.pid_list
 
     /\ UNCHANGED build_id_list
     /\ UNCHANGED pc
@@ -221,10 +228,16 @@ SetBuildValue(pid, v) ==
     /\ UNCHANGED god_bazel_id
     /\ UNCHANGED last_bazel_pid
     /\ UNCHANGED last_build_id
+    /\ UNCHANGED num_remove
 
 ---------------------------------------------------------
 
+allow_remove ==
+    /\ num_remove < max_num_remove
+    /\ num_remove' = num_remove + 1
+
 RemoveBuildID(id) ==
+    /\ allow_remove
     /\ id \in build_id_list
     /\ ~build_state_map[id].is_current
 
@@ -242,6 +255,7 @@ RemoveBuildID(id) ==
 ---------------------------------------------------------
 
 RemoveBazelID(pid) ==
+    /\ allow_remove
     /\ pid \in bazel_pid_list
 
     /\ bazel_pid_list' = bazel_pid_list \ {pid}
@@ -289,7 +303,12 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ---------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
+
 
 BuildIDListInv ==
     build_id_list = {id \in BuildID: build_state_map[id] # nil}
