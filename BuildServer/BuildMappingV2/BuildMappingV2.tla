@@ -168,6 +168,11 @@ SetBazelPID(w) ==
         id == current_build_id[w]
         pid == god_bazel_id[id]
 
+        on_nil ==
+            /\ UNCHANGED build_state_map
+            /\ UNCHANGED bazel_pid_list
+            /\ UNCHANGED bazel_pid_map
+
         old_state == build_state_map[id]
 
         get_result == get_bazel_state(pid)
@@ -181,13 +186,18 @@ SetBazelPID(w) ==
             !.bazel_pid = pid,
             !.value = get_result.pid_map.pending
         ]
+
+        on_normal ==
+            /\ build_state_map' = [build_state_map EXCEPT ![id] = new_state]
+            /\ bazel_pid_list' = get_result.pid_list \ {pid}
+            /\ bazel_pid_map' = [bazel_pid_map EXCEPT ![pid] = new_bazel_state]
     IN
     /\ pc[w] = "SetBazelPID"
 
     /\ goto(w, "Init")
-    /\ build_state_map' = [build_state_map EXCEPT ![id] = new_state]
-    /\ bazel_pid_list' = get_result.pid_list \ {pid}
-    /\ bazel_pid_map' = [bazel_pid_map EXCEPT ![pid] = new_bazel_state]
+    /\ IF id = nil
+        THEN on_nil
+        ELSE on_normal
 
     /\ UNCHANGED current_build_id
     /\ UNCHANGED build_id_list
@@ -237,16 +247,31 @@ allow_remove ==
     /\ num_remove' = num_remove + 1
 
 RemoveBuildID(id) ==
+    LET
+        state == build_state_map[id]
+        w == state.ws
+
+        remove_current_map ==
+            IF state.is_current THEN
+                current_build_id' = [current_build_id EXCEPT ![w] = nil]
+            ELSE
+                UNCHANGED current_build_id
+
+        remove_bazel_pid_map ==
+            IF state.bazel_pid # nil THEN
+                bazel_pid_map' = [bazel_pid_map EXCEPT ![state.bazel_pid] = nil]
+            ELSE
+                UNCHANGED bazel_pid_map
+    IN
     /\ allow_remove
     /\ id \in build_id_list
-    /\ ~build_state_map[id].is_current
 
     /\ build_id_list' = build_id_list \ {id}
     /\ build_state_map' = [build_state_map EXCEPT ![id] = nil]
+    /\ remove_current_map
+    /\ remove_bazel_pid_map
 
-    /\ UNCHANGED bazel_pid_map
     /\ UNCHANGED bazel_pid_list
-    /\ UNCHANGED current_build_id
     /\ UNCHANGED pc
     /\ UNCHANGED god_bazel_id
     /\ UNCHANGED last_bazel_pid
