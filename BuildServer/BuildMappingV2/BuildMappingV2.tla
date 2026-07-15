@@ -224,6 +224,39 @@ SetBuildValue(pid, v) ==
 
 ---------------------------------------------------------
 
+RemoveBuildID(id) ==
+    /\ id \in build_id_list
+    /\ ~build_state_map[id].is_current
+
+    /\ build_id_list' = build_id_list \ {id}
+    /\ build_state_map' = [build_state_map EXCEPT ![id] = nil]
+
+    /\ UNCHANGED bazel_pid_map
+    /\ UNCHANGED bazel_pid_list
+    /\ UNCHANGED current_build_id
+    /\ UNCHANGED pc
+    /\ UNCHANGED god_bazel_id
+    /\ UNCHANGED last_bazel_pid
+    /\ UNCHANGED last_build_id
+
+---------------------------------------------------------
+
+RemoveBazelID(pid) ==
+    /\ pid \in bazel_pid_list
+
+    /\ bazel_pid_list' = bazel_pid_list \ {pid}
+    /\ bazel_pid_map' = [bazel_pid_map EXCEPT ![pid] = nil]
+
+    /\ UNCHANGED build_id_list
+    /\ UNCHANGED current_build_id
+    /\ UNCHANGED build_state_map
+    /\ UNCHANGED pc
+    /\ UNCHANGED god_bazel_id
+    /\ UNCHANGED last_bazel_pid
+    /\ UNCHANGED last_build_id
+
+---------------------------------------------------------
+
 build_id_is_current(id) ==
     \E w \in Workspace: current_build_id[w] = id
 
@@ -250,6 +283,8 @@ Next ==
         \/ SetBazelPID(w)
     \/ \E pid \in BazelPID, v \in Value:
         \/ SetBuildValue(pid, v)
+    \/ \E id \in BuildID: RemoveBuildID(id)
+    \/ \E pid \in BazelPID: RemoveBazelID(pid)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
