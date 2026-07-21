@@ -260,7 +260,12 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ------------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
+
 
 OnlyWritingHasPendingWriters ==
     pending_writers # {} => status = "Writing"
@@ -275,6 +280,5 @@ webWriteVersionAction ==
 
 WebWriteVersionProperty ==
     [][webWriteVersionAction]_web_write_version
-
 
 ====
