@@ -159,12 +159,18 @@ do_lock_key(k) ==
 LockKey(n) ==
     LET
         k == local_key[n]
+
+        on_normal ==
+            /\ goto(n, "Running")
+            /\ do_lock_key(k)
+
+        on_failed ==
+            /\ goto(n, "Finish")
+            /\ UNCHANGED locked_set
     IN
     /\ pc[n] = "LockKey"
-
-    /\ goto(n, "Running")
-    /\ do_lock_key(k)
-
+    /\ \/ on_normal
+       \/ on_failed
     /\ UNCHANGED running_map
     /\ UNCHANGED <<local_action_id, local_key>>
     /\ UNCHANGED enabled_timer
@@ -304,5 +310,6 @@ WhenTerminatedInv ==
     TerminateCond =>
         /\ \A k \in Key: running_map[k] = nil
         /\ enabled_timer = {}
+        /\ locked_set = {}
 
 ====
