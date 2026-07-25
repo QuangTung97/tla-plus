@@ -8,7 +8,8 @@ VARIABLES
     pc, local_key, local_slab,
     free_pages, hash_slot_lock,
     slab_lock, slab_free_items, slab_inuse_items,
-    item_map, hash_map
+    item_map, hash_map,
+    stop_cmd
 
 const_vars == <<
     key_to_slot
@@ -27,7 +28,8 @@ vars == <<
     local_vars,
     free_pages, hash_slot_lock,
     slab_vars,
-    item_map, hash_map
+    item_map, hash_map,
+    stop_cmd
 >>
 
 ------------------------------------------------------------------
@@ -65,6 +67,8 @@ TypeOK ==
     /\ local_key \in [Node -> Null(Key)]
     /\ local_slab \in [Node -> Null(Slab)]
 
+    /\ stop_cmd \in BOOLEAN
+
 Init ==
     /\ key_to_slot \in [Key -> HashSlot]
     /\ free_pages = Page
@@ -80,6 +84,8 @@ Init ==
     /\ local_key = [n \in Node |-> nil]
     /\ local_slab = [n \in Node |-> nil]
 
+    /\ stop_cmd = FALSE
+
 ------------------------------------------------------------------
 
 set_local(n, var, x) ==
@@ -91,10 +97,12 @@ goto(n, l) ==
 node_logic_unchanged ==
     /\ UNCHANGED const_vars
     /\ UNCHANGED <<local_key, local_slab>>
+    /\ UNCHANGED stop_cmd
 
 ------------------------------------------------------------------
 
 PutKey(n, k, s) ==
+    /\ ~stop_cmd
     /\ pc[n] = "Init"
     /\ goto(n, "LockSlot")
     /\ set_local(n, local_key, k)
@@ -104,6 +112,7 @@ PutKey(n, k, s) ==
     /\ UNCHANGED slab_vars
     /\ UNCHANGED <<item_map, hash_map>>
     /\ UNCHANGED const_vars
+    /\ UNCHANGED stop_cmd
 
 ------------------------------------------------------------------
 
@@ -300,11 +309,27 @@ UnlockSlot(n) ==
 
 ------------------------------------------------------------------
 
+EnableStopCmd ==
+    /\ ~stop_cmd
+    /\ stop_cmd' = TRUE
+
+    /\ UNCHANGED <<hash_map, item_map, hash_slot_lock>>
+    /\ UNCHANGED free_pages
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED slab_vars
+    /\ UNCHANGED const_vars
+
+------------------------------------------------------------------
+
 StopCond ==
     /\ \A n \in Node: pc[n] = "Init"
 
-Terminated ==
+TerminateCond ==
     /\ StopCond
+    /\ stop_cmd
+
+Terminated ==
+    /\ TerminateCond
     /\ UNCHANGED vars
 
 ------------------------------------------------------------------
@@ -320,11 +345,18 @@ Next ==
     \/ \E n \in Node, it \in Item:
         \/ EvictSlab(n, it)
         \/ SetItem(n, it)
+    \/ EnableStopCmd
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next) /\ SF_vars(EnableStopCmd)
+
 ------------------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
+
+------------------------
 
 NoLeakItem ==
     LET
