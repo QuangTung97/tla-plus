@@ -7,7 +7,7 @@ VARIABLES
     key_to_slot,
     pc, local_key, local_slab,
     free_pages, hash_slot_lock,
-    slab_free_items, slab_inuse_items,
+    slab_lock, slab_free_items, slab_inuse_items,
     item_map, hash_map
 
 const_vars == <<
@@ -19,7 +19,7 @@ local_vars == <<
 >>
 
 slab_vars == <<
-    slab_free_items, slab_inuse_items
+    slab_lock, slab_free_items, slab_inuse_items
 >>
 
 vars == <<
@@ -54,6 +54,7 @@ TypeOK ==
     /\ free_pages \subseteq Page
     /\ hash_slot_lock \in [HashSlot -> Nat]
 
+    /\ slab_lock \in [Slab -> Nat]
     /\ slab_free_items \in [Slab -> SUBSET Item]
     /\ slab_inuse_items \in [Slab -> SUBSET Item]
     /\ item_map \in [Item -> Null(ItemData)]
@@ -68,6 +69,7 @@ Init ==
     /\ free_pages = Page
     /\ hash_slot_lock = [h \in HashSlot |-> 0]
 
+    /\ slab_lock = [s \in Slab |-> 0]
     /\ slab_free_items = [s \in Slab |-> {}]
     /\ slab_inuse_items = [s \in Slab |-> {}]
     /\ item_map = [i \in Item |-> nil]
@@ -146,16 +148,22 @@ DeletePrevKey(n) ==
     /\ pc[n] = "DeletePrevKey"
     /\ goto(n, "GetFreePage")
 
+    /\ slab_lock[s] = 0 \* slab is not locked
     /\ item_map' = [item_map EXCEPT ![it] = nil]
     /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
 
+    /\ UNCHANGED slab_lock
     /\ UNCHANGED free_pages
     /\ UNCHANGED hash_slot_lock
     /\ node_logic_unchanged
 
 ------------------------------------------------------------------
+
+do_lock_slab(s) ==
+    /\ slab_lock[s] = 0
+    /\ slab_lock' = [slab_lock EXCEPT ![s] = @ + 1]
 
 GetFreePage(n, p) ==
     LET
@@ -177,6 +185,7 @@ GetFreePage(n, p) ==
     IN
     /\ pc[n] = "GetFreePage"
 
+    /\ do_lock_slab(s)
     /\ goto(n, "SetItem")
     /\ IF slab_empty
         THEN on_alloc
@@ -207,6 +216,7 @@ SetItem(n, it) ==
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \union {it}]
     /\ item_map' = [item_map EXCEPT ![it] = new_item]
     /\ hash_map' = [hash_map EXCEPT ![k] = it]
+    /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1]
 
     /\ UNCHANGED hash_slot_lock
     /\ UNCHANGED free_pages
@@ -286,5 +296,8 @@ ItemAlwaysExistWhenSetItem ==
             cond == slab_free_items[s] # {}
         IN
         pc[n] = "SetItem" => cond
+
+
+\* TODO add avoid race condition for hash slot
 
 ====
