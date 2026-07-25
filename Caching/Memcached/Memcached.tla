@@ -234,7 +234,7 @@ EvictSlab(n, it) ==
             /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
             /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
             /\ item_map' = [item_map EXCEPT ![it] = nil]
-            /\ UNCHANGED hash_map
+            /\ hash_map' = [hash_map EXCEPT ![k] = nil]
             /\ UNCHANGED slab_lock
 
         on_skip ==
@@ -343,9 +343,18 @@ SlabInuseItemsMatchItemMap ==
         exist_in_slab(it) ==
             \E s \in Slab: it \in slab_inuse_items[s]
     IN
-
     \A it \in Item:
         exist_in_slab(it) <=> item_map[it] # nil
+
+------------------------
+
+HashMapAlwaysPointToInuse ==
+    LET
+        exist_in_slab(it) ==
+            \E s \in Slab: it \in slab_inuse_items[s]
+    IN
+    \A k \in Key:
+        hash_map[k] # nil => exist_in_slab(hash_map[k])
 
 ------------------------
 
