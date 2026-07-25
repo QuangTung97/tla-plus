@@ -108,7 +108,7 @@ do_lock_hash_slot(h) ==
     /\ hash_slot_lock[h] = 0
     /\ hash_slot_lock' = [hash_slot_lock EXCEPT ![h] = @ + 1]
 
---------------------------------
+------------------------
 
 LockSlot(n) ==
     LET
@@ -148,9 +148,9 @@ DeletePrevKey(n) ==
 
     /\ item_map' = [item_map EXCEPT ![it] = nil]
     /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
+    /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
 
-    /\ UNCHANGED slab_inuse_items
     /\ UNCHANGED free_pages
     /\ UNCHANGED hash_slot_lock
     /\ node_logic_unchanged
@@ -160,20 +160,21 @@ DeletePrevKey(n) ==
 GetFreePage(n, p) ==
     LET
         s == local_slab[n]
-        new_items == {p} \X Offset
 
         slab_empty ==
             slab_free_items[s] = {}
 
-        on_alloc ==
-            /\ free_pages' = free_pages \ {p}
-            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items]
-
         do_nothing ==
             /\ UNCHANGED free_pages
             /\ UNCHANGED slab_free_items
+
+        new_items == {p} \X Offset
+
+        on_alloc ==
+            /\ p \in free_pages
+            /\ free_pages' = free_pages \ {p}
+            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items]
     IN
-    /\ p \in free_pages
     /\ pc[n] = "GetFreePage"
 
     /\ goto(n, "SetItem")
@@ -265,7 +266,25 @@ NoLeakItem ==
     IN
     StopCond => cond
 
+------------------------
 
-\* TODO add matching between inuse items and item_map
+SlabInuseItemsMatchItemMap ==
+    LET
+        exist_in_slab(it) ==
+            \E s \in Slab: it \in slab_inuse_items[s]
+    IN
+
+    \A it \in Item:
+        exist_in_slab(it) <=> item_map[it] # nil
+
+------------------------
+
+ItemAlwaysExistWhenSetItem ==
+    \A n \in Node:
+        LET
+            s == local_slab[n]
+            cond == slab_free_items[s] # {}
+        IN
+        pc[n] = "SetItem" => cond
 
 ====
