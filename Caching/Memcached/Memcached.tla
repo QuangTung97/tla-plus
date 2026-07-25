@@ -43,7 +43,8 @@ ItemData == [
 
 PC == {
     "Init", "LockSlot",
-    "DeletePrevKey", "GetFreePage", "SetItem",
+    "DeletePrevKey", "GetFreePage",
+    "EvictSlab", "SetItem",
     "UnlockSlot"
 }
 
@@ -161,35 +162,54 @@ DeletePrevKey(n) ==
 
 ------------------------------------------------------------------
 
-do_lock_slab(s) ==
-    /\ slab_lock[s] = 0
+inc_lock_slab(s) ==
     /\ slab_lock' = [slab_lock EXCEPT ![s] = @ + 1]
 
-GetFreePage(n, p) ==
+GetFreePage(n) ==
     LET
         s == local_slab[n]
 
-        slab_empty ==
-            slab_free_items[s] = {}
-
-        do_nothing ==
+        pass_to_next ==
+            /\ goto(n, "SetItem")
+            /\ inc_lock_slab(s)
             /\ UNCHANGED free_pages
             /\ UNCHANGED slab_free_items
 
-        new_items == {p} \X Offset
+        do_evict ==
+            /\ goto(n, "EvictSlab")
+            /\ inc_lock_slab(s)
+            /\ UNCHANGED free_pages
+            /\ UNCHANGED slab_free_items
 
-        on_alloc ==
+        skip_put ==
+            /\ goto(n, "UnlockSlot")
+            /\ UNCHANGED slab_free_items
+            /\ UNCHANGED free_pages
+            /\ UNCHANGED slab_lock
+
+        new_items(p) == {p} \X Offset
+
+        on_alloc(p) ==
             /\ p \in free_pages
+            /\ goto(n, "SetItem")
+            /\ inc_lock_slab(s)
             /\ free_pages' = free_pages \ {p}
-            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items]
+            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items(p)]
+
+        do_action ==
+            IF slab_free_items[s] # {} THEN
+                pass_to_next
+            ELSE IF free_pages # {} THEN
+                \E p \in Page: on_alloc(p)
+            ELSE IF slab_inuse_items[s] # {} THEN
+                do_evict
+            ELSE
+                skip_put
     IN
     /\ pc[n] = "GetFreePage"
 
-    /\ do_lock_slab(s)
-    /\ goto(n, "SetItem")
-    /\ IF slab_empty
-        THEN on_alloc
-        ELSE do_nothing
+    /\ slab_lock[s] = 0
+    /\ do_action
 
     /\ UNCHANGED slab_inuse_items
     /\ UNCHANGED <<item_map, hash_map>>
@@ -256,8 +276,7 @@ Next ==
         \/ LockSlot(n)
         \/ UnlockSlot(n)
         \/ DeletePrevKey(n)
-    \/ \E n \in Node, p \in Page:
-        \/ GetFreePage(n, p)
+        \/ GetFreePage(n)
     \/ \E n \in Node, it \in Item:
         \/ SetItem(n, it)
     \/ Terminated
@@ -296,6 +315,16 @@ ItemAlwaysExistWhenSetItem ==
             cond == slab_free_items[s] # {}
         IN
         pc[n] = "SetItem" => cond
+
+------------------------
+
+StopCondInv ==
+    LET
+        cond ==
+            /\ \A s \in Slab: slab_lock[s] = 0
+            /\ \A h \in HashSlot: hash_slot_lock[h] = 0
+    IN
+    StopCond => cond
 
 
 \* TODO add avoid race condition for hash slot
