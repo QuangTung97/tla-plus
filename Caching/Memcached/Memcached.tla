@@ -37,10 +37,15 @@ Null(S) == S \union {nil}
 Item == Page \X Offset
 
 ItemData == [
-    key: Key
+    key: Key,
+    slab: Slab
 ]
 
-PC == {"Init", "LockSlot", "GetFreePage", "SetItem", "UnlockSlot"}
+PC == {
+    "Init", "LockSlot",
+    "DeletePrevKey", "GetFreePage", "SetItem",
+    "UnlockSlot"
+}
 
 ------------------------------------------------------------------
 
@@ -103,15 +108,26 @@ do_lock_hash_slot(h) ==
     /\ hash_slot_lock[h] = 0
     /\ hash_slot_lock' = [hash_slot_lock EXCEPT ![h] = @ + 1]
 
+--------------------------------
+
 LockSlot(n) ==
     LET
         k == local_key[n]
         h == key_to_slot[k]
+
+        prev_exist ==
+            hash_map[k] # nil
+
+        go_next ==
+            IF prev_exist THEN
+                goto(n, "DeletePrevKey")
+            ELSE
+                goto(n, "GetFreePage")
     IN
     /\ pc[n] = "LockSlot"
 
     /\ do_lock_hash_slot(h)
-    /\ goto(n, "GetFreePage")
+    /\ go_next
 
     /\ UNCHANGED free_pages
     /\ UNCHANGED slab_vars
@@ -120,17 +136,50 @@ LockSlot(n) ==
 
 ------------------------------------------------------------------
 
+DeletePrevKey(n) ==
+    LET
+        k == local_key[n]
+        it == hash_map[k]
+
+        s == item_map[it].slab
+    IN
+    /\ pc[n] = "DeletePrevKey"
+    /\ goto(n, "GetFreePage")
+
+    /\ item_map' = [item_map EXCEPT ![it] = nil]
+    /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
+    /\ hash_map' = [hash_map EXCEPT ![k] = nil]
+
+    /\ UNCHANGED slab_inuse_items
+    /\ UNCHANGED free_pages
+    /\ UNCHANGED hash_slot_lock
+    /\ node_logic_unchanged
+
+------------------------------------------------------------------
+
 GetFreePage(n, p) ==
     LET
         s == local_slab[n]
         new_items == {p} \X Offset
+
+        slab_empty ==
+            slab_free_items[s] = {}
+
+        on_alloc ==
+            /\ free_pages' = free_pages \ {p}
+            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items]
+
+        do_nothing ==
+            /\ UNCHANGED free_pages
+            /\ UNCHANGED slab_free_items
     IN
     /\ p \in free_pages
     /\ pc[n] = "GetFreePage"
 
     /\ goto(n, "SetItem")
-    /\ free_pages' = free_pages \ {p}
-    /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items]
+    /\ IF slab_empty
+        THEN on_alloc
+        ELSE do_nothing
 
     /\ UNCHANGED slab_inuse_items
     /\ UNCHANGED <<item_map, hash_map>>
@@ -145,7 +194,8 @@ SetItem(n, it) ==
         s == local_slab[n]
 
         new_item == [
-            key |-> k
+            key |-> k,
+            slab |-> s
         ]
     IN
     /\ pc[n] = "SetItem"
@@ -194,6 +244,7 @@ Next ==
     \/ \E n \in Node:
         \/ LockSlot(n)
         \/ UnlockSlot(n)
+        \/ DeletePrevKey(n)
     \/ \E n \in Node, p \in Page:
         \/ GetFreePage(n, p)
     \/ \E n \in Node, it \in Item:
@@ -213,5 +264,8 @@ NoLeakItem ==
                 item_map[it] # nil => exist_key_of(it)
     IN
     StopCond => cond
+
+
+\* TODO add matching between inuse items and item_map
 
 ====
