@@ -218,6 +218,46 @@ GetFreePage(n) ==
 
 ------------------------------------------------------------------
 
+EvictSlab(n, it) ==
+    LET
+        s == local_slab[n]
+        current_hash == key_to_slot[local_key[n]]
+
+        k == item_map[it].key
+        h == key_to_slot[k]
+
+        try_lock_ok ==
+            current_hash # h => hash_slot_lock[h] = 0
+
+        on_normal ==
+            /\ goto(n, "SetItem")
+            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
+            /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
+            /\ item_map' = [item_map EXCEPT ![it] = nil]
+            /\ UNCHANGED hash_map
+            /\ UNCHANGED slab_lock
+
+        on_skip ==
+            /\ goto(n, "UnlockSlot")
+            /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1]
+            /\ UNCHANGED slab_free_items
+            /\ UNCHANGED slab_inuse_items
+            /\ UNCHANGED item_map
+            /\ UNCHANGED hash_map
+    IN
+    /\ pc[n] = "EvictSlab"
+    /\ it \in slab_inuse_items[s]
+
+    /\ IF try_lock_ok
+        THEN on_normal
+        ELSE on_skip
+
+    /\ UNCHANGED free_pages
+    /\ UNCHANGED hash_slot_lock
+    /\ node_logic_unchanged
+
+------------------------------------------------------------------
+
 SetItem(n, it) ==
     LET
         k == local_key[n]
@@ -278,6 +318,7 @@ Next ==
         \/ DeletePrevKey(n)
         \/ GetFreePage(n)
     \/ \E n \in Node, it \in Item:
+        \/ EvictSlab(n, it)
         \/ SetItem(n, it)
     \/ Terminated
 
