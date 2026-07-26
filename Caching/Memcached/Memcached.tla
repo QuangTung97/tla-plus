@@ -5,7 +5,7 @@ CONSTANTS Node, Key, HashSlot, Page, Offset, Slab, nil
 
 VARIABLES
     key_to_slot,
-    pc, local_key, local_slab,
+    pc, local_key, local_slab, local_item,
     free_pages, hash_slot_lock,
     slab_lock, slab_free_items, slab_inuse_items,
     item_map, hash_map,
@@ -16,7 +16,7 @@ const_vars == <<
 >>
 
 local_vars == <<
-    pc, local_key, local_slab
+    pc, local_key, local_slab, local_item
 >>
 
 slab_vars == <<
@@ -40,13 +40,15 @@ Item == Page \X Offset
 
 ItemData == [
     key: Key,
-    slab: Slab
+    slab: Slab,
+    refcount: Nat
 ]
 
 PC == {
     "Init", "LockSlot",
     "DeletePrevKey", "GetFreePage",
     "EvictSlab", "SetItem",
+    "GetDecRef",
     "UnlockSlot"
 }
 
@@ -66,6 +68,7 @@ TypeOK ==
     /\ pc \in [Node -> PC]
     /\ local_key \in [Node -> Null(Key)]
     /\ local_slab \in [Node -> Null(Slab)]
+    /\ local_item \in [Node -> Null(Item)]
 
     /\ stop_cmd \in BOOLEAN
 
@@ -83,6 +86,7 @@ Init ==
     /\ pc = [n \in Node |-> "Init"]
     /\ local_key = [n \in Node |-> nil]
     /\ local_slab = [n \in Node |-> nil]
+    /\ local_item = [n \in Node |-> nil]
 
     /\ stop_cmd = FALSE
 
@@ -96,7 +100,7 @@ goto(n, l) ==
 
 node_logic_unchanged ==
     /\ UNCHANGED const_vars
-    /\ UNCHANGED <<local_key, local_slab>>
+    /\ UNCHANGED <<local_key, local_slab, local_item>>
     /\ UNCHANGED stop_cmd
 
 ------------------------------------------------------------------
@@ -108,6 +112,7 @@ PutKey(n, k, s) ==
     /\ set_local(n, local_key, k)
     /\ set_local(n, local_slab, s)
 
+    /\ UNCHANGED local_item
     /\ UNCHANGED <<free_pages, hash_slot_lock>>
     /\ UNCHANGED slab_vars
     /\ UNCHANGED <<item_map, hash_map>>
@@ -274,7 +279,8 @@ SetItem(n, it) ==
 
         new_item == [
             key |-> k,
-            slab |-> s
+            slab |-> s,
+            refcount |-> 1
         ]
     IN
     /\ pc[n] = "SetItem"
@@ -293,6 +299,11 @@ SetItem(n, it) ==
 
 ------------------------------------------------------------------
 
+clear_local_vars(n) ==
+    /\ set_local(n, local_key, nil)
+    /\ set_local(n, local_slab, nil)
+    /\ set_local(n, local_item, nil)
+
 UnlockSlot(n) ==
     LET
         k == local_key[n]
@@ -301,11 +312,58 @@ UnlockSlot(n) ==
     /\ pc[n] = "UnlockSlot"
     /\ goto(n, "Init")
     /\ hash_slot_lock' = [hash_slot_lock EXCEPT ![h] = @ - 1]
+    /\ clear_local_vars(n)
 
     /\ UNCHANGED <<item_map, hash_map>>
     /\ UNCHANGED slab_vars
     /\ UNCHANGED free_pages
-    /\ node_logic_unchanged
+    /\ UNCHANGED const_vars
+    /\ UNCHANGED stop_cmd
+
+------------------------------------------------------------------
+
+GetKey(n, k) ==
+    LET
+        h == key_to_slot[k]
+        it == hash_map[k]
+    IN
+    /\ pc[n] = "Init"
+    /\ hash_slot_lock[h] = 0 \* do lock
+    /\ it # nil
+
+    /\ goto(n, "GetDecRef")
+    /\ set_local(n, local_item, it)
+    /\ item_map' = [item_map EXCEPT ![it].refcount = @ + 1]
+
+    /\ UNCHANGED <<local_key, local_slab>>
+    /\ UNCHANGED hash_slot_lock
+    /\ UNCHANGED hash_map
+    /\ UNCHANGED free_pages
+    /\ UNCHANGED slab_vars
+    /\ UNCHANGED const_vars
+    /\ UNCHANGED stop_cmd
+
+------------------------------------------------------------------
+
+GetDecRef(n) ==
+    LET
+        it == local_item[n]
+        k == item_map[it].key
+        h == key_to_slot[k]
+    IN
+    /\ pc[n] = "GetDecRef"
+    /\ hash_slot_lock[h] = 0 \* do lock
+
+    /\ goto(n, "Init")
+    /\ item_map' = [item_map EXCEPT ![it].refcount = @ - 1]
+    /\ clear_local_vars(n)
+
+    /\ UNCHANGED hash_map
+    /\ UNCHANGED hash_slot_lock
+    /\ UNCHANGED free_pages
+    /\ UNCHANGED slab_vars
+    /\ UNCHANGED const_vars
+    /\ UNCHANGED stop_cmd
 
 ------------------------------------------------------------------
 
@@ -342,9 +400,12 @@ Next ==
         \/ UnlockSlot(n)
         \/ DeletePrevKey(n)
         \/ GetFreePage(n)
+        \/ GetDecRef(n)
     \/ \E n \in Node, it \in Item:
         \/ EvictSlab(n, it)
         \/ SetItem(n, it)
+    \/ \E n \in Node, k \in Key:
+        \/ GetKey(n, k)
     \/ EnableStopCmd
     \/ Terminated
 
@@ -397,6 +458,24 @@ ItemAlwaysExistWhenSetItem ==
             cond == slab_free_items[s] # {}
         IN
         pc[n] = "SetItem" => cond
+
+------------------------
+
+InitStateInv ==
+    \A n \in Node:
+        pc[n] = "Init" =>
+            /\ local_key[n] = nil
+            /\ local_slab[n] = nil
+            /\ local_item[n] = nil
+
+------------------------
+
+GetDecRefItemAlwaysExist ==
+    \A n \in Node:
+        LET
+            it == local_item[n]
+        IN
+        pc[n] = "GetDecRef" => item_map[it] # nil
 
 ------------------------
 
