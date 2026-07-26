@@ -49,8 +49,7 @@ PC == {
     "Init", "LockSlot",
     "DeletePrevKey", "GetFreePage",
     "EvictSlab", "SetItem",
-    "GetDecRef",
-    "UnlockSlot"
+    "GetDecRef"
 }
 
 ------------------------------------------------------------------
@@ -206,24 +205,46 @@ DeletePrevKey(n) ==
 inc_lock_slab(s) ==
     /\ slab_lock' = [slab_lock EXCEPT ![s] = @ + 1]
 
+clear_local_vars(n) ==
+    /\ set_local(n, local_key, nil)
+    /\ set_local(n, local_slab, nil)
+    /\ set_local(n, local_item, nil)
+
+do_unlock_hash_slot(n, h) ==
+    /\ hash_slot_lock' = [hash_slot_lock EXCEPT ![h] = @ - 1]
+    /\ goto(n, "Init")
+    /\ clear_local_vars(n)
+    /\ UNCHANGED const_vars
+    /\ UNCHANGED stop_cmd
+
+keep_locking_hash_slot ==
+    /\ UNCHANGED hash_slot_lock
+    /\ node_logic_unchanged
+
+------------------------
+
 GetFreePage(n) ==
     LET
         s == local_slab[n]
+        k == local_key[n]
+        h == key_to_slot[k]
 
-        pass_to_next ==
+        goto_set_item ==
             /\ goto(n, "SetItem")
             /\ inc_lock_slab(s)
             /\ UNCHANGED free_pages
             /\ UNCHANGED slab_free_items
+            /\ keep_locking_hash_slot
 
         do_evict ==
             /\ goto(n, "EvictSlab")
             /\ inc_lock_slab(s)
             /\ UNCHANGED free_pages
             /\ UNCHANGED slab_free_items
+            /\ keep_locking_hash_slot
 
         skip_put ==
-            /\ goto(n, "UnlockSlot")
+            /\ do_unlock_hash_slot(n, h)
             /\ UNCHANGED slab_free_items
             /\ UNCHANGED free_pages
             /\ UNCHANGED slab_lock
@@ -236,10 +257,11 @@ GetFreePage(n) ==
             /\ inc_lock_slab(s)
             /\ free_pages' = free_pages \ {p}
             /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items(p)]
+            /\ keep_locking_hash_slot
 
         do_action ==
             IF slab_free_items[s] # {} THEN
-                pass_to_next
+                goto_set_item
             ELSE IF free_pages # {} THEN
                 \E p \in Page: on_alloc(p)
             ELSE IF slab_inuse_items[s] # {} THEN
@@ -254,8 +276,6 @@ GetFreePage(n) ==
 
     /\ UNCHANGED slab_inuse_items
     /\ UNCHANGED <<item_map, hash_map>>
-    /\ UNCHANGED hash_slot_lock
-    /\ node_logic_unchanged
 
 ------------------------------------------------------------------
 
@@ -277,10 +297,11 @@ EvictSlab(n, it) ==
             /\ hash_map' = [hash_map EXCEPT ![k] = nil]
             /\ do_delete_item(it)
             /\ UNCHANGED slab_lock
+            /\ keep_locking_hash_slot
 
         on_skip ==
-            /\ goto(n, "UnlockSlot")
             /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1] \* unlock
+            /\ do_unlock_hash_slot(n, current_hash)
             /\ UNCHANGED slab_free_items
             /\ UNCHANGED slab_inuse_items
             /\ UNCHANGED item_map
@@ -294,14 +315,13 @@ EvictSlab(n, it) ==
         ELSE on_skip
 
     /\ UNCHANGED free_pages
-    /\ UNCHANGED hash_slot_lock
-    /\ node_logic_unchanged
 
 ------------------------------------------------------------------
 
 SetItem(n, it) ==
     LET
         k == local_key[n]
+        h == key_to_slot[k]
         s == local_slab[n]
 
         new_item == [
@@ -314,39 +334,15 @@ SetItem(n, it) ==
     /\ pc[n] = "SetItem"
     /\ it \in slab_free_items[s]
 
-    /\ goto(n, "UnlockSlot")
     /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \ {it}]
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \union {it}]
     /\ item_map' = [item_map EXCEPT ![it] = new_item]
     /\ hash_map' = [hash_map EXCEPT ![k] = it]
     /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1]
 
-    /\ UNCHANGED hash_slot_lock
+    /\ do_unlock_hash_slot(n, h)
+
     /\ UNCHANGED free_pages
-    /\ node_logic_unchanged
-
-------------------------------------------------------------------
-
-clear_local_vars(n) ==
-    /\ set_local(n, local_key, nil)
-    /\ set_local(n, local_slab, nil)
-    /\ set_local(n, local_item, nil)
-
-UnlockSlot(n) ==
-    LET
-        k == local_key[n]
-        h == key_to_slot[k]
-    IN
-    /\ pc[n] = "UnlockSlot"
-    /\ goto(n, "Init")
-    /\ hash_slot_lock' = [hash_slot_lock EXCEPT ![h] = @ - 1]
-    /\ clear_local_vars(n)
-
-    /\ UNCHANGED <<item_map, hash_map>>
-    /\ UNCHANGED slab_vars
-    /\ UNCHANGED free_pages
-    /\ UNCHANGED const_vars
-    /\ UNCHANGED stop_cmd
 
 ------------------------------------------------------------------
 
@@ -425,7 +421,6 @@ Next ==
         \/ PutKey(n, k, s)
     \/ \E n \in Node:
         \/ LockSlot(n)
-        \/ UnlockSlot(n)
         \/ DeletePrevKey(n)
         \/ GetFreePage(n)
         \/ GetDecRef(n)
@@ -533,6 +528,11 @@ StopCondInv ==
     IN
     StopCond => cond
 
+------------------------
+
+MutexLockCond ==
+    /\ \A h \in HashSlot: hash_slot_lock[h] \in 0..1
+    /\ \A s \in Slab: slab_lock[s] \in 0..1
 
 \* TODO add avoid race condition for hash slot
 
