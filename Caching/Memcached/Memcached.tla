@@ -391,6 +391,27 @@ GetDecRef(n) ==
 
 ------------------------------------------------------------------
 
+DeleteKey(n, k) ==
+    LET
+        it == hash_map[k]
+        h == key_to_slot[k]
+    IN
+    /\ ~stop_cmd
+    /\ pc[n] = "Init"
+    /\ hash_slot_lock[h] = 0 \* not locked
+    /\ it # nil
+
+    /\ hash_map' = [hash_map EXCEPT ![k] = nil]
+    /\ dec_refcount_or_delete(it, TRUE)
+
+    /\ UNCHANGED pc
+    /\ UNCHANGED free_pages
+    /\ UNCHANGED hash_slot_lock
+    /\ node_logic_unchanged
+
+
+------------------------------------------------------------------
+
 EnableStopCmd ==
     /\ ~stop_cmd
     /\ stop_cmd' = TRUE
@@ -429,6 +450,7 @@ Next ==
         \/ SetItem(n, it)
     \/ \E n \in Node, k \in Key:
         \/ GetKey(n, k)
+        \/ DeleteKey(n, k)
     \/ EnableStopCmd
     \/ Terminated
 
