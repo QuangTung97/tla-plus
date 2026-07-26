@@ -153,6 +153,30 @@ LockSlot(n) ==
 
 ------------------------------------------------------------------
 
+dec_refcount_or_delete(it) ==
+    LET
+        k == item_map[it].key
+        s == item_map[it].slab
+
+        can_delete ==
+            item_map[it].refcount = 1
+
+        on_normal ==
+            /\ item_map' = [item_map EXCEPT ![it] = nil]
+            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
+            /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
+
+        on_dec_only ==
+            /\ item_map' = [item_map EXCEPT ![it].refcount = @ - 1]
+            /\ UNCHANGED slab_free_items
+            /\ UNCHANGED slab_inuse_items
+    IN
+    /\ slab_lock[s] = 0 \* slab is not locked
+    /\ IF can_delete
+        THEN on_normal
+        ELSE on_dec_only
+    /\ UNCHANGED slab_lock
+
 DeletePrevKey(n) ==
     LET
         k == local_key[n]
@@ -163,13 +187,9 @@ DeletePrevKey(n) ==
     /\ pc[n] = "DeletePrevKey"
     /\ goto(n, "GetFreePage")
 
-    /\ slab_lock[s] = 0 \* slab is not locked
-    /\ item_map' = [item_map EXCEPT ![it] = nil]
-    /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
-    /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
+    /\ dec_refcount_or_delete(it)
 
-    /\ UNCHANGED slab_lock
     /\ UNCHANGED free_pages
     /\ UNCHANGED hash_slot_lock
     /\ node_logic_unchanged
@@ -327,6 +347,7 @@ GetKey(n, k) ==
         h == key_to_slot[k]
         it == hash_map[k]
     IN
+    /\ ~stop_cmd
     /\ pc[n] = "Init"
     /\ hash_slot_lock[h] = 0 \* do lock
     /\ it # nil
@@ -355,13 +376,12 @@ GetDecRef(n) ==
     /\ hash_slot_lock[h] = 0 \* do lock
 
     /\ goto(n, "Init")
-    /\ item_map' = [item_map EXCEPT ![it].refcount = @ - 1]
+    /\ dec_refcount_or_delete(it)
     /\ clear_local_vars(n)
 
     /\ UNCHANGED hash_map
     /\ UNCHANGED hash_slot_lock
     /\ UNCHANGED free_pages
-    /\ UNCHANGED slab_vars
     /\ UNCHANGED const_vars
     /\ UNCHANGED stop_cmd
 
