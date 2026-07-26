@@ -41,7 +41,8 @@ Item == Page \X Offset
 ItemData == [
     key: Key,
     slab: Slab,
-    refcount: Nat
+    refcount: Nat,
+    deleted: BOOLEAN
 ]
 
 PC == {
@@ -161,7 +162,7 @@ do_delete_item(it) ==
     /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
 
-dec_refcount_or_delete(it) ==
+dec_refcount_or_delete(it, with_delete) ==
     LET
         k == item_map[it].key
         s == item_map[it].slab
@@ -170,7 +171,10 @@ dec_refcount_or_delete(it) ==
             item_map[it].refcount = 1
 
         on_dec_only ==
-            /\ item_map' = [item_map EXCEPT ![it].refcount = @ - 1]
+            /\ item_map' = [item_map EXCEPT
+                    ![it].refcount = @ - 1,
+                    ![it].deleted = @ \/ with_delete
+                ]
             /\ UNCHANGED slab_free_items
             /\ UNCHANGED slab_inuse_items
     IN
@@ -191,7 +195,7 @@ DeletePrevKey(n) ==
     /\ goto(n, "GetFreePage")
 
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-    /\ dec_refcount_or_delete(it)
+    /\ dec_refcount_or_delete(it, TRUE)
 
     /\ UNCHANGED free_pages
     /\ UNCHANGED hash_slot_lock
@@ -266,6 +270,7 @@ EvictSlab(n, it) ==
         try_lock_ok ==
             /\ current_hash # h => hash_slot_lock[h] = 0
             /\ item_map[it].refcount = 1
+            /\ ~item_map[it].deleted
 
         on_normal ==
             /\ goto(n, "SetItem")
@@ -302,7 +307,8 @@ SetItem(n, it) ==
         new_item == [
             key |-> k,
             slab |-> s,
-            refcount |-> 1
+            refcount |-> 1,
+            deleted |-> FALSE
         ]
     IN
     /\ pc[n] = "SetItem"
@@ -378,7 +384,7 @@ GetDecRef(n) ==
     /\ hash_slot_lock[h] = 0 \* do lock
 
     /\ goto(n, "Init")
-    /\ dec_refcount_or_delete(it)
+    /\ dec_refcount_or_delete(it, FALSE)
     /\ clear_local_vars(n)
 
     /\ UNCHANGED hash_map
@@ -447,9 +453,26 @@ NoLeakItem ==
 
         cond ==
             \A it \in Item:
-                item_map[it] # nil => exist_key_of(it)
+                item_map[it] # nil =>
+                    /\ ~item_map[it].deleted
+                    /\ exist_key_of(it)
     IN
     StopCond => cond
+
+------------------------
+
+HashMapNoDuplicate ==
+    \A k1, k2 \in Key:
+        LET
+            pre_cond ==
+                /\ k1 # k2
+                /\ hash_map[k1] # nil
+                /\ hash_map[k2] # nil
+
+            cond ==
+                /\ hash_map[k1] # hash_map[k2]
+        IN
+            pre_cond => cond
 
 ------------------------
 
