@@ -153,6 +153,14 @@ LockSlot(n) ==
 
 ------------------------------------------------------------------
 
+do_delete_item(it) ==
+    LET
+        s == item_map[it].slab
+    IN
+    /\ item_map' = [item_map EXCEPT ![it] = nil]
+    /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
+    /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
+
 dec_refcount_or_delete(it) ==
     LET
         k == item_map[it].key
@@ -161,11 +169,6 @@ dec_refcount_or_delete(it) ==
         can_delete ==
             item_map[it].refcount = 1
 
-        on_normal ==
-            /\ item_map' = [item_map EXCEPT ![it] = nil]
-            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
-            /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
-
         on_dec_only ==
             /\ item_map' = [item_map EXCEPT ![it].refcount = @ - 1]
             /\ UNCHANGED slab_free_items
@@ -173,7 +176,7 @@ dec_refcount_or_delete(it) ==
     IN
     /\ slab_lock[s] = 0 \* slab is not locked
     /\ IF can_delete
-        THEN on_normal
+        THEN do_delete_item(it)
         ELSE on_dec_only
     /\ UNCHANGED slab_lock
 
@@ -261,19 +264,18 @@ EvictSlab(n, it) ==
         h == key_to_slot[k]
 
         try_lock_ok ==
-            current_hash # h => hash_slot_lock[h] = 0
+            /\ current_hash # h => hash_slot_lock[h] = 0
+            /\ item_map[it].refcount = 1
 
         on_normal ==
             /\ goto(n, "SetItem")
-            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
-            /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
-            /\ item_map' = [item_map EXCEPT ![it] = nil]
             /\ hash_map' = [hash_map EXCEPT ![k] = nil]
+            /\ do_delete_item(it)
             /\ UNCHANGED slab_lock
 
         on_skip ==
             /\ goto(n, "UnlockSlot")
-            /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1]
+            /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1] \* unlock
             /\ UNCHANGED slab_free_items
             /\ UNCHANGED slab_inuse_items
             /\ UNCHANGED item_map
