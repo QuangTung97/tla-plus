@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals
 CONSTANTS Node, Key, HashSlot, Page, Offset, Slab, nil
 
 VARIABLES
-    key_to_slot,
+    key_to_hash_slot,
     pc, local_key, local_slab, local_item,
     free_pages, hash_slot_lock,
     slab_lock, slab_free_items, slab_inuse_items,
@@ -12,7 +12,7 @@ VARIABLES
     stop_cmd
 
 const_vars == <<
-    key_to_slot
+    key_to_hash_slot
 >>
 
 local_vars == <<
@@ -55,7 +55,7 @@ PC == {
 ------------------------------------------------------------------
 
 TypeOK ==
-    /\ key_to_slot \in [Key -> HashSlot]
+    /\ key_to_hash_slot \in [Key -> HashSlot]
     /\ free_pages \subseteq Page
     /\ hash_slot_lock \in [HashSlot -> Nat]
 
@@ -73,7 +73,7 @@ TypeOK ==
     /\ stop_cmd \in BOOLEAN
 
 Init ==
-    /\ key_to_slot \in [Key -> HashSlot]
+    /\ key_to_hash_slot \in [Key -> HashSlot]
     /\ free_pages = Page
     /\ hash_slot_lock = [h \in HashSlot |-> 0]
 
@@ -130,7 +130,7 @@ do_lock_hash_slot(h) ==
 LockSlot(n) ==
     LET
         k == local_key[n]
-        h == key_to_slot[k]
+        h == key_to_hash_slot[k]
 
         prev_exist ==
             hash_map[k] # nil
@@ -227,7 +227,7 @@ GetFreePage(n) ==
     LET
         s == local_slab[n]
         k == local_key[n]
-        h == key_to_slot[k]
+        h == key_to_hash_slot[k]
 
         goto_set_item ==
             /\ goto(n, "SetItem")
@@ -282,10 +282,10 @@ GetFreePage(n) ==
 EvictSlab(n, it) ==
     LET
         s == local_slab[n]
-        current_hash == key_to_slot[local_key[n]]
+        current_hash == key_to_hash_slot[local_key[n]]
 
         k == item_map[it].key
-        h == key_to_slot[k]
+        h == key_to_hash_slot[k]
 
         try_lock_ok ==
             /\ current_hash # h => hash_slot_lock[h] = 0
@@ -321,7 +321,7 @@ EvictSlab(n, it) ==
 SetItem(n, it) ==
     LET
         k == local_key[n]
-        h == key_to_slot[k]
+        h == key_to_hash_slot[k]
         s == local_slab[n]
 
         new_item == [
@@ -348,7 +348,7 @@ SetItem(n, it) ==
 
 GetKey(n, k) ==
     LET
-        h == key_to_slot[k]
+        h == key_to_hash_slot[k]
         it == hash_map[k]
     IN
     /\ ~stop_cmd
@@ -374,7 +374,7 @@ GetDecRef(n) ==
     LET
         it == local_item[n]
         k == item_map[it].key
-        h == key_to_slot[k]
+        h == key_to_hash_slot[k]
     IN
     /\ pc[n] = "GetDecRef"
     /\ hash_slot_lock[h] = 0 \* do lock
@@ -394,7 +394,7 @@ GetDecRef(n) ==
 DeleteKey(n, k) ==
     LET
         it == hash_map[k]
-        h == key_to_slot[k]
+        h == key_to_hash_slot[k]
     IN
     /\ ~stop_cmd
     /\ pc[n] = "Init"
