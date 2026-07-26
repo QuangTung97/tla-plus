@@ -204,8 +204,11 @@ DeletePrevKey(n) ==
 
 ------------------------------------------------------------------
 
-inc_lock_slab(s) ==
+inc_slab_lock(s) ==
     /\ slab_lock' = [slab_lock EXCEPT ![s] = @ + 1]
+
+dec_slab_lock(s) ==
+    /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1]
 
 clear_local_vars(n) ==
     /\ set_local(n, local_key, nil)
@@ -236,14 +239,14 @@ GetFreePage(n) ==
 
         goto_set_item ==
             /\ goto(n, "SetItem")
-            /\ inc_lock_slab(s)
+            /\ inc_slab_lock(s)
             /\ UNCHANGED free_pages
             /\ UNCHANGED slab_free_items
             /\ keep_locking_hash_slot
 
         do_evict ==
             /\ goto(n, "EvictSlab")
-            /\ inc_lock_slab(s)
+            /\ inc_slab_lock(s)
             /\ UNCHANGED free_pages
             /\ UNCHANGED slab_free_items
             /\ keep_locking_hash_slot
@@ -259,7 +262,7 @@ GetFreePage(n) ==
         on_alloc(p) ==
             /\ p \in free_pages
             /\ goto(n, "SetItem")
-            /\ inc_lock_slab(s)
+            /\ inc_slab_lock(s)
             /\ free_pages' = free_pages \ {p}
             /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items(p)]
             /\ keep_locking_hash_slot
@@ -305,7 +308,7 @@ EvictSlab(n, it) ==
             /\ keep_locking_hash_slot
 
         on_skip ==
-            /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1] \* unlock
+            /\ dec_slab_lock(s)
             /\ do_unlock_hash_slot(n, current_hash)
             /\ UNCHANGED slab_free_items
             /\ UNCHANGED slab_inuse_items
@@ -362,7 +365,7 @@ SetItem(n, it) ==
     /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \ {it}]
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \union {it}]
     /\ hash_map' = [hash_map EXCEPT ![k] = it]
-    /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1]
+    /\ dec_slab_lock(s)
     /\ \/ fully_set
        \/ partial_set
 
