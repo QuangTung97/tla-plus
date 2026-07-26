@@ -403,6 +403,7 @@ GetKey(n, k) ==
     /\ pc[n] = "Init"
     /\ it # nil
     /\ with_single_atomic_step(h)
+    /\ ~item_map[it].partial_set
 
     /\ goto(n, "GetDecRef")
     /\ set_local(n, local_item, it)
@@ -585,6 +586,19 @@ GetDecRefItemAlwaysExist ==
         pc[n] = "GetDecRef" =>
             /\ item_map[it] # nil
             /\ item_map[it].partial_set = FALSE
+
+------------------------
+
+FinishSetItemPartialAlwaysTrue ==
+    \A n \in Node:
+        LET
+            it == local_item[n]
+
+            cond ==
+                /\ item_map[it] # nil
+                /\ item_map[it].partial_set
+        IN
+        pc[n] = "FinishSetItem" => cond
 
 ------------------------
 
