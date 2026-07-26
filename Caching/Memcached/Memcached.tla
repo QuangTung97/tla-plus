@@ -455,9 +455,10 @@ NoLeakItem ==
             \A it \in Item:
                 item_map[it] # nil =>
                     /\ ~item_map[it].deleted
+                    /\ item_map[it].refcount = 1
                     /\ exist_key_of(it)
     IN
-    StopCond => cond
+        StopCond => cond
 
 ------------------------
 
