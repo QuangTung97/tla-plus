@@ -42,13 +42,14 @@ ItemData == [
     key: Key,
     slab: Slab,
     refcount: Nat,
+    partial_set: BOOLEAN,
     deleted: BOOLEAN
 ]
 
 PC == {
     "Init", "LockSlot",
     "DeletePrevKey", "GetFreePage",
-    "EvictSlab", "SetItem",
+    "EvictSlab", "SetItem", "FinishSetItem",
     "GetDecRef"
 }
 
@@ -161,7 +162,7 @@ do_delete_item(it) ==
     /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
 
-dec_refcount_or_delete(it, with_delete) ==
+dec_refcount_or_delete(it, with_delete, clear_partial) ==
     LET
         k == item_map[it].key
         s == item_map[it].slab
@@ -172,7 +173,8 @@ dec_refcount_or_delete(it, with_delete) ==
         on_dec_only ==
             /\ item_map' = [item_map EXCEPT
                     ![it].refcount = @ - 1,
-                    ![it].deleted = @ \/ with_delete
+                    ![it].deleted = @ \/ with_delete,
+                    ![it].partial_set = @ /\ ~clear_partial
                 ]
             /\ UNCHANGED slab_free_items
             /\ UNCHANGED slab_inuse_items
@@ -194,7 +196,7 @@ DeletePrevKey(n) ==
     /\ goto(n, "GetFreePage")
 
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-    /\ dec_refcount_or_delete(it, TRUE)
+    /\ dec_refcount_or_delete(it, TRUE, FALSE)
 
     /\ UNCHANGED free_pages
     /\ UNCHANGED hash_slot_lock
@@ -210,8 +212,11 @@ clear_local_vars(n) ==
     /\ set_local(n, local_slab, nil)
     /\ set_local(n, local_item, nil)
 
-do_unlock_hash_slot(n, h) ==
+dec_hash_slot_lock(h) ==
     /\ hash_slot_lock' = [hash_slot_lock EXCEPT ![h] = @ - 1]
+
+do_unlock_hash_slot(n, h) ==
+    /\ dec_hash_slot_lock(h)
     /\ goto(n, "Init")
     /\ clear_local_vars(n)
     /\ UNCHANGED const_vars
@@ -328,21 +333,64 @@ SetItem(n, it) ==
             key |-> k,
             slab |-> s,
             refcount |-> 1,
+            partial_set |-> FALSE,
             deleted |-> FALSE
         ]
+
+        fully_set ==
+            /\ item_map' = [item_map EXCEPT ![it] = new_item]
+            /\ do_unlock_hash_slot(n, h)
+
+        partial_item == [new_item EXCEPT
+            !.partial_set = TRUE,
+            !.refcount = @ + 1
+        ]
+
+        partial_set ==
+            /\ goto(n, "FinishSetItem")
+            /\ item_map' = [item_map EXCEPT ![it] = partial_item]
+            /\ dec_hash_slot_lock(h)
+            /\ set_local(n, local_item, it)
+
+            /\ UNCHANGED <<local_key, local_slab>>
+            /\ UNCHANGED const_vars
+            /\ UNCHANGED stop_cmd
     IN
     /\ pc[n] = "SetItem"
     /\ it \in slab_free_items[s]
 
     /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \ {it}]
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \union {it}]
-    /\ item_map' = [item_map EXCEPT ![it] = new_item]
     /\ hash_map' = [hash_map EXCEPT ![k] = it]
     /\ slab_lock' = [slab_lock EXCEPT ![s] = @ - 1]
-
-    /\ do_unlock_hash_slot(n, h)
+    /\ \/ fully_set
+       \/ partial_set
 
     /\ UNCHANGED free_pages
+
+------------------------------------------------------------------
+
+with_single_atomic_step(h) ==
+    /\ hash_slot_lock[h] = 0 \* do lock
+    /\ UNCHANGED hash_slot_lock
+    /\ UNCHANGED free_pages
+    /\ UNCHANGED const_vars
+    /\ UNCHANGED stop_cmd
+
+FinishSetItem(n) ==
+    LET
+        k == local_key[n]
+        h == key_to_hash_slot[k]
+        it == local_item[n]
+    IN
+    /\ pc[n] = "FinishSetItem"
+    /\ with_single_atomic_step(h)
+
+    /\ goto(n, "Init")
+    /\ dec_refcount_or_delete(it, FALSE, TRUE)
+    /\ clear_local_vars(n)
+
+    /\ UNCHANGED hash_map
 
 ------------------------------------------------------------------
 
@@ -353,20 +401,16 @@ GetKey(n, k) ==
     IN
     /\ ~stop_cmd
     /\ pc[n] = "Init"
-    /\ hash_slot_lock[h] = 0 \* do lock
     /\ it # nil
+    /\ with_single_atomic_step(h)
 
     /\ goto(n, "GetDecRef")
     /\ set_local(n, local_item, it)
     /\ item_map' = [item_map EXCEPT ![it].refcount = @ + 1]
 
     /\ UNCHANGED <<local_key, local_slab>>
-    /\ UNCHANGED hash_slot_lock
     /\ UNCHANGED hash_map
-    /\ UNCHANGED free_pages
     /\ UNCHANGED slab_vars
-    /\ UNCHANGED const_vars
-    /\ UNCHANGED stop_cmd
 
 ------------------------------------------------------------------
 
@@ -377,17 +421,13 @@ GetDecRef(n) ==
         h == key_to_hash_slot[k]
     IN
     /\ pc[n] = "GetDecRef"
-    /\ hash_slot_lock[h] = 0 \* do lock
+    /\ with_single_atomic_step(h)
 
     /\ goto(n, "Init")
-    /\ dec_refcount_or_delete(it, FALSE)
+    /\ dec_refcount_or_delete(it, FALSE, FALSE)
     /\ clear_local_vars(n)
 
     /\ UNCHANGED hash_map
-    /\ UNCHANGED hash_slot_lock
-    /\ UNCHANGED free_pages
-    /\ UNCHANGED const_vars
-    /\ UNCHANGED stop_cmd
 
 ------------------------------------------------------------------
 
@@ -402,7 +442,7 @@ DeleteKey(n, k) ==
     /\ it # nil
 
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-    /\ dec_refcount_or_delete(it, TRUE)
+    /\ dec_refcount_or_delete(it, TRUE, FALSE)
 
     /\ UNCHANGED pc
     /\ UNCHANGED free_pages
@@ -443,6 +483,7 @@ Next ==
     \/ \E n \in Node:
         \/ LockSlot(n)
         \/ DeletePrevKey(n)
+        \/ FinishSetItem(n)
         \/ GetFreePage(n)
         \/ GetDecRef(n)
     \/ \E n \in Node, it \in Item:
@@ -468,12 +509,15 @@ NoLeakItem ==
     LET
         exist_key_of(it) == \E k \in Key: hash_map[k] = it
 
+        item_cond(it) ==
+            /\ ~item_map[it].partial_set
+            /\ ~item_map[it].deleted
+            /\ item_map[it].refcount = 1
+            /\ exist_key_of(it)
+
         cond ==
             \A it \in Item:
-                item_map[it] # nil =>
-                    /\ ~item_map[it].deleted
-                    /\ item_map[it].refcount = 1
-                    /\ exist_key_of(it)
+                item_map[it] # nil => item_cond(it)
     IN
         StopCond => cond
 
@@ -538,7 +582,9 @@ GetDecRefItemAlwaysExist ==
         LET
             it == local_item[n]
         IN
-        pc[n] = "GetDecRef" => item_map[it] # nil
+        pc[n] = "GetDecRef" =>
+            /\ item_map[it] # nil
+            /\ item_map[it].partial_set = FALSE
 
 ------------------------
 
