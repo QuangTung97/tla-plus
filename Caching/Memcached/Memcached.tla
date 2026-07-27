@@ -760,6 +760,15 @@ NoLeakItem ==
 
 ------------------------
 
+HashMapAlwaysPointToNonDeleted ==
+    \A k \in Key:
+        LET it == hash_map[k] IN
+        it # nil =>
+            /\ ~item_map[it].deleted
+            /\ item_map[it].refcount > 0
+
+------------------------
+
 HashMapNoDuplicate ==
     \A k1, k2 \in Key:
         LET
