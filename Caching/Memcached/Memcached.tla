@@ -221,6 +221,13 @@ do_delete_item(it) ==
         ELSE when_normal
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
 
+do_delete_item_unchanged ==
+    /\ UNCHANGED item_map
+    /\ UNCHANGED mover_need_delete
+    /\ UNCHANGED <<slab_free_items, slab_inuse_items>>
+
+------------------------
+
 dec_refcount_or_delete(it, with_delete, clear_partial, add_to_free) ==
     LET
         k == item_map[it].key
@@ -246,10 +253,8 @@ dec_refcount_or_delete(it, with_delete, clear_partial, add_to_free) ==
     /\ UNCHANGED slab_lock
     /\ UNCHANGED slab_pages
 
-do_delete_unchanged ==
-    /\ UNCHANGED mover_need_delete
-    /\ UNCHANGED item_map
-    /\ UNCHANGED <<slab_inuse_items, slab_free_items>>
+dec_refcount_unchanged ==
+    /\ do_delete_item_unchanged
     /\ UNCHANGED slab_lock
     /\ UNCHANGED slab_pages
 
@@ -375,6 +380,7 @@ EvictSlab(n, it) ==
             /\ current_hash # h => hash_slot_lock[h] = 0
             /\ item_map[it].refcount = 1
             /\ ~item_map[it].deleted
+            /\ slab_move_page[s] # it[1] \* page is not moving
 
         on_normal ==
             /\ goto(n, "SetItem")
@@ -387,10 +393,8 @@ EvictSlab(n, it) ==
         on_skip ==
             /\ dec_slab_lock(s)
             /\ do_unlock_hash_slot(n, current_hash)
-            /\ UNCHANGED slab_free_items
-            /\ UNCHANGED slab_inuse_items
+            /\ do_delete_item_unchanged
             /\ UNCHANGED slab_pages
-            /\ UNCHANGED item_map
             /\ UNCHANGED hash_map
     IN
     /\ pc[n] = "EvictSlab"
@@ -586,7 +590,7 @@ mover_on_delete(it_hash) ==
             /\ hash_map[k] # nil
 
         on_delete_nop ==
-            /\ do_delete_unchanged
+            /\ dec_refcount_unchanged
             /\ UNCHANGED hash_map
 
         on_delete_normal ==
