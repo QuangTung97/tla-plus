@@ -639,6 +639,7 @@ MoverRemovePage ==
     IN
     /\ move_pc = "MoverRemovePage"
     /\ slab_lock[s] = 0 \* lock slab
+    /\ mover_need_delete = 0 \* wait until delete count = 0
 
     /\ move_pc' = "MoverFinish"
     /\ mover_need_delete' = nil
@@ -654,17 +655,17 @@ MoverRemovePage ==
 
 ------------------------------------------------------------------
 
-MoverFinish(new_slab) ==
+MoverFinish(s) ==
     LET
-        s == move_from_slab
         p == move_local_page
+        new_items == {p} \X Offset
     IN
     /\ move_pc = "MoverFinish"
-    /\ new_slab # s
-    /\ slab_lock[new_slab] = 0 \* lock new slab
+    /\ s # move_from_slab
+    /\ slab_lock[s] = 0 \* lock slab
 
-    /\ slab_pages' = [slab_pages EXCEPT ![new_slab] = @ \union {p}]
-    /\ UNCHANGED slab_free_items
+    /\ slab_pages' = [slab_pages EXCEPT ![s] = @ \union {p}]
+    /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items]
 
     /\ mover_need_delete' = nil
     /\ move_pc' = "Init"
