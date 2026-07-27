@@ -587,7 +587,7 @@ mover_on_delete(it_hash) ==
 
         can_delete ==
             /\ item_map[it] # nil
-            /\ hash_map[k] # nil
+            /\ ~item_map[it].deleted \* not deleting
 
         on_delete_nop ==
             /\ dec_refcount_unchanged
