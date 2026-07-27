@@ -9,6 +9,7 @@ VARIABLES
     free_pages, hash_slot_lock,
     slab_lock, slab_free_items, slab_inuse_items,
     item_map, hash_map,
+    move_pc, move_page, move_items,
     stop_cmd
 
 const_vars == <<
@@ -23,12 +24,17 @@ slab_vars == <<
     slab_lock, slab_free_items, slab_inuse_items
 >>
 
+move_vars == <<
+    move_pc, move_page, move_items
+>>
+
 vars == <<
     const_vars,
     local_vars,
     free_pages, hash_slot_lock,
     slab_vars,
     item_map, hash_map,
+    move_vars,
     stop_cmd
 >>
 
@@ -53,6 +59,8 @@ PC == {
     "GetDecRef"
 }
 
+MovePC == {"Init"}
+
 ------------------------------------------------------------------
 
 TypeOK ==
@@ -70,6 +78,10 @@ TypeOK ==
     /\ local_key \in [Node -> Null(Key)]
     /\ local_slab \in [Node -> Null(Slab)]
     /\ local_item \in [Node -> Null(Item)]
+
+    /\ move_pc \in MovePC
+    /\ move_page \in Null(Page)
+    /\ move_items \subseteq Item
 
     /\ stop_cmd \in BOOLEAN
 
@@ -89,6 +101,10 @@ Init ==
     /\ local_slab = [n \in Node |-> nil]
     /\ local_item = [n \in Node |-> nil]
 
+    /\ move_pc = "Init"
+    /\ move_page = nil
+    /\ move_items = {}
+
     /\ stop_cmd = FALSE
 
 ------------------------------------------------------------------
@@ -99,10 +115,14 @@ set_local(n, var, x) ==
 goto(n, l) ==
     pc' = [pc EXCEPT ![n] = l]
 
-node_logic_unchanged ==
+node_base_unchanged ==
     /\ UNCHANGED const_vars
-    /\ UNCHANGED <<local_key, local_slab, local_item>>
+    /\ UNCHANGED move_vars
     /\ UNCHANGED stop_cmd
+
+node_logic_unchanged ==
+    /\ UNCHANGED <<local_key, local_slab, local_item>>
+    /\ node_base_unchanged
 
 ------------------------------------------------------------------
 
@@ -117,8 +137,7 @@ PutKey(n, k, s) ==
     /\ UNCHANGED <<free_pages, hash_slot_lock>>
     /\ UNCHANGED slab_vars
     /\ UNCHANGED <<item_map, hash_map>>
-    /\ UNCHANGED const_vars
-    /\ UNCHANGED stop_cmd
+    /\ node_base_unchanged
 
 ------------------------------------------------------------------
 
@@ -222,8 +241,7 @@ do_unlock_hash_slot(n, h) ==
     /\ dec_hash_slot_lock(h)
     /\ goto(n, "Init")
     /\ clear_local_vars(n)
-    /\ UNCHANGED const_vars
-    /\ UNCHANGED stop_cmd
+    /\ node_base_unchanged
 
 keep_locking_hash_slot ==
     /\ UNCHANGED hash_slot_lock
@@ -356,8 +374,7 @@ SetItem(n, it) ==
             /\ set_local(n, local_item, it)
 
             /\ UNCHANGED <<local_key, local_slab>>
-            /\ UNCHANGED const_vars
-            /\ UNCHANGED stop_cmd
+            /\ node_base_unchanged
     IN
     /\ pc[n] = "SetItem"
     /\ it \in slab_free_items[s]
@@ -377,8 +394,7 @@ with_single_atomic_step(h) ==
     /\ hash_slot_lock[h] = 0 \* do lock
     /\ UNCHANGED hash_slot_lock
     /\ UNCHANGED free_pages
-    /\ UNCHANGED const_vars
-    /\ UNCHANGED stop_cmd
+    /\ node_base_unchanged
 
 FinishSetItem(n) ==
     LET
@@ -465,6 +481,7 @@ EnableStopCmd ==
     /\ UNCHANGED local_vars
     /\ UNCHANGED slab_vars
     /\ UNCHANGED const_vars
+    /\ UNCHANGED move_vars
 
 ------------------------------------------------------------------
 
