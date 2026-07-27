@@ -70,7 +70,7 @@ PC == {
     "GetDecRef"
 }
 
-MovePC == {"Init", "MoverDeleteItem", "MoverFinish"}
+MovePC == {"Init", "MoverDeleteItem", "MoverRemovePage", "MoverFinish"}
 
 ItemHashSlot == [
     item: Item,
@@ -541,6 +541,8 @@ mover_unchanged ==
 
 StartMovePage(s, p) ==
     LET
+        remove_items == {p} \X Offset
+
         inuse == slab_inuse_items[s]
 
         single_move_item(it) == [
@@ -559,11 +561,13 @@ StartMovePage(s, p) ==
     /\ move_from_slab' = s
     /\ move_local_page' = p
     /\ move_items' = new_move_items
+
+    /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \ remove_items]
     /\ slab_move_page' = [slab_move_page EXCEPT ![s] = p]
     /\ mover_need_delete' = Cardinality(inuse)
 
     /\ UNCHANGED slab_lock
-    /\ UNCHANGED <<slab_pages, slab_free_items, slab_inuse_items>>
+    /\ UNCHANGED <<slab_pages, slab_inuse_items>>
     /\ UNCHANGED <<free_pages, hash_map, hash_slot_lock, item_map>>
 
     /\ mover_unchanged
@@ -600,16 +604,13 @@ mover_on_delete(it_hash) ==
 
     /\ UNCHANGED move_pc
     /\ UNCHANGED slab_lock
-    /\ UNCHANGED slab_move_page
 
 MoverDeleteItem ==
     LET
         s == move_from_slab
 
         on_finish ==
-            /\ slab_lock[s] = 0 \* lock the slab
-            /\ move_pc' = "MoverFinish"
-            /\ slab_move_page' = [slab_move_page EXCEPT ![s] = nil]
+            /\ move_pc' = "MoverRemovePage"
             /\ UNCHANGED <<hash_map, item_map>>
             /\ UNCHANGED slab_vars
             /\ UNCHANGED move_items
@@ -622,7 +623,29 @@ MoverDeleteItem ==
 
     /\ UNCHANGED hash_slot_lock
     /\ UNCHANGED <<move_from_slab, move_local_page>>
-    /\ UNCHANGED <<free_pages, slab_pages>>
+    /\ UNCHANGED <<free_pages, slab_pages, slab_move_page>>
+    /\ mover_unchanged
+
+------------------------------------------------------------------
+
+MoverRemovePage ==
+    LET
+        s == move_from_slab
+        p == move_local_page
+    IN
+    /\ move_pc = "MoverRemovePage"
+    /\ slab_lock[s] = 0 \* lock slab
+
+    /\ move_pc' = "MoverFinish"
+    /\ mover_need_delete' = nil
+    /\ slab_move_page' = [slab_move_page EXCEPT ![s] = nil]
+    /\ slab_pages' = [slab_pages EXCEPT ![s] = @ \ {p}]
+
+    /\ UNCHANGED <<hash_slot_lock, hash_map, item_map>>
+    /\ UNCHANGED <<slab_lock, slab_free_items, slab_inuse_items>>
+    /\ UNCHANGED <<move_from_slab, move_local_page>>
+    /\ UNCHANGED move_items
+    /\ UNCHANGED free_pages
     /\ mover_unchanged
 
 ------------------------------------------------------------------
@@ -642,9 +665,9 @@ MoverFinish(new_slab) ==
     /\ mover_need_delete' = nil
     /\ move_pc' = "Init"
     /\ move_from_slab' = nil
-    /\ move_items' = {}
     /\ move_local_page' = nil
 
+    /\ UNCHANGED move_items
     /\ UNCHANGED slab_move_page
     /\ UNCHANGED <<hash_map, item_map, hash_slot_lock>>
     /\ UNCHANGED free_pages
@@ -698,6 +721,7 @@ Next ==
     \/ \E s \in Slab, p \in Page:
         \/ StartMovePage(s, p)
     \/ MoverDeleteItem
+    \/ MoverRemovePage
     \/ \E s \in Slab:
         \/ MoverFinish(s)
     \/ EnableStopCmd
@@ -813,9 +837,11 @@ PageAllocInv ==
     LET
         exist_page_in_slab(p) ==
             \E s \in Slab: p \in slab_pages[s]
+
+        cond(p) ==
+            ~exist_page_in_slab(p) <=> p \in free_pages
     IN
-    \A p \in Page:
-        ~exist_page_in_slab(p) <=> p \in free_pages
+        \A p \in Page: move_pc = "Init" => cond(p)
 
 ------------------------
 
@@ -834,8 +860,7 @@ SlabPagesInv ==
             slab_pages[s] \X Offset
     IN
     \A s \in Slab:
-        /\ slab_move_page[s] = nil =>
-                slab_item_set(s) = slab_page_items(s)
+        /\ move_pc = "Init" => slab_item_set(s) = slab_page_items(s)
         /\ is_disjoint(slab_inuse_items[s], slab_free_items[s])
 
 ------------------------
