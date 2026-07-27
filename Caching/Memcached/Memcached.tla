@@ -547,7 +547,8 @@ StartMovePage(s, p) ==
     LET
         remove_items == {p} \X Offset
 
-        inuse == slab_inuse_items[s]
+        inuse ==
+            {it \in slab_inuse_items[s]: it[1] = p}
 
         single_move_item(it) == [
             item |-> it,
