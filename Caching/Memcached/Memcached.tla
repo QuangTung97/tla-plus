@@ -59,7 +59,7 @@ PC == {
     "GetDecRef"
 }
 
-MovePC == {"Init"}
+MovePC == {"Init", "MoverDeleteItem", "MoverFinish"}
 
 ------------------------------------------------------------------
 
@@ -177,15 +177,20 @@ LockSlot(n) ==
 
 ------------------------------------------------------------------
 
-do_delete_item(it) ==
+do_delete_item(it, add_to_free) ==
     LET
         s == item_map[it].slab
+
+        do_add_free_list ==
+            slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
     IN
     /\ item_map' = [item_map EXCEPT ![it] = nil]
-    /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
+    /\ IF add_to_free
+        THEN do_add_free_list
+        ELSE UNCHANGED slab_free_items
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
 
-dec_refcount_or_delete(it, with_delete, clear_partial) ==
+dec_refcount_or_delete(it, with_delete, clear_partial, add_to_free) ==
     LET
         k == item_map[it].key
         s == item_map[it].slab
@@ -204,10 +209,13 @@ dec_refcount_or_delete(it, with_delete, clear_partial) ==
     IN
     /\ slab_lock[s] = 0 \* slab is not locked
     /\ IF can_delete
-        THEN do_delete_item(it)
+        THEN do_delete_item(it, add_to_free)
         ELSE on_dec_only
     /\ UNCHANGED slab_lock
     /\ UNCHANGED page_slab_alloc
+
+normal_dec_refcount_or_delete(it) ==
+    dec_refcount_or_delete(it, TRUE, FALSE, TRUE)
 
 DeletePrevKey(n) ==
     LET
@@ -220,7 +228,7 @@ DeletePrevKey(n) ==
     /\ goto(n, "GetFreePage")
 
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-    /\ dec_refcount_or_delete(it, TRUE, FALSE)
+    /\ normal_dec_refcount_or_delete(it)
 
     /\ UNCHANGED free_pages
     /\ UNCHANGED hash_slot_lock
@@ -329,7 +337,7 @@ EvictSlab(n, it) ==
         on_normal ==
             /\ goto(n, "SetItem")
             /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-            /\ do_delete_item(it)
+            /\ do_delete_item(it, TRUE)
             /\ UNCHANGED slab_lock
             /\ keep_locking_hash_slot
             /\ UNCHANGED page_slab_alloc
@@ -417,7 +425,7 @@ FinishSetItem(n) ==
     /\ with_single_atomic_step(h)
 
     /\ goto(n, "Init")
-    /\ dec_refcount_or_delete(it, FALSE, TRUE)
+    /\ dec_refcount_or_delete(it, FALSE, TRUE, TRUE)
     /\ clear_local_vars(n)
 
     /\ UNCHANGED hash_map
@@ -455,7 +463,7 @@ GetDecRef(n) ==
     /\ with_single_atomic_step(h)
 
     /\ goto(n, "Init")
-    /\ dec_refcount_or_delete(it, FALSE, FALSE)
+    /\ dec_refcount_or_delete(it, FALSE, FALSE, TRUE)
     /\ clear_local_vars(n)
 
     /\ UNCHANGED hash_map
@@ -473,7 +481,7 @@ DeleteKey(n, k) ==
     /\ it # nil
 
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-    /\ dec_refcount_or_delete(it, TRUE, FALSE)
+    /\ normal_dec_refcount_or_delete(it)
 
     /\ UNCHANGED pc
     /\ UNCHANGED free_pages
@@ -483,20 +491,73 @@ DeleteKey(n, k) ==
 
 ------------------------------------------------------------------
 
+mover_unchanged ==
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED const_vars
+    /\ UNCHANGED stop_cmd
+
 StartMovePage(s, p) ==
-    /\ FALSE \* TODO remove
+    /\ ~stop_cmd
     /\ move_pc = "Init"
     /\ slab_lock[s] = 0 \* lock slab
     /\ page_slab_alloc[p] = s
 
     /\ move_pc' = "MoverDeleteItem"
+    /\ move_from_slab' = s
+    /\ move_page' = p
+    /\ move_items' = slab_inuse_items[s]
 
-    /\ UNCHANGED <<slab_lock, slab_free_items, slab_inuse_items>>
+    /\ UNCHANGED slab_vars
     /\ UNCHANGED <<free_pages, hash_map, hash_slot_lock, item_map>>
 
-    /\ UNCHANGED local_vars
-    /\ UNCHANGED const_vars
-    /\ UNCHANGED stop_cmd
+    /\ mover_unchanged
+
+------------------------------------------------------------------
+
+mover_on_delete(it) ==
+    LET
+        s == move_from_slab
+
+        k == item_map[it].key
+        h == key_to_hash_slot[k]
+
+        on_delete_nop ==
+            /\ UNCHANGED hash_map
+
+        on_delete_normal ==
+            /\ dec_refcount_or_delete(it, TRUE, FALSE, FALSE)
+            /\ hash_map' = [hash_map EXCEPT ![k] = nil]
+    IN
+    /\ hash_slot_lock[h] = 0 \* lock slot
+    /\ slab_lock[s] = 0 \* lock slab
+
+    /\ IF item_map[it] = nil
+        THEN on_delete_nop
+        ELSE on_delete_normal
+
+    /\ move_items' = move_items \ {it}
+
+    /\ UNCHANGED move_pc
+    /\ UNCHANGED slab_lock
+
+MoverDeleteItem ==
+    LET
+        on_finish ==
+            /\ move_pc' = "MoverFinish"
+            /\ UNCHANGED <<hash_map, item_map>>
+            /\ UNCHANGED slab_vars
+            /\ UNCHANGED move_items
+    IN
+    /\ move_pc = "MoverDeleteItem"
+
+    /\ IF move_items = {}
+        THEN on_finish
+        ELSE \E it \in move_items: mover_on_delete(it)
+
+    /\ UNCHANGED hash_slot_lock
+    /\ UNCHANGED <<move_from_slab, move_page>>
+    /\ UNCHANGED <<free_pages, page_slab_alloc>>
+    /\ mover_unchanged
 
 ------------------------------------------------------------------
 
@@ -515,6 +576,7 @@ EnableStopCmd ==
 
 StopCond ==
     /\ \A n \in Node: pc[n] = "Init"
+    /\ move_pc = "Init"
 
 TerminateCond ==
     /\ StopCond
@@ -543,6 +605,7 @@ Next ==
         \/ DeleteKey(n, k)
     \/ \E s \in Slab, p \in Page:
         \/ StartMovePage(s, p)
+    \/ MoverDeleteItem
     \/ EnableStopCmd
     \/ Terminated
 
@@ -666,12 +729,14 @@ NonFreePagesInv ==
 
             item_set == {p} \X Offset
 
+            pre_cond == move_pc = "Init"
+
             cond ==
                 \E s \in Slab:
                     /\ slab_inuse_items[s] \intersect slab_free_items[s] = {}
                     /\ item_set \subseteq slab_item_set(s)
         IN
-            p \notin free_pages <=> cond
+            pre_cond => (p \notin free_pages <=> cond)
 
 ------------------------
 
