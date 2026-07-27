@@ -61,6 +61,11 @@ PC == {
 
 MovePC == {"Init", "MoverDeleteItem", "MoverFinish"}
 
+ItemHashSlot == [
+    item: Item,
+    hash: HashSlot
+]
+
 ------------------------------------------------------------------
 
 TypeOK ==
@@ -83,7 +88,7 @@ TypeOK ==
     /\ move_pc \in MovePC
     /\ move_from_slab \in Null(Slab)
     /\ move_page \in Null(Page)
-    /\ move_items \subseteq Item
+    /\ move_items \subseteq ItemHashSlot
 
     /\ stop_cmd \in BOOLEAN
 
@@ -497,6 +502,16 @@ mover_unchanged ==
     /\ UNCHANGED stop_cmd
 
 StartMovePage(s, p) ==
+    LET
+        inuse == slab_inuse_items[s]
+
+        single_move_item(it) == [
+            item |-> it,
+            hash |-> key_to_hash_slot[item_map[it].key]
+        ]
+
+        new_move_items == {single_move_item(it): it \in inuse}
+    IN
     /\ ~stop_cmd
     /\ move_pc = "Init"
     /\ slab_lock[s] = 0 \* lock slab
@@ -505,7 +520,7 @@ StartMovePage(s, p) ==
     /\ move_pc' = "MoverDeleteItem"
     /\ move_from_slab' = s
     /\ move_page' = p
-    /\ move_items' = slab_inuse_items[s]
+    /\ move_items' = new_move_items
 
     /\ UNCHANGED slab_vars
     /\ UNCHANGED <<free_pages, hash_map, hash_slot_lock, item_map>>
@@ -514,15 +529,19 @@ StartMovePage(s, p) ==
 
 ------------------------------------------------------------------
 
-mover_on_delete(it) ==
+mover_on_delete(it_hash) ==
     LET
+        it == it_hash.item
+        h == it_hash.hash
+
         s == move_from_slab
 
-        k == item_map[it].key
-        h == key_to_hash_slot[k]
-
         on_delete_nop ==
+            /\ UNCHANGED item_map
+            /\ UNCHANGED <<slab_inuse_items, slab_free_items>>
             /\ UNCHANGED hash_map
+
+        k == item_map[it].key
 
         on_delete_normal ==
             /\ dec_refcount_or_delete(it, TRUE, FALSE, FALSE)
@@ -535,7 +554,7 @@ mover_on_delete(it) ==
         THEN on_delete_nop
         ELSE on_delete_normal
 
-    /\ move_items' = move_items \ {it}
+    /\ move_items' = move_items \ {it_hash}
 
     /\ UNCHANGED move_pc
     /\ UNCHANGED slab_lock
@@ -552,7 +571,7 @@ MoverDeleteItem ==
 
     /\ IF move_items = {}
         THEN on_finish
-        ELSE \E it \in move_items: mover_on_delete(it)
+        ELSE \E it_hash \in move_items: mover_on_delete(it_hash)
 
     /\ UNCHANGED hash_slot_lock
     /\ UNCHANGED <<move_from_slab, move_page>>
