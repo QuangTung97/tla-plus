@@ -1,5 +1,5 @@
 ---- MODULE Memcached ----
-EXTENDS TLC, Naturals
+EXTENDS TLC, Naturals, FiniteSets
 
 CONSTANTS Node, Key, HashSlot, Page, Offset, Slab, nil
 
@@ -7,9 +7,12 @@ VARIABLES
     key_to_hash_slot,
     pc, local_key, local_slab, local_item,
     free_pages, hash_slot_lock,
-    page_slab_alloc, slab_lock, slab_free_items, slab_inuse_items,
+    page_slab_alloc, slab_lock,
+    slab_free_items, slab_inuse_items,
+    mover_need_delete,
     item_map, hash_map,
-    move_pc, move_from_slab, move_page, move_items,
+    move_pc, move_from_slab,
+    move_local_page, move_items, slab_move_page,
     stop_cmd
 
 const_vars == <<
@@ -21,11 +24,14 @@ local_vars == <<
 >>
 
 slab_vars == <<
-    page_slab_alloc, slab_lock, slab_free_items, slab_inuse_items
+    page_slab_alloc, slab_lock,
+    slab_free_items, slab_inuse_items,
+    mover_need_delete
 >>
 
 move_vars == <<
-    move_pc, move_from_slab, move_page, move_items
+    move_pc, move_from_slab,
+    move_local_page, move_items, slab_move_page
 >>
 
 vars == <<
@@ -77,6 +83,8 @@ TypeOK ==
     /\ slab_lock \in [Slab -> Nat]
     /\ slab_free_items \in [Slab -> SUBSET Item]
     /\ slab_inuse_items \in [Slab -> SUBSET Item]
+    /\ mover_need_delete \in Null(Nat)
+
     /\ item_map \in [Item -> Null(ItemData)]
     /\ hash_map \in [Key -> Null(Item)]
 
@@ -87,8 +95,9 @@ TypeOK ==
 
     /\ move_pc \in MovePC
     /\ move_from_slab \in Null(Slab)
-    /\ move_page \in Null(Page)
+    /\ move_local_page \in Null(Page)
     /\ move_items \subseteq ItemHashSlot
+    /\ slab_move_page \in [Slab -> Null(Page)]
 
     /\ stop_cmd \in BOOLEAN
 
@@ -101,6 +110,8 @@ Init ==
     /\ slab_lock = [s \in Slab |-> 0]
     /\ slab_free_items = [s \in Slab |-> {}]
     /\ slab_inuse_items = [s \in Slab |-> {}]
+    /\ mover_need_delete = nil
+
     /\ item_map = [i \in Item |-> nil]
     /\ hash_map = [k \in Key |-> nil]
 
@@ -111,8 +122,9 @@ Init ==
 
     /\ move_pc = "Init"
     /\ move_from_slab = nil
-    /\ move_page = nil
+    /\ move_local_page = nil
     /\ move_items = {}
+    /\ slab_move_page = [s \in Slab |-> nil]
 
     /\ stop_cmd = FALSE
 
@@ -182,17 +194,26 @@ LockSlot(n) ==
 
 ------------------------------------------------------------------
 
-do_delete_item(it, add_to_free) ==
+do_delete_item(it) ==
     LET
         s == item_map[it].slab
+        p == it[1]
 
-        do_add_free_list ==
-            slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
+        is_moving ==
+            slab_move_page[s] = p
+
+        when_normal ==
+            /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union {it}]
+            /\ UNCHANGED mover_need_delete
+
+        when_moving ==
+            /\ mover_need_delete' = mover_need_delete - 1
+            /\ UNCHANGED slab_free_items
     IN
     /\ item_map' = [item_map EXCEPT ![it] = nil]
-    /\ IF add_to_free
-        THEN do_add_free_list
-        ELSE UNCHANGED slab_free_items
+    /\ IF is_moving
+        THEN when_moving
+        ELSE when_normal
     /\ slab_inuse_items' = [slab_inuse_items EXCEPT ![s] = @ \ {it}]
 
 dec_refcount_or_delete(it, with_delete, clear_partial, add_to_free) ==
@@ -211,11 +232,19 @@ dec_refcount_or_delete(it, with_delete, clear_partial, add_to_free) ==
                 ]
             /\ UNCHANGED slab_free_items
             /\ UNCHANGED slab_inuse_items
+            /\ UNCHANGED mover_need_delete
     IN
     /\ slab_lock[s] = 0 \* slab is not locked
     /\ IF can_delete
-        THEN do_delete_item(it, add_to_free)
+        THEN do_delete_item(it)
         ELSE on_dec_only
+    /\ UNCHANGED slab_lock
+    /\ UNCHANGED page_slab_alloc
+
+do_delete_unchanged ==
+    /\ UNCHANGED mover_need_delete
+    /\ UNCHANGED item_map
+    /\ UNCHANGED <<slab_inuse_items, slab_free_items>>
     /\ UNCHANGED slab_lock
     /\ UNCHANGED page_slab_alloc
 
@@ -322,6 +351,7 @@ GetFreePage(n) ==
     /\ do_action
 
     /\ UNCHANGED slab_inuse_items
+    /\ UNCHANGED mover_need_delete
     /\ UNCHANGED <<item_map, hash_map>>
 
 ------------------------------------------------------------------
@@ -342,7 +372,7 @@ EvictSlab(n, it) ==
         on_normal ==
             /\ goto(n, "SetItem")
             /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-            /\ do_delete_item(it, TRUE)
+            /\ do_delete_item(it)
             /\ UNCHANGED slab_lock
             /\ keep_locking_hash_slot
             /\ UNCHANGED page_slab_alloc
@@ -409,6 +439,7 @@ SetItem(n, it) ==
     /\ \/ fully_set
        \/ partial_set
 
+    /\ UNCHANGED mover_need_delete
     /\ UNCHANGED page_slab_alloc
     /\ UNCHANGED free_pages
 
@@ -519,10 +550,13 @@ StartMovePage(s, p) ==
 
     /\ move_pc' = "MoverDeleteItem"
     /\ move_from_slab' = s
-    /\ move_page' = p
+    /\ move_local_page' = p
     /\ move_items' = new_move_items
+    /\ slab_move_page' = [slab_move_page EXCEPT ![s] = p]
+    /\ mover_need_delete' = Cardinality(inuse)
 
-    /\ UNCHANGED slab_vars
+    /\ UNCHANGED slab_lock
+    /\ UNCHANGED <<page_slab_alloc, slab_free_items, slab_inuse_items>>
     /\ UNCHANGED <<free_pages, hash_map, hash_slot_lock, item_map>>
 
     /\ mover_unchanged
@@ -533,15 +567,16 @@ mover_on_delete(it_hash) ==
     LET
         it == it_hash.item
         h == it_hash.hash
-
         s == move_from_slab
+        k == item_map[it].key
+
+        can_delete ==
+            /\ item_map[it] # nil
+            /\ hash_map[k] # nil
 
         on_delete_nop ==
-            /\ UNCHANGED item_map
-            /\ UNCHANGED <<slab_inuse_items, slab_free_items>>
+            /\ do_delete_unchanged
             /\ UNCHANGED hash_map
-
-        k == item_map[it].key
 
         on_delete_normal ==
             /\ dec_refcount_or_delete(it, TRUE, FALSE, FALSE)
@@ -550,9 +585,9 @@ mover_on_delete(it_hash) ==
     /\ hash_slot_lock[h] = 0 \* lock slot
     /\ slab_lock[s] = 0 \* lock slab
 
-    /\ IF item_map[it] = nil
-        THEN on_delete_nop
-        ELSE on_delete_normal
+    /\ IF can_delete
+        THEN on_delete_normal
+        ELSE on_delete_nop
 
     /\ move_items' = move_items \ {it_hash}
 
@@ -574,7 +609,8 @@ MoverDeleteItem ==
         ELSE \E it_hash \in move_items: mover_on_delete(it_hash)
 
     /\ UNCHANGED hash_slot_lock
-    /\ UNCHANGED <<move_from_slab, move_page>>
+    /\ UNCHANGED slab_move_page
+    /\ UNCHANGED <<move_from_slab, move_local_page>>
     /\ UNCHANGED <<free_pages, page_slab_alloc>>
     /\ mover_unchanged
 
@@ -759,6 +795,17 @@ NonFreePagesInv ==
 
 ------------------------
 
+SlabMovePageInv ==
+    \A s \in Slab:
+        LET
+            cond ==
+                /\ move_from_slab = s
+                /\ move_local_page = slab_move_page[s]
+        IN
+        slab_move_page[s] # nil <=> cond
+
+------------------------
+
 StopCondInv ==
     LET
         cond ==
@@ -772,7 +819,5 @@ StopCondInv ==
 MutexLockCond ==
     /\ \A h \in HashSlot: hash_slot_lock[h] \in 0..1
     /\ \A s \in Slab: slab_lock[s] \in 0..1
-
-\* TODO add avoid race condition for hash slot
 
 ====
