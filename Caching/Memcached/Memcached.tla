@@ -59,8 +59,7 @@ ItemData == [
     key: Key,
     slab: Slab,
     refcount: Nat,
-    partial_set: BOOLEAN,
-    deleted: BOOLEAN
+    partial_set: BOOLEAN
 ]
 
 PC == {
@@ -228,7 +227,7 @@ do_delete_item_unchanged ==
 
 ------------------------
 
-dec_refcount_or_delete(it, with_delete, clear_partial, add_to_free) ==
+dec_refcount_or_delete(it, clear_partial) ==
     LET
         k == item_map[it].key
         s == item_map[it].slab
@@ -239,7 +238,6 @@ dec_refcount_or_delete(it, with_delete, clear_partial, add_to_free) ==
         on_dec_only ==
             /\ item_map' = [item_map EXCEPT
                     ![it].refcount = @ - 1,
-                    ![it].deleted = @ \/ with_delete,
                     ![it].partial_set = @ /\ ~clear_partial
                 ]
             /\ UNCHANGED slab_free_items
@@ -259,7 +257,7 @@ dec_refcount_unchanged ==
     /\ UNCHANGED slab_pages
 
 normal_dec_refcount_or_delete(it) ==
-    dec_refcount_or_delete(it, TRUE, FALSE, TRUE)
+    dec_refcount_or_delete(it, FALSE)
 
 ------------------------------------------------------------------
 
@@ -379,7 +377,7 @@ EvictSlab(n, it) ==
         try_lock_ok ==
             /\ current_hash # h => hash_slot_lock[h] = 0
             /\ item_map[it].refcount = 1
-            /\ ~item_map[it].deleted
+            /\ hash_map[k] = it \* not deleted
             /\ slab_move_page[s] # it[1] \* page is not moving
 
         on_normal ==
@@ -418,8 +416,7 @@ SetItem(n, it) ==
             key |-> k,
             slab |-> s,
             refcount |-> 1,
-            partial_set |-> FALSE,
-            deleted |-> FALSE
+            partial_set |-> FALSE
         ]
 
         fully_set ==
@@ -472,7 +469,7 @@ FinishSetItem(n) ==
     /\ with_single_atomic_step(h)
 
     /\ goto(n, "Init")
-    /\ dec_refcount_or_delete(it, FALSE, TRUE, TRUE)
+    /\ dec_refcount_or_delete(it, TRUE)
     /\ clear_local_vars(n)
 
     /\ UNCHANGED hash_map
@@ -500,6 +497,7 @@ GetKey(n, k) ==
 
 ------------------------------------------------------------------
 
+\* Finish Get
 GetDecRef(n) ==
     LET
         it == local_item[n]
@@ -510,7 +508,7 @@ GetDecRef(n) ==
     /\ with_single_atomic_step(h)
 
     /\ goto(n, "Init")
-    /\ dec_refcount_or_delete(it, FALSE, FALSE, TRUE)
+    /\ dec_refcount_or_delete(it, FALSE)
     /\ clear_local_vars(n)
 
     /\ UNCHANGED hash_map
@@ -588,14 +586,14 @@ mover_on_delete(it_hash) ==
 
         can_delete ==
             /\ item_map[it] # nil
-            /\ ~item_map[it].deleted \* not deleting
+            /\ hash_map[k] = it \* not deleted
 
         on_delete_nop ==
             /\ dec_refcount_unchanged
             /\ UNCHANGED hash_map
 
         on_delete_normal ==
-            /\ dec_refcount_or_delete(it, TRUE, FALSE, FALSE)
+            /\ dec_refcount_or_delete(it, FALSE)
             /\ hash_map' = [hash_map EXCEPT ![k] = nil]
     IN
     /\ hash_slot_lock[h] = 0 \* lock slot
@@ -749,7 +747,6 @@ NoLeakItem ==
 
         item_cond(it) ==
             /\ ~item_map[it].partial_set
-            /\ ~item_map[it].deleted
             /\ item_map[it].refcount = 1
             /\ exist_key_of(it)
 
@@ -764,9 +761,7 @@ NoLeakItem ==
 HashMapAlwaysPointToNonDeleted ==
     \A k \in Key:
         LET it == hash_map[k] IN
-        it # nil =>
-            /\ ~item_map[it].deleted
-            /\ item_map[it].refcount > 0
+        it # nil => item_map[it].refcount > 0
 
 ------------------------
 
