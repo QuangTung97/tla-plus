@@ -6,7 +6,7 @@ CONSTANTS Node, Key, HashSlot, Page, Offset, Slab, nil
 VARIABLES
     key_to_hash_slot,
     pc, local_key, local_slab, local_item,
-    free_pages, hash_slot_lock,
+    free_pages, hash_slot_lock, page_slab_alloc,
     slab_lock, slab_pages,
     slab_free_items, slab_inuse_items,
     mover_need_delete,
@@ -37,7 +37,7 @@ move_vars == <<
 vars == <<
     const_vars,
     local_vars,
-    free_pages, hash_slot_lock,
+    free_pages, hash_slot_lock, page_slab_alloc,
     slab_vars,
     item_map, hash_map,
     move_vars,
@@ -82,6 +82,7 @@ TypeOK ==
     /\ key_to_hash_slot \in [Key -> HashSlot]
     /\ free_pages \subseteq Page
     /\ hash_slot_lock \in [HashSlot -> Nat]
+    /\ page_slab_alloc \in [Page -> Null(Slab)]
 
     /\ slab_lock \in [Slab -> Nat]
     /\ slab_pages \in [Slab -> SUBSET Page]
@@ -109,6 +110,7 @@ Init ==
     /\ key_to_hash_slot \in [Key -> HashSlot]
     /\ free_pages = Page
     /\ hash_slot_lock = [h \in HashSlot |-> 0]
+    /\ page_slab_alloc = [p \in Page |-> nil]
 
     /\ slab_lock = [s \in Slab |-> 0]
     /\ slab_pages = [s \in Slab |-> {}]
@@ -159,7 +161,7 @@ PutKey(n, k, s) ==
     /\ set_local(n, local_slab, s)
 
     /\ UNCHANGED local_item
-    /\ UNCHANGED <<free_pages, hash_slot_lock>>
+    /\ UNCHANGED <<free_pages, hash_slot_lock, page_slab_alloc>>
     /\ UNCHANGED slab_vars
     /\ UNCHANGED <<item_map, hash_map>>
     /\ node_base_unchanged
@@ -191,7 +193,7 @@ LockSlot(n) ==
     /\ do_lock_hash_slot(h)
     /\ go_next
 
-    /\ UNCHANGED free_pages
+    /\ UNCHANGED <<free_pages, page_slab_alloc>>
     /\ UNCHANGED slab_vars
     /\ UNCHANGED <<item_map, hash_map>>
     /\ node_logic_unchanged
@@ -250,14 +252,13 @@ dec_refcount_or_delete(it, clear_partial) ==
         ELSE on_dec_only
     /\ UNCHANGED slab_lock
     /\ UNCHANGED slab_pages
+    /\ UNCHANGED page_slab_alloc
 
 dec_refcount_unchanged ==
     /\ do_delete_item_unchanged
     /\ UNCHANGED slab_lock
     /\ UNCHANGED slab_pages
-
-normal_dec_refcount_or_delete(it) ==
-    dec_refcount_or_delete(it, FALSE)
+    /\ UNCHANGED page_slab_alloc
 
 ------------------------------------------------------------------
 
@@ -272,7 +273,7 @@ DeletePrevKey(n) ==
     /\ goto(n, "GetFreePage")
 
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-    /\ normal_dec_refcount_or_delete(it)
+    /\ dec_refcount_or_delete(it, FALSE)
 
     /\ UNCHANGED free_pages
     /\ UNCHANGED hash_slot_lock
@@ -316,6 +317,7 @@ GetFreePage(n) ==
             /\ UNCHANGED free_pages
             /\ UNCHANGED slab_free_items
             /\ UNCHANGED slab_pages
+            /\ UNCHANGED page_slab_alloc
 
         goto_set_item ==
             /\ goto(n, "SetItem")
@@ -341,6 +343,7 @@ GetFreePage(n) ==
             /\ goto(n, "SetItem")
             /\ inc_slab_lock(s)
             /\ free_pages' = free_pages \ {p}
+            /\ page_slab_alloc' = [page_slab_alloc EXCEPT ![p] = s]
             /\ slab_pages' = [slab_pages EXCEPT ![s] = @ \union {p}]
             /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items(p)]
             /\ keep_locking_hash_slot
@@ -402,7 +405,7 @@ EvictSlab(n, it) ==
         THEN on_normal
         ELSE on_skip
 
-    /\ UNCHANGED free_pages
+    /\ UNCHANGED <<free_pages, page_slab_alloc>>
 
 ------------------------------------------------------------------
 
@@ -449,7 +452,7 @@ SetItem(n, it) ==
 
     /\ UNCHANGED mover_need_delete
     /\ UNCHANGED slab_pages
-    /\ UNCHANGED free_pages
+    /\ UNCHANGED <<free_pages, page_slab_alloc>>
 
 ------------------------------------------------------------------
 
@@ -491,6 +494,7 @@ GetKey(n, k) ==
     /\ set_local(n, local_item, it)
     /\ item_map' = [item_map EXCEPT ![it].refcount = @ + 1]
 
+    /\ UNCHANGED page_slab_alloc
     /\ UNCHANGED <<local_key, local_slab>>
     /\ UNCHANGED hash_map
     /\ UNCHANGED slab_vars
@@ -526,10 +530,10 @@ DeleteKey(n, k) ==
     /\ it # nil
 
     /\ hash_map' = [hash_map EXCEPT ![k] = nil]
-    /\ normal_dec_refcount_or_delete(it)
+    /\ dec_refcount_or_delete(it, FALSE)
 
     /\ UNCHANGED pc
-    /\ UNCHANGED free_pages
+    /\ UNCHANGED <<free_pages, page_slab_alloc>>
     /\ UNCHANGED hash_slot_lock
     /\ node_logic_unchanged
 
@@ -572,6 +576,7 @@ StartMovePage(s, p) ==
     /\ UNCHANGED slab_lock
     /\ UNCHANGED <<slab_pages, slab_inuse_items>>
     /\ UNCHANGED <<free_pages, hash_map, hash_slot_lock, item_map>>
+    /\ UNCHANGED page_slab_alloc
 
     /\ mover_unchanged
 
@@ -614,6 +619,7 @@ MoverDeleteItem ==
 
         on_finish ==
             /\ move_pc' = "MoverRemovePage"
+            /\ UNCHANGED page_slab_alloc
             /\ UNCHANGED <<hash_map, item_map>>
             /\ UNCHANGED slab_vars
             /\ UNCHANGED move_items
@@ -644,6 +650,7 @@ MoverRemovePage ==
     /\ mover_need_delete' = nil
     /\ slab_move_page' = [slab_move_page EXCEPT ![s] = nil]
     /\ slab_pages' = [slab_pages EXCEPT ![s] = @ \ {p}]
+    /\ page_slab_alloc' = [page_slab_alloc EXCEPT ![p] = nil]
 
     /\ UNCHANGED <<hash_slot_lock, hash_map, item_map>>
     /\ UNCHANGED <<slab_lock, slab_free_items, slab_inuse_items>>
@@ -664,6 +671,7 @@ MoverFinish(s) ==
     /\ slab_lock[s] = 0 \* lock slab
 
     /\ slab_pages' = [slab_pages EXCEPT ![s] = @ \union {p}]
+    /\ page_slab_alloc' = [page_slab_alloc EXCEPT ![p] = s]
     /\ slab_free_items' = [slab_free_items EXCEPT ![s] = @ \union new_items]
 
     /\ mover_need_delete' = nil
@@ -684,7 +692,7 @@ EnableStopCmd ==
     /\ ~stop_cmd
     /\ stop_cmd' = TRUE
 
-    /\ UNCHANGED <<hash_map, item_map, hash_slot_lock>>
+    /\ UNCHANGED <<hash_map, item_map, hash_slot_lock, page_slab_alloc>>
     /\ UNCHANGED free_pages
     /\ UNCHANGED local_vars
     /\ UNCHANGED slab_vars
@@ -901,5 +909,17 @@ StopCondInv ==
 MutexLockCond ==
     /\ \A h \in HashSlot: hash_slot_lock[h] \in 0..1
     /\ \A s \in Slab: slab_lock[s] \in 0..1
+
+------------------------
+
+PageSlabAllocInv ==
+    \A p \in Page:
+        LET
+            cond ==
+                /\ p \in free_pages <=> page_slab_alloc[p] = nil
+        IN
+        /\ move_pc = "Init" => cond
+        /\ page_slab_alloc[p] # nil =>
+            p \in slab_pages[page_slab_alloc[p]]
 
 ====
