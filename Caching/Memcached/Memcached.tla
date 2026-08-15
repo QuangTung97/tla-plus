@@ -921,5 +921,7 @@ PageSlabAllocInv ==
         /\ move_pc = "Init" => cond
         /\ page_slab_alloc[p] # nil =>
             p \in slab_pages[page_slab_alloc[p]]
+        /\ page_slab_alloc[p] = nil =>
+            \A s \in Slab: p \notin slab_pages[s]
 
 ====
