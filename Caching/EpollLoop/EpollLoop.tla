@@ -67,7 +67,7 @@ init_worker_state == [
     task_queue |-> <<>>
 ]
 
-WorkerPC == {"Init", "HandleEpollEvent"}
+WorkerPC == {"WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue"}
 
 ------------------------------------------------------
 
@@ -98,7 +98,7 @@ Init ==
     /\ listen_local_conn = nil
     /\ listen_local_worker = nil
 
-    /\ worker_pc = [w \in Worker |-> "Init"]
+    /\ worker_pc = [w \in Worker |-> "WaitOnEpoll"]
     /\ worker_conn = [w \in Worker |-> nil]
     /\ worker_events = [w \in Worker |-> {}]
     /\ worker_state = [w \in Worker |-> init_worker_state]
@@ -202,7 +202,7 @@ waitConsumeEpollEvents(w, sub) ==
     /\ goto(w, "HandleEpollEvent")
 
 WaitOnEpoll(w) ==
-    /\ worker_pc[w] = "Init"
+    /\ worker_pc[w] = "WaitOnEpoll"
     /\ epoll_events[w] # {}
     /\ \E sub \in (SUBSET epoll_events[w]):
         /\ sub # {}
@@ -237,7 +237,7 @@ HandleEpollEvent(w) ==
         on_empty ==
             /\ UNCHANGED worker_events
             /\ UNCHANGED worker_state
-            /\ goto(w, "Init")
+            /\ goto(w, "HandleTaskQueue")
     IN
     /\ worker_pc[w] = "HandleEpollEvent"
     /\ IF worker_events[w] = {} THEN
@@ -250,6 +250,63 @@ HandleEpollEvent(w) ==
     /\ UNCHANGED epoll_events
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
+    /\ UNCHANGED listen_vars
+
+------------------------------------------------------
+
+handleTaskConsumeActionNormal(w, action) ==
+    LET
+        conn == action.conn
+
+        on_new_conn ==
+            /\ action.type = "NewConn"
+            /\ worker_conn' = [worker_conn EXCEPT ![w] = conn]
+    IN
+    \/ on_new_conn
+
+
+handleTaskConsumeAction(w, task, state) ==
+    LET
+        on_empty ==
+            /\ UNCHANGED action_queue
+            /\ UNCHANGED worker_conn
+            /\ worker_state' = state
+
+        on_normal ==
+            /\ handleTaskConsumeActionNormal(w, action_queue[w][1])
+            /\ action_queue' = [action_queue EXCEPT ![w] = Tail(@)]
+            /\ worker_state' = [state EXCEPT ![w].task_queue = Append(@, task)]
+    IN
+    /\ task.type = "ConsumeAction"
+    /\ IF action_queue[w] = <<>>
+        THEN on_empty
+        ELSE on_normal
+
+HandleTaskQueue(w) ==
+    LET
+        on_empty ==
+            /\ goto(w, "WaitOnEpoll")
+            /\ UNCHANGED worker_state
+            /\ UNCHANGED worker_conn
+            /\ UNCHANGED action_queue
+
+        task == worker_state[w].task_queue[1]
+
+        new_state == [worker_state EXCEPT ![w].task_queue = Tail(@)]
+
+        on_normal ==
+            /\ \/ handleTaskConsumeAction(w, task, new_state)
+            /\ UNCHANGED worker_pc
+    IN
+    /\ worker_pc[w] = "HandleTaskQueue"
+    /\ IF worker_state[w].task_queue = <<>>
+        THEN on_empty
+        ELSE on_normal
+
+    /\ UNCHANGED conn_state
+    /\ UNCHANGED epoll_events
+    /\ UNCHANGED worker_events
+    /\ UNCHANGED eventfd_num
     /\ UNCHANGED listen_vars
 
 ------------------------------------------------------
@@ -279,6 +336,7 @@ Next ==
     \/ \E w \in Worker:
         \/ WaitOnEpoll(w)
         \/ HandleEpollEvent(w)
+        \/ HandleTaskQueue(w)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
