@@ -40,7 +40,8 @@ ConnState == [
     send: Seq(Value),
     recv: Seq(Value),
     send_closed: BOOLEAN,
-    recv_closed: BOOLEAN
+    recv_closed: BOOLEAN,
+    worker: Null(Worker)
 ]
 
 EpollEvent ==
@@ -67,7 +68,10 @@ init_worker_state == [
     task_queue |-> <<>>
 ]
 
-WorkerPC == {"WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue"}
+WorkerPC == {
+    "WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue",
+    "ConsumeEventFd"
+}
 
 ------------------------------------------------------
 
@@ -112,7 +116,8 @@ NewConn(c) ==
             send |-> <<>>,
             recv |-> <<>>,
             send_closed |-> FALSE,
-            recv_closed |-> FALSE
+            recv_closed |-> FALSE,
+            worker |-> nil
         ]
     IN
     /\ conn_state[c] = nil
@@ -254,6 +259,7 @@ HandleEpollEvent(w) ==
 
 ------------------------------------------------------
 
+\* TODO remove
 handleTaskConsumeActionNormal(w, action) ==
     LET
         conn == action.conn
@@ -261,48 +267,33 @@ handleTaskConsumeActionNormal(w, action) ==
         on_new_conn ==
             /\ action.type = "NewConn"
             /\ worker_conn' = [worker_conn EXCEPT ![w] = conn]
+            /\ conn_state' = [conn_state EXCEPT ![conn].worker = w]
     IN
     \/ on_new_conn
 
-
-handleTaskConsumeAction(w, task, state) ==
-    LET
-        on_empty ==
-            /\ UNCHANGED action_queue
-            /\ UNCHANGED worker_conn
-            /\ worker_state' = state
-
-        on_normal ==
-            /\ handleTaskConsumeActionNormal(w, action_queue[w][1])
-            /\ action_queue' = [action_queue EXCEPT ![w] = Tail(@)]
-            /\ worker_state' = [state EXCEPT ![w].task_queue = Append(@, task)]
-    IN
+handleTaskConsumeAction(w, task) ==
     /\ task.type = "ConsumeAction"
-    /\ IF action_queue[w] = <<>>
-        THEN on_empty
-        ELSE on_normal
+    /\ goto(w, "ConsumeEventFd")
 
 HandleTaskQueue(w) ==
     LET
         on_empty ==
             /\ goto(w, "WaitOnEpoll")
             /\ UNCHANGED worker_state
-            /\ UNCHANGED worker_conn
-            /\ UNCHANGED action_queue
 
         task == worker_state[w].task_queue[1]
 
-        new_state == [worker_state EXCEPT ![w].task_queue = Tail(@)]
-
         on_normal ==
-            /\ \/ handleTaskConsumeAction(w, task, new_state)
-            /\ UNCHANGED worker_pc
+            /\ worker_state' = [worker_state EXCEPT ![w].task_queue = Tail(@)]
+            /\ \/ handleTaskConsumeAction(w, task)
     IN
     /\ worker_pc[w] = "HandleTaskQueue"
     /\ IF worker_state[w].task_queue = <<>>
         THEN on_empty
         ELSE on_normal
 
+    /\ UNCHANGED worker_conn
+    /\ UNCHANGED action_queue
     /\ UNCHANGED conn_state
     /\ UNCHANGED epoll_events
     /\ UNCHANGED worker_events
@@ -342,5 +333,15 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 ------------------------------------------------------
+
+EpollWaitOnlyWhenTaskQueueEmpty ==
+    \A w \in Worker:
+        worker_pc[w] = "WaitOnEpoll" => worker_state[w].task_queue = <<>>
+
+-----------
+
+ConnStateMatchWorkerConn ==
+    \A w \in Worker:
+        worker_conn[w] # nil => conn_state[worker_conn[w]].worker = w
 
 ====
