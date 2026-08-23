@@ -6,13 +6,15 @@ CONSTANTS Worker, Conn, Value, nil
 VARIABLES
     action_queue, conn_state, epoll_events, eventfd_num,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
-    worker_pc, worker_conn, worker_events
+    worker_pc, worker_conn, worker_events, worker_state
 
 listen_vars == <<
     listen_pc, ready_conns, listen_local_conn, listen_local_worker
 >>
 
-worker_vars == <<worker_pc, worker_conn, worker_events>>
+worker_vars == <<
+    worker_pc, worker_conn, worker_events, worker_state
+>>
 
 vars == <<
     action_queue, conn_state, epoll_events, eventfd_num,
@@ -49,6 +51,14 @@ EpollEvent ==
     IN
     UNION {eventfd}
 
+WorkerState == [
+    has_new_action: BOOLEAN
+]
+
+init_worker_state == [
+    has_new_action |-> FALSE
+]
+
 WorkerPC == {"Init", "HandleEpollEvent"}
 
 ------------------------------------------------------
@@ -67,6 +77,7 @@ TypeOK ==
     /\ worker_pc \in [Worker -> WorkerPC]
     /\ worker_conn \in [Worker -> Null(Conn)]
     /\ worker_events \in [Worker -> (SUBSET EpollEvent)]
+    /\ worker_state \in [Worker -> WorkerState]
 
 Init ==
     /\ action_queue = [w \in Worker |-> <<>>]
@@ -82,6 +93,7 @@ Init ==
     /\ worker_pc = [w \in Worker |-> "Init"]
     /\ worker_conn = [w \in Worker |-> nil]
     /\ worker_events = [w \in Worker |-> {}]
+    /\ worker_state = [w \in Worker |-> init_worker_state]
 
 
 ------------------------------------------------------
@@ -174,7 +186,9 @@ IncEventFd ==
 goto(w, l) ==
     worker_pc' = [worker_pc EXCEPT ![w] = l]
 
-handleEpollEvents(w, sub) ==
+------------------------------------------------------
+
+waitConsumeEpollEvents(w, sub) ==
     /\ epoll_events' = [epoll_events EXCEPT ![w] = @ \ sub]
     /\ worker_events' = [worker_events EXCEPT ![w] = sub]
     /\ goto(w, "HandleEpollEvent")
@@ -184,12 +198,45 @@ WaitOnEpoll(w) ==
     /\ epoll_events[w] # {}
     /\ \E sub \in (SUBSET epoll_events[w]):
         /\ sub # {}
-        /\ handleEpollEvents(w, sub)
+        /\ waitConsumeEpollEvents(w, sub)
 
+    /\ UNCHANGED worker_state
     /\ UNCHANGED worker_conn
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_state
+    /\ UNCHANGED listen_vars
+
+------------------------------------------------------
+
+doHandleEpollEvent(w, ev) ==
+    LET
+        on_eventfd ==
+            /\ ev.type = "EventFd"
+            /\ worker_state' = [worker_state EXCEPT ![w].has_new_action = TRUE]
+    IN
+    /\ worker_events' = [worker_events EXCEPT ![w] = @ \ {ev}]
+    /\ on_eventfd
+    /\ UNCHANGED worker_pc
+
+HandleEpollEvent(w) ==
+    LET
+        on_empty ==
+            /\ UNCHANGED worker_events
+            /\ UNCHANGED worker_state
+            /\ goto(w, "Init")
+    IN
+    /\ worker_pc[w] = "HandleEpollEvent"
+    /\ IF worker_events[w] = {} THEN
+            on_empty
+        ELSE
+            \E ev \in worker_events[w]: doHandleEpollEvent(w, ev)
+
+    /\ UNCHANGED worker_conn
+    /\ UNCHANGED conn_state
+    /\ UNCHANGED epoll_events
+    /\ UNCHANGED eventfd_num
+    /\ UNCHANGED action_queue
     /\ UNCHANGED listen_vars
 
 ------------------------------------------------------
@@ -218,6 +265,7 @@ Next ==
 
     \/ \E w \in Worker:
         \/ WaitOnEpoll(w)
+        \/ HandleEpollEvent(w)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
