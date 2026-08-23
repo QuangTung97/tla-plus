@@ -51,12 +51,20 @@ EpollEvent ==
     IN
     UNION {eventfd}
 
+Task ==
+    LET
+        consume_action == [
+            type: {"ConsumeAction"}
+        ]
+    IN
+    UNION {consume_action}
+
 WorkerState == [
-    has_new_action: BOOLEAN
+    task_queue: Seq(Task)
 ]
 
 init_worker_state == [
-    has_new_action |-> FALSE
+    task_queue |-> <<>>
 ]
 
 WorkerPC == {"Init", "HandleEpollEvent"}
@@ -211,9 +219,14 @@ WaitOnEpoll(w) ==
 
 doHandleEpollEvent(w, ev) ==
     LET
+        task == [
+            type |-> "ConsumeAction"
+        ]
+
         on_eventfd ==
             /\ ev.type = "EventFd"
-            /\ worker_state' = [worker_state EXCEPT ![w].has_new_action = TRUE]
+            /\ worker_state' = [worker_state EXCEPT
+                    ![w].task_queue = Append(@, task)]
     IN
     /\ worker_events' = [worker_events EXCEPT ![w] = @ \ {ev}]
     /\ on_eventfd
