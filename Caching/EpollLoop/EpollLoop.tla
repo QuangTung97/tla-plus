@@ -7,7 +7,7 @@ VARIABLES
     action_queue, conn_state, epoll_events, eventfd_num,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_conn, worker_events,
-    task_queue
+    task_queue, need_dec_eventfd
 
 listen_vars == <<
     listen_pc, ready_conns, listen_local_conn, listen_local_worker
@@ -15,7 +15,7 @@ listen_vars == <<
 
 worker_vars == <<
     worker_pc, worker_conn, worker_events,
-    task_queue
+    task_queue, need_dec_eventfd
 >>
 
 vars == <<
@@ -64,7 +64,7 @@ Task ==
 
 WorkerPC == {
     "WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue",
-    "ConsumeEventFd"
+    "ConsumeEventFd", "ConsumeActionQueue"
 }
 
 ------------------------------------------------------
@@ -84,6 +84,7 @@ TypeOK ==
     /\ worker_conn \in [Worker -> Null(Conn)]
     /\ worker_events \in [Worker -> (SUBSET EpollEvent)]
     /\ task_queue \in [Worker -> Seq(Task)]
+    /\ need_dec_eventfd \in [Worker -> Null(BOOLEAN)]
 
 Init ==
     /\ action_queue = [w \in Worker |-> <<>>]
@@ -100,7 +101,7 @@ Init ==
     /\ worker_conn = [w \in Worker |-> nil]
     /\ worker_events = [w \in Worker |-> {}]
     /\ task_queue = [w \in Worker |-> <<>>]
-
+    /\ need_dec_eventfd = [w \in Worker |-> nil]
 
 ------------------------------------------------------
 
@@ -211,6 +212,7 @@ WaitOnEpoll(w) ==
     /\ UNCHANGED worker_conn
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
+    /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED conn_state
     /\ UNCHANGED listen_vars
 
@@ -225,6 +227,7 @@ doHandleEpollEvent(w, ev) ==
         on_eventfd ==
             /\ ev.type = "EventFd"
             /\ task_queue' = [task_queue EXCEPT ![w] = Append(@, task)]
+            /\ need_dec_eventfd' = [need_dec_eventfd EXCEPT ![w] = TRUE]
     IN
     /\ worker_events' = [worker_events EXCEPT ![w] = @ \ {ev}]
     /\ on_eventfd
@@ -233,9 +236,10 @@ doHandleEpollEvent(w, ev) ==
 HandleEpollEvent(w) ==
     LET
         on_empty ==
+            /\ goto(w, "HandleTaskQueue")
             /\ UNCHANGED worker_events
             /\ UNCHANGED task_queue
-            /\ goto(w, "HandleTaskQueue")
+            /\ UNCHANGED need_dec_eventfd
     IN
     /\ worker_pc[w] = "HandleEpollEvent"
     /\ IF worker_events[w] = {} THEN
@@ -252,17 +256,10 @@ HandleEpollEvent(w) ==
 
 ------------------------------------------------------
 
-\* TODO remove
-handleTaskConsumeActionNormal(w, action) ==
-    LET
-        conn == action.conn
-
-        on_new_conn ==
-            /\ action.type = "NewConn"
-            /\ worker_conn' = [worker_conn EXCEPT ![w] = conn]
-            /\ conn_state' = [conn_state EXCEPT ![conn].worker = w]
-    IN
-    \/ on_new_conn
+normal_handle_unchanged ==
+    /\ UNCHANGED epoll_events
+    /\ UNCHANGED worker_events
+    /\ UNCHANGED listen_vars
 
 handleTaskConsumeAction(w, task) ==
     /\ task.type = "ConsumeAction"
@@ -286,12 +283,26 @@ HandleTaskQueue(w) ==
         ELSE on_normal
 
     /\ UNCHANGED worker_conn
+    /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_state
-    /\ UNCHANGED epoll_events
-    /\ UNCHANGED worker_events
     /\ UNCHANGED eventfd_num
-    /\ UNCHANGED listen_vars
+    /\ normal_handle_unchanged
+
+------------------------------------------------------
+
+ConsumeEventFd(w) ==
+    /\ worker_pc[w] = "ConsumeEventFd"
+
+    /\ goto(w, "ConsumeActionQueue")
+    /\ eventfd_num' = [eventfd_num EXCEPT ![w] = 0]
+    /\ need_dec_eventfd' = [need_dec_eventfd EXCEPT ![w] = FALSE]
+
+    /\ UNCHANGED action_queue
+    /\ UNCHANGED conn_state
+    /\ UNCHANGED worker_conn
+    /\ UNCHANGED task_queue
+    /\ normal_handle_unchanged
 
 ------------------------------------------------------
 
@@ -321,6 +332,7 @@ Next ==
         \/ WaitOnEpoll(w)
         \/ HandleEpollEvent(w)
         \/ HandleTaskQueue(w)
+        \/ ConsumeEventFd(w)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -336,5 +348,12 @@ EpollWaitOnlyWhenTaskQueueEmpty ==
 ConnStateMatchWorkerConn ==
     \A w \in Worker:
         worker_conn[w] # nil => conn_state[worker_conn[w]].worker = w
+
+-----------
+
+NeedDecEventFdInv ==
+    \A w \in Worker:
+        /\ worker_pc[w] = "ConsumeEventFd" => need_dec_eventfd[w]
+        /\ worker_pc[w] = "ConsumeActionQueue" => ~need_dec_eventfd[w]
 
 ====
