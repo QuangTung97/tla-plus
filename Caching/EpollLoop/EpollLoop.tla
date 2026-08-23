@@ -49,7 +49,7 @@ EpollEvent ==
     IN
     UNION {eventfd}
 
-WorkerPC == {"Init"}
+WorkerPC == {"Init", "HandleEpollEvent"}
 
 ------------------------------------------------------
 
@@ -171,6 +171,29 @@ IncEventFd ==
 
 ------------------------------------------------------
 
+goto(w, l) ==
+    worker_pc' = [worker_pc EXCEPT ![w] = l]
+
+handleEpollEvents(w, sub) ==
+    /\ epoll_events' = [epoll_events EXCEPT ![w] = @ \ sub]
+    /\ worker_events' = [worker_events EXCEPT ![w] = sub]
+    /\ goto(w, "HandleEpollEvent")
+
+WaitOnEpoll(w) ==
+    /\ worker_pc[w] = "Init"
+    /\ epoll_events[w] # {}
+    /\ \E sub \in (SUBSET epoll_events[w]):
+        /\ sub # {}
+        /\ handleEpollEvents(w, sub)
+
+    /\ UNCHANGED worker_conn
+    /\ UNCHANGED eventfd_num
+    /\ UNCHANGED action_queue
+    /\ UNCHANGED conn_state
+    /\ UNCHANGED listen_vars
+
+------------------------------------------------------
+
 TerminateCond ==
     /\ listen_pc = "Init"
     /\ ready_conns = {}
@@ -192,6 +215,9 @@ Next ==
     \/ \E w \in Worker:
         \/ PushNewConn(w)
     \/ IncEventFd
+
+    \/ \E w \in Worker:
+        \/ WaitOnEpoll(w)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
