@@ -363,8 +363,8 @@ write_task(c) == [
     conn |-> c
 ]
 
-do_add_write_task(w, c) ==
-    IF conn_writing[c] THEN
+do_add_write_task(w, c, input_write_buf) ==
+    IF conn_writing[c] \/ input_write_buf = <<>> THEN
         /\ UNCHANGED task_queue
         /\ UNCHANGED conn_writing
     ELSE
@@ -389,7 +389,7 @@ onEpollEventEPOLLIN(w, ev) ==
 
 onEpollEventEPOLLOUT(w, ev) ==
     /\ ev.type = "EPOLLOUT"
-    /\ do_add_write_task(w, ev.conn)
+    /\ do_add_write_task(w, ev.conn, conn_write_buf[ev.conn])
     /\ UNCHANGED need_dec_eventfd
 
 -----------
@@ -621,7 +621,7 @@ WorkerConnRead(w) ==
             /\ goto(w, "HandleTaskQueue")
             /\ set_local(w, current_task, nil)
             /\ UNCHANGED conn_state
-            /\ do_add_write_task(w, c)
+            /\ do_add_write_task(w, c, conn_write_buf[c])
 
         on_normal ==
             /\ goto(w, "MoveToReadBuf")
@@ -708,7 +708,7 @@ HandleReadBuf(w) ==
 
         when_yield ==
             /\ add_to_yield_queue(w)
-            /\ do_add_write_task(w, c)
+            /\ do_add_write_task(w, c, conn_write_buf'[c])
 
         clear_read_buf(size) ==
             conn_state' = [conn_state EXCEPT
@@ -718,17 +718,17 @@ HandleReadBuf(w) ==
 
         on_can_write ==
             /\ \E size \in 1..limit_buffer_size: clear_read_buf(size)
-            /\ \/ when_normal
-               \/ when_yield
             /\ \/ write_to_conn(c)
                \/ UNCHANGED conn_write_buf
+            /\ \/ when_normal
+               \/ when_yield
             /\ UNCHANGED conn_write_full
 
         on_write_full ==
             /\ goto(w, "HandleTaskQueue")
             /\ set_local(w, current_task, nil)
             /\ conn_write_full' = [conn_write_full EXCEPT ![c] = TRUE]
-            /\ do_add_write_task(w, c)
+            /\ do_add_write_task(w, c, conn_write_buf[c])
 
             /\ UNCHANGED conn_write_buf
             /\ UNCHANGED conn_state
