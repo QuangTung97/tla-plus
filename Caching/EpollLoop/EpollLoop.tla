@@ -760,7 +760,13 @@ WorkerConnWrite(w) ==
                     ![c] = SubSliceStart(@, n + 1)
                 ]
             /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
-            /\ add_back_task_queue(w)
+
+            /\ goto(w, "HandleTaskQueue")
+            /\ set_local(w, current_task, nil)
+            /\ task_queue' = [task_queue EXCEPT
+                    ![w] = @ \o <<current_task[w], read_task(c)>>
+                ]
+
             /\ UNCHANGED conn_writing
     IN
     /\ worker_pc[w] = "WorkerConnWrite"
@@ -985,12 +991,11 @@ ConnWriteFullAndTaskQueue ==
         LET
             w == conn_state[c].worker
 
-            all_tasks ==
-                UNION {
-                    Range(task_queue[w]),
-                    Range(yield_queue[w]),
-                    current_task_as_set(w)
-                }
+            all_tasks == UNION {
+                Range(task_queue[w]),
+                Range(yield_queue[w]),
+                current_task_as_set(w)
+            }
 
             cond ==
                 /\ read_task(c) \notin all_tasks
@@ -1023,6 +1028,31 @@ ConnWritingInv ==
                 conn_writing[c] <=> write_task(c) \in running_tasks
         IN
             pre_cond => cond
+
+-----------
+
+ReadTaskExistWhenHaveData ==
+    \A c \in Conn:
+        LET
+            state == conn_state[c]
+            w == state.worker
+
+            pre_cond ==
+                /\ state # nil
+                /\ w # nil
+                /\ epoll_events[w] = {}
+                /\ worker_events[w] = {}
+                /\ ~conn_write_full[c]
+                /\ \/ state.read_buf # <<>>
+                   \/ state.send # <<>>
+
+            all_tasks == UNION {
+                Range(task_queue[w]),
+                Range(yield_queue[w]),
+                current_task_as_set(w)
+            }
+        IN
+            pre_cond => read_task(c) \in all_tasks
 
 -----------
 
