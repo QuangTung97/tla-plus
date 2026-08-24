@@ -7,7 +7,7 @@ VARIABLES
     action_queue, conn_state, epoll_events, eventfd_num,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_conn, worker_events,
-    task_queue, need_dec_eventfd
+    task_queue, current_task, need_dec_eventfd
 
 listen_vars == <<
     listen_pc, ready_conns, listen_local_conn, listen_local_worker
@@ -15,7 +15,7 @@ listen_vars == <<
 
 worker_vars == <<
     worker_pc, worker_conn, worker_events,
-    task_queue, need_dec_eventfd
+    task_queue, current_task, need_dec_eventfd
 >>
 
 vars == <<
@@ -84,6 +84,7 @@ TypeOK ==
     /\ worker_conn \in [Worker -> Null(Conn)]
     /\ worker_events \in [Worker -> (SUBSET EpollEvent)]
     /\ task_queue \in [Worker -> Seq(Task)]
+    /\ current_task \in [Worker -> Null(Task)]
     /\ need_dec_eventfd \in [Worker -> Null(BOOLEAN)]
 
 Init ==
@@ -101,6 +102,7 @@ Init ==
     /\ worker_conn = [w \in Worker |-> nil]
     /\ worker_events = [w \in Worker |-> {}]
     /\ task_queue = [w \in Worker |-> <<>>]
+    /\ current_task = [w \in Worker |-> nil]
     /\ need_dec_eventfd = [w \in Worker |-> nil]
 
 ------------------------------------------------------
@@ -194,6 +196,9 @@ IncEventFd ==
 goto(w, l) ==
     worker_pc' = [worker_pc EXCEPT ![w] = l]
 
+set_local(w, var, x) ==
+    var' = [var EXCEPT ![w] = x]
+
 ------------------------------------------------------
 
 waitConsumeEpollEvents(w, sub) ==
@@ -208,6 +213,7 @@ WaitOnEpoll(w) ==
         /\ sub # {}
         /\ waitConsumeEpollEvents(w, sub)
 
+    /\ UNCHANGED current_task
     /\ UNCHANGED task_queue
     /\ UNCHANGED worker_conn
     /\ UNCHANGED eventfd_num
@@ -247,6 +253,7 @@ HandleEpollEvent(w) ==
         ELSE
             \E ev \in worker_events[w]: doHandleEpollEvent(w, ev)
 
+    /\ UNCHANGED current_task
     /\ UNCHANGED worker_conn
     /\ UNCHANGED conn_state
     /\ UNCHANGED epoll_events
@@ -263,18 +270,22 @@ normal_handle_unchanged ==
 
 handleTaskConsumeAction(w, task) ==
     /\ task.type = "ConsumeAction"
-    /\ goto(w, "ConsumeEventFd")
+    /\ IF need_dec_eventfd[w]
+        THEN goto(w, "ConsumeEventFd")
+        ELSE goto(w, "ConsumeActionQueue")
 
 HandleTaskQueue(w) ==
     LET
         on_empty ==
             /\ goto(w, "WaitOnEpoll")
+            /\ UNCHANGED current_task
             /\ UNCHANGED task_queue
 
         task == task_queue[w][1]
 
         on_normal ==
             /\ task_queue' = [task_queue EXCEPT ![w] = Tail(@)]
+            /\ current_task' = [current_task EXCEPT ![w] = task]
             /\ \/ handleTaskConsumeAction(w, task)
     IN
     /\ worker_pc[w] = "HandleTaskQueue"
@@ -298,6 +309,7 @@ ConsumeEventFd(w) ==
     /\ eventfd_num' = [eventfd_num EXCEPT ![w] = 0]
     /\ need_dec_eventfd' = [need_dec_eventfd EXCEPT ![w] = FALSE]
 
+    /\ UNCHANGED current_task
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_state
     /\ UNCHANGED worker_conn
@@ -306,13 +318,58 @@ ConsumeEventFd(w) ==
 
 ------------------------------------------------------
 
+handleNewConnAction(w, action) ==
+    LET
+        conn == action.conn
+    IN
+    /\ action.type = "NewConn"
+    /\ worker_conn' = [worker_conn EXCEPT ![w] = conn]
+    /\ conn_state' = [conn_state EXCEPT ![conn].worker = w]
+
+-----------
+
+ConsumeActionQueue(w) ==
+    LET
+        on_empty ==
+            /\ set_local(w, need_dec_eventfd, nil)
+            /\ UNCHANGED action_queue
+            /\ UNCHANGED task_queue
+            /\ UNCHANGED worker_conn
+            /\ UNCHANGED conn_state
+
+        action == action_queue[w][1]
+
+        on_normal ==
+            /\ action_queue' = [action_queue EXCEPT ![w] = Tail(@)]
+            /\ task_queue' = [task_queue EXCEPT ![w] = Append(@, current_task[w])]
+            /\ \/ handleNewConnAction(w, action)
+            /\ UNCHANGED need_dec_eventfd
+    IN
+    /\ worker_pc[w] = "ConsumeActionQueue"
+    /\ goto(w, "HandleTaskQueue")
+    /\ set_local(w, current_task, nil)
+
+    /\ IF action_queue[w] = <<>>
+        THEN on_empty
+        ELSE on_normal
+
+    /\ UNCHANGED eventfd_num
+    /\ normal_handle_unchanged
+
+------------------------------------------------------
+
 TerminateCond ==
     /\ listen_pc = "Init"
     /\ ready_conns = {}
     /\ \A w \in Worker:
-        /\ worker_pc[w] = "Init"
+        /\ worker_pc[w] = "WaitOnEpoll"
         /\ epoll_events[w] = {}
+        /\ worker_events[w] = {}
         /\ eventfd_num[w] = 0
+        /\ action_queue[w] = <<>>
+        /\ task_queue[w] = <<>>
+        /\ need_dec_eventfd[w] = nil
+        /\ current_task[w] = nil
 
 Terminated ==
     /\ TerminateCond
@@ -333,6 +390,7 @@ Next ==
         \/ HandleEpollEvent(w)
         \/ HandleTaskQueue(w)
         \/ ConsumeEventFd(w)
+        \/ ConsumeActionQueue(w)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -355,5 +413,11 @@ NeedDecEventFdInv ==
     \A w \in Worker:
         /\ worker_pc[w] = "ConsumeEventFd" => need_dec_eventfd[w]
         /\ worker_pc[w] = "ConsumeActionQueue" => ~need_dec_eventfd[w]
+
+-----------
+
+CurrentTaskInv ==
+    \A w \in Worker:
+        /\ worker_pc[w] = "HandleTaskQueue" => current_task[w] = nil
 
 ====
