@@ -72,7 +72,7 @@ ASSUME NonEmptySubSet({11, 12}) = {{11}, {12}, {11, 12}}
 
 Null(S) == S \union {nil}
 
-limit_buffer_size == 2
+limit_buffer_size == 1
 
 Action ==
     LET
@@ -706,6 +706,8 @@ WorkerConnWrite(w) ==
         state == conn_state[c]
 
         data_len == Len(conn_write_buf[c])
+        remain == limit_buffer_size - Len(state.recv)
+        n == Min2(remain, data_len)
 
         on_empty ==
             /\ goto(w, "HandleTaskQueue")
@@ -713,9 +715,6 @@ WorkerConnWrite(w) ==
             /\ UNCHANGED task_queue
             /\ UNCHANGED conn_state
             /\ unchanged_conn_write_vars
-
-        remain == limit_buffer_size - Len(state.recv)
-        n == Min2(remain, data_len)
 
         on_normal ==
             /\ conn_state' = [conn_state EXCEPT
@@ -729,7 +728,7 @@ WorkerConnWrite(w) ==
     IN
     /\ worker_pc[w] = "WorkerConnWrite"
 
-    /\ IF data_len = 0
+    /\ IF n = 0
         THEN on_empty
         ELSE on_normal
 
@@ -912,6 +911,12 @@ ConnWriteFullAndTaskQueue ==
         LET
             w == conn_state[c].worker
 
+            pre_cond ==
+                /\ conn_state[c] # nil
+                /\ w # nil
+                /\ conn_write_full[c]
+                /\ Len(conn_state[c].recv) < limit_buffer_size
+
             all_tasks ==
                 UNION {
                     Range(task_queue[w]),
@@ -925,7 +930,7 @@ ConnWriteFullAndTaskQueue ==
                 /\ read_task(c) \notin all_tasks
                 /\ write_task(c) \in all_tasks
         IN
-            conn_write_full[c] => cond
+            pre_cond => cond
 
 -----------
 
