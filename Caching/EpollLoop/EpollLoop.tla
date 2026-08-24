@@ -705,21 +705,33 @@ WorkerConnWrite(w) ==
         c == current_task[w].conn
         state == conn_state[c]
 
-        remain == limit_send_buf - Len(state.recv)
         data_len == Len(conn_write_buf[c])
+
+        on_empty ==
+            /\ goto(w, "HandleTaskQueue")
+            /\ set_local(w, current_task, nil)
+            /\ UNCHANGED task_queue
+            /\ UNCHANGED conn_state
+            /\ unchanged_conn_write_vars
+
+        remain == limit_send_buf - Len(state.recv)
         n == Min2(remain, data_len)
 
-        append_data == SubSliceEnd(conn_write_buf[c], n)
+        on_normal ==
+            /\ conn_state' = [conn_state EXCEPT
+                    ![c].recv = @ \o SubSliceEnd(conn_write_buf[c], n)
+                ]
+            /\ conn_write_buf' = [conn_write_buf EXCEPT
+                    ![c] = SubSliceStart(@, n + 1)
+                ]
+            /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
+            /\ add_back_task_queue(w)
     IN
     /\ worker_pc[w] = "WorkerConnWrite"
-    /\ conn_state' = [conn_state EXCEPT
-            ![c].recv = @ \o append_data
-        ]
-    /\ conn_write_buf' = [conn_write_buf EXCEPT
-            ![c] = SubSliceStart(@, n + 1)
-        ]
-    /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
-    /\ add_back_task_queue(w)
+
+    /\ IF data_len = 0
+        THEN on_empty
+        ELSE on_normal
 
     /\ UNCHANGED yield_queue
     /\ worker_conn_unchanged
@@ -914,5 +926,11 @@ ConnWriteFullAndTaskQueue ==
                 /\ write_task(c) \in all_tasks
         IN
             conn_write_full[c] => cond
+
+-----------
+
+ConnRecvBufLen ==
+    \A c \in Conn:
+        conn_state[c] # nil => Len(conn_state[c].recv) <= limit_send_buf
 
 ====
