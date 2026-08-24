@@ -72,7 +72,7 @@ ASSUME NonEmptySubSet({11, 12}) = {{11}, {12}, {11, 12}}
 
 Null(S) == S \union {nil}
 
-limit_send_buf == 2
+limit_buffer_size == 2
 
 Action ==
     LET
@@ -529,7 +529,7 @@ handleNewConnAction(w, action) ==
         ]
     IN
     /\ action.type = "NewConn"
-    /\ \E size \in 1..limit_send_buf:
+    /\ \E size \in 1..limit_buffer_size:
             init_conn(size)
     /\ IF conn_state[conn].send = <<>>
         THEN UNCHANGED epoll_events
@@ -692,7 +692,7 @@ HandleReadBuf(w) ==
     IN
     /\ worker_pc[w] = "HandleReadBuf"
 
-    /\ IF Len(conn_write_buf[c]) < limit_send_buf
+    /\ IF Len(conn_write_buf[c]) < limit_buffer_size
         THEN on_can_write
         ELSE on_write_full
 
@@ -714,7 +714,7 @@ WorkerConnWrite(w) ==
             /\ UNCHANGED conn_state
             /\ unchanged_conn_write_vars
 
-        remain == limit_send_buf - Len(state.recv)
+        remain == limit_buffer_size - Len(state.recv)
         n == Min2(remain, data_len)
 
         on_normal ==
@@ -758,7 +758,7 @@ ConnSend(c) ==
         ]
     IN
     /\ conn_state[c] # nil
-    /\ Len(conn_state[c].send) < limit_send_buf
+    /\ Len(conn_state[c].send) < limit_buffer_size
 
     /\ \E v \in Value:
         conn_state' = [conn_state EXCEPT ![c].send = Append(@, v)]
@@ -869,9 +869,9 @@ ConnStateReadInfoInv ==
                 /\ state.worker # nil
 
             cond ==
-                /\ Len(state.send) <= limit_send_buf
-                /\ Len(state.tmp_buf) <= limit_send_buf
-                /\ Len(state.read_buf) <= limit_send_buf
+                /\ Len(state.send) <= limit_buffer_size
+                /\ Len(state.tmp_buf) <= limit_buffer_size
+                /\ Len(state.read_buf) <= limit_buffer_size
                 /\ Len(state.read_buf) <= state.read_size
         IN
             pre_cond => cond
@@ -901,9 +901,9 @@ TaskQueueNotDuplicated ==
 
 ConnWriteBufInv ==
     \A c \in Conn:
-        /\ Len(conn_write_buf[c]) <= limit_send_buf
+        /\ Len(conn_write_buf[c]) <= limit_buffer_size
         /\ conn_write_full[c] =>
-            Len(conn_write_buf[c]) = limit_send_buf
+            Len(conn_write_buf[c]) = limit_buffer_size
 
 -----------
 
@@ -931,6 +931,6 @@ ConnWriteFullAndTaskQueue ==
 
 ConnRecvBufLen ==
     \A c \in Conn:
-        conn_state[c] # nil => Len(conn_state[c].recv) <= limit_send_buf
+        conn_state[c] # nil => Len(conn_state[c].recv) <= limit_buffer_size
 
 ====
