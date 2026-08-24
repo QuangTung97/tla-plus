@@ -5,13 +5,13 @@ CONSTANTS Worker, Conn, Value, nil
 
 VARIABLES
     action_queue, epoll_events, eventfd_num,
-    conn_state, conn_write_buf, conn_write_full,
+    conn_state, conn_write_buf, conn_write_full, conn_writing,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_events,
     task_queue, current_task, yield_queue, need_dec_eventfd
 
 conn_vars == <<
-    conn_state, conn_write_buf, conn_write_full
+    conn_state, conn_write_buf, conn_write_full, conn_writing
 >>
 
 listen_vars == <<
@@ -152,6 +152,7 @@ TypeOK ==
     /\ conn_state \in [Conn -> Null(ConnState)]
     /\ conn_write_buf \in [Conn -> Seq(Value)]
     /\ conn_write_full \in [Conn -> BOOLEAN]
+    /\ conn_writing \in [Conn -> BOOLEAN]
 
     /\ listen_pc \in {"Init", "PushNewConn", "IncEventFd"}
     /\ ready_conns \subseteq Conn
@@ -173,6 +174,7 @@ Init ==
     /\ conn_state = [c \in Conn |-> nil]
     /\ conn_write_buf = [c \in Conn |-> <<>>]
     /\ conn_write_full = [c \in Conn |-> FALSE]
+    /\ conn_writing = [c \in Conn |-> FALSE]
 
     /\ listen_pc = "Init"
     /\ ready_conns = {}
@@ -189,7 +191,7 @@ Init ==
 ------------------------------------------------------
 
 unchanged_conn_write_vars ==
-    UNCHANGED <<conn_write_buf, conn_write_full>>
+    UNCHANGED <<conn_write_buf, conn_write_full, conn_writing>>
 
 NewConn(c) ==
     LET
@@ -365,10 +367,13 @@ write_task(c) == [
 
 onEpollEventEPOLLIN(w, ev) ==
     LET
-        task == read_task(ev.conn)
+        c == ev.conn
+        task == read_task(c)
     IN
     /\ ev.type = "EPOLLIN"
-    /\ add_task_queue(w, task)
+    /\ IF conn_write_full[c]
+        THEN UNCHANGED task_queue
+        ELSE add_task_queue(w, task)
     /\ UNCHANGED need_dec_eventfd
 
 -----------
@@ -675,6 +680,14 @@ write_to_conn(c) ==
     \E v \in Value:
         conn_write_buf' = [conn_write_buf EXCEPT ![c] = Append(@, v)]
 
+do_add_write_task(w, c) ==
+    IF conn_writing[c] THEN
+        /\ UNCHANGED task_queue
+        /\ UNCHANGED conn_writing
+    ELSE
+        /\ add_task_queue(w, write_task(c))
+        /\ conn_writing' = [conn_writing EXCEPT ![c] = TRUE]
+
 HandleReadBuf(w) ==
     LET
         task == current_task[w]
@@ -695,12 +708,13 @@ HandleReadBuf(w) ==
             /\ \/ write_to_conn(c)
                \/ UNCHANGED conn_write_buf
             /\ UNCHANGED conn_write_full
+            /\ UNCHANGED conn_writing
 
         on_write_full ==
             /\ goto(w, "HandleTaskQueue")
             /\ set_local(w, current_task, nil)
             /\ conn_write_full' = [conn_write_full EXCEPT ![c] = TRUE]
-            /\ add_task_queue(w, write_task(c))
+            /\ do_add_write_task(w, c)
 
             /\ UNCHANGED conn_write_buf
             /\ UNCHANGED conn_state
@@ -728,9 +742,11 @@ WorkerConnWrite(w) ==
         on_empty ==
             /\ goto(w, "HandleTaskQueue")
             /\ set_local(w, current_task, nil)
+            /\ conn_writing' = [conn_writing EXCEPT ![c] = FALSE]
+
             /\ UNCHANGED task_queue
             /\ UNCHANGED conn_state
-            /\ unchanged_conn_write_vars
+            /\ UNCHANGED <<conn_write_buf, conn_write_full>>
 
         on_normal ==
             /\ conn_state' = [conn_state EXCEPT
@@ -741,6 +757,7 @@ WorkerConnWrite(w) ==
                 ]
             /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
             /\ add_back_task_queue(w)
+            /\ UNCHANGED conn_writing
     IN
     /\ worker_pc[w] = "WorkerConnWrite"
 
@@ -950,6 +967,13 @@ ConnWriteBufInv ==
 
 -----------
 
+current_task_as_set(w) ==
+    IF current_task[w] = nil
+        THEN {}
+        ELSE {current_task[w]}
+
+-----------
+
 ConnWriteFullAndTaskQueue ==
     \A c \in Conn:
         LET
@@ -959,9 +983,7 @@ ConnWriteFullAndTaskQueue ==
                 UNION {
                     Range(task_queue[w]),
                     Range(yield_queue[w]),
-                    IF current_task[w] = nil
-                        THEN {}
-                        ELSE {current_task[w]}
+                    current_task_as_set(w)
                 }
 
             cond ==
@@ -974,5 +996,30 @@ ConnWriteFullAndTaskQueue ==
 ConnRecvBufLen ==
     \A c \in Conn:
         conn_state[c] # nil => Len(conn_state[c].recv) <= limit_buffer_size
+
+-----------
+
+ConnWritingInv ==
+    \A c \in Conn:
+        LET
+            w == conn_state[c].worker
+
+            pre_cond ==
+                /\ conn_state[c] # nil
+                /\ w # nil
+
+            running_tasks == UNION {
+                Range(task_queue[w]),
+                current_task_as_set(w)
+            }
+
+            cond ==
+                conn_writing[c] <=> write_task(c) \in running_tasks
+        IN
+            pre_cond => cond
+
+-----------
+
+\* TODO must be writing when read is yield
 
 ====
