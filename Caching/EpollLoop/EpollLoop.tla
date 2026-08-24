@@ -4,10 +4,15 @@ EXTENDS TLC, Sequences, Naturals, FiniteSets
 CONSTANTS Worker, Conn, Value, nil
 
 VARIABLES
-    action_queue, conn_state, epoll_events, eventfd_num,
+    action_queue, epoll_events, eventfd_num,
+    conn_state, conn_write_buf, conn_write_full,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_events,
     task_queue, current_task, yield_queue, need_dec_eventfd
+
+conn_vars == <<
+    conn_state, conn_write_buf, conn_write_full
+>>
 
 listen_vars == <<
     listen_pc, ready_conns, listen_local_conn, listen_local_worker
@@ -19,7 +24,8 @@ worker_vars == <<
 >>
 
 vars == <<
-    action_queue, conn_state, epoll_events, eventfd_num,
+    action_queue, epoll_events, eventfd_num,
+    conn_vars,
     listen_vars,
     worker_vars
 >>
@@ -129,9 +135,12 @@ WorkerPC == {
 
 TypeOK ==
     /\ action_queue \in [Worker -> Seq(Action)]
-    /\ conn_state \in [Conn -> Null(ConnState)]
     /\ epoll_events \in [Worker -> (SUBSET EpollEvent)]
     /\ eventfd_num \in [Worker -> Nat]
+
+    /\ conn_state \in [Conn -> Null(ConnState)]
+    /\ conn_write_buf \in [Conn -> Seq(Value)]
+    /\ conn_write_full \in [Conn -> BOOLEAN]
 
     /\ listen_pc \in {"Init", "PushNewConn", "IncEventFd"}
     /\ ready_conns \subseteq Conn
@@ -147,9 +156,12 @@ TypeOK ==
 
 Init ==
     /\ action_queue = [w \in Worker |-> <<>>]
-    /\ conn_state = [c \in Conn |-> nil]
     /\ epoll_events = [w \in Worker |-> {}]
     /\ eventfd_num = [w \in Worker |-> 0]
+
+    /\ conn_state = [c \in Conn |-> nil]
+    /\ conn_write_buf = [c \in Conn |-> <<>>]
+    /\ conn_write_full = [c \in Conn |-> FALSE]
 
     /\ listen_pc = "Init"
     /\ ready_conns = {}
@@ -164,6 +176,9 @@ Init ==
     /\ need_dec_eventfd = [w \in Worker |-> nil]
 
 ------------------------------------------------------
+
+unchanged_conn_write_vars ==
+    UNCHANGED <<conn_write_buf, conn_write_full>>
 
 NewConn(c) ==
     LET
@@ -182,6 +197,7 @@ NewConn(c) ==
     /\ ready_conns' = ready_conns \union {c}
     /\ conn_state' = [conn_state EXCEPT ![c] = state]
 
+    /\ unchanged_conn_write_vars
     /\ UNCHANGED action_queue
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
@@ -199,7 +215,7 @@ AcceptConn(c) ==
 
     /\ UNCHANGED listen_local_worker
     /\ UNCHANGED action_queue
-    /\ UNCHANGED conn_state
+    /\ UNCHANGED conn_vars
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
 
@@ -218,7 +234,7 @@ PushNewConn(w) ==
     /\ action_queue' = [action_queue EXCEPT ![w] = Append(@, event)]
     /\ listen_local_worker' = w
 
-    /\ UNCHANGED conn_state
+    /\ UNCHANGED conn_vars
     /\ UNCHANGED <<ready_conns, listen_local_conn>>
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
@@ -248,7 +264,7 @@ IncEventFd ==
         ELSE UNCHANGED epoll_events
 
     /\ UNCHANGED ready_conns
-    /\ UNCHANGED conn_state
+    /\ UNCHANGED conn_vars
     /\ UNCHANGED action_queue
     /\ UNCHANGED worker_vars
 
@@ -294,7 +310,7 @@ WaitOnEpoll(w) ==
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
     /\ UNCHANGED need_dec_eventfd
-    /\ UNCHANGED conn_state
+    /\ UNCHANGED conn_vars
     /\ UNCHANGED listen_vars
 
 ------------------------------------------------------
@@ -356,7 +372,7 @@ HandleEpollEvent(w) ==
 
     /\ UNCHANGED current_task
     /\ UNCHANGED yield_queue
-    /\ UNCHANGED conn_state
+    /\ UNCHANGED conn_vars
     /\ UNCHANGED epoll_events
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
@@ -414,7 +430,7 @@ HandleTaskQueue(w) ==
     /\ UNCHANGED yield_queue
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED action_queue
-    /\ UNCHANGED conn_state
+    /\ UNCHANGED conn_vars
     /\ UNCHANGED eventfd_num
     /\ normal_handle_unchanged
 
@@ -448,7 +464,7 @@ MoveYieldQueue(w) ==
     /\ UNCHANGED current_task
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED action_queue
-    /\ UNCHANGED conn_state
+    /\ UNCHANGED conn_vars
     /\ UNCHANGED eventfd_num
     /\ normal_handle_unchanged
 
@@ -464,7 +480,7 @@ ConsumeEventFd(w) ==
     /\ UNCHANGED current_task
     /\ UNCHANGED action_queue
     /\ UNCHANGED yield_queue
-    /\ UNCHANGED conn_state
+    /\ UNCHANGED conn_vars
     /\ UNCHANGED task_queue
     /\ normal_handle_unchanged
 
@@ -483,6 +499,7 @@ handleNewConnAction(w, action) ==
     /\ action.type = "NewConn"
     /\ \E size \in 1..limit_send_buf:
             init_conn(size)
+    /\ unchanged_conn_write_vars
 
 -----------
 
@@ -492,7 +509,7 @@ ConsumeActionQueue(w) ==
             /\ set_local(w, need_dec_eventfd, nil)
             /\ UNCHANGED action_queue
             /\ UNCHANGED task_queue
-            /\ UNCHANGED conn_state
+            /\ UNCHANGED conn_vars
 
         action == action_queue[w][1]
 
@@ -550,6 +567,7 @@ WorkerConnRead(w) ==
 
     /\ UNCHANGED task_queue
     /\ UNCHANGED yield_queue
+    /\ unchanged_conn_write_vars
     /\ worker_conn_read_unchanged
 
 ------------------------------------------------------
@@ -590,6 +608,7 @@ MoveToReadBuf(w) ==
         ELSE on_not_full
 
     /\ UNCHANGED yield_queue
+    /\ unchanged_conn_write_vars
     /\ worker_conn_read_unchanged
 
 ------------------------------------------------------
@@ -617,6 +636,9 @@ HandleReadBuf(w) ==
     /\ conn_state' = [conn_state EXCEPT ![c].read_buf = <<>>]
     /\ \/ when_normal
        \/ when_yield
+
+    /\ UNCHANGED conn_write_buf \* TODO
+    /\ UNCHANGED conn_write_full
 
     /\ worker_conn_read_unchanged
 
@@ -654,6 +676,7 @@ ConnSend(c) ==
         THEN add_epoll_event(w, event)
         ELSE UNCHANGED epoll_events
 
+    /\ unchanged_conn_write_vars
     /\ conn_unchanged
 
 ------------------------------------------------------
