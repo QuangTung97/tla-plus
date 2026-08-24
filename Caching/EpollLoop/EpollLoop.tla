@@ -28,6 +28,8 @@ vars == <<
 
 Null(S) == S \union {nil}
 
+limit_send_buf == 3
+
 Action ==
     LET
         new_conn == [
@@ -51,8 +53,13 @@ EpollEvent ==
         eventfd == [
             type: {"EventFd"}
         ]
+
+        epollin == [
+            type: {"EPOLLIN"},
+            conn: Conn
+        ]
     IN
-    UNION {eventfd}
+    UNION {eventfd, epollin}
 
 Task ==
     LET
@@ -358,6 +365,42 @@ ConsumeActionQueue(w) ==
 
 ------------------------------------------------------
 
+add_epoll_event(w, event) ==
+    epoll_events' = [epoll_events EXCEPT ![w] = @ \union {event}]
+
+conn_unchanged ==
+    /\ UNCHANGED listen_vars
+    /\ UNCHANGED action_queue
+    /\ UNCHANGED eventfd_num
+    /\ UNCHANGED worker_vars
+
+ConnSend(c) ==
+    LET
+        w == conn_state[c].worker
+
+        trigger_epoll_cond ==
+            /\ conn_state[c].send = <<>>
+            /\ w # nil
+
+        event == [
+            type |-> "EPOLLIN",
+            conn |-> c
+        ]
+    IN
+    /\ conn_state[c] # nil
+    /\ Len(conn_state[c].send) < limit_send_buf
+
+    /\ \E v \in Value:
+        conn_state' = [conn_state EXCEPT ![c].send = Append(@, v)]
+
+    /\ IF trigger_epoll_cond
+        THEN add_epoll_event(w, event)
+        ELSE UNCHANGED epoll_events
+
+    /\ conn_unchanged
+
+------------------------------------------------------
+
 TerminateCond ==
     /\ listen_pc = "Init"
     /\ ready_conns = {}
@@ -383,6 +426,7 @@ Next ==
         \/ AcceptConn(c)
     \/ \E w \in Worker:
         \/ PushNewConn(w)
+
     \/ IncEventFd
 
     \/ \E w \in Worker:
@@ -391,6 +435,10 @@ Next ==
         \/ HandleTaskQueue(w)
         \/ ConsumeEventFd(w)
         \/ ConsumeActionQueue(w)
+
+    \/ \E c \in Conn:
+        \/ ConnSend(c)
+
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
