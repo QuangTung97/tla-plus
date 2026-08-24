@@ -45,7 +45,8 @@ ConnState == [
     recv: Seq(Value),
     send_closed: BOOLEAN,
     recv_closed: BOOLEAN,
-    worker: Null(Worker)
+    worker: Null(Worker),
+    read_size: Null(Nat)
 ]
 
 EpollEvent ==
@@ -66,8 +67,13 @@ Task ==
         consume_action == [
             type: {"ConsumeAction"}
         ]
+
+        conn_read == [
+            type: {"Read"},
+            conn: Conn
+        ]
     IN
-    UNION {consume_action}
+    UNION {consume_action, conn_read}
 
 WorkerPC == {
     "WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue",
@@ -121,7 +127,8 @@ NewConn(c) ==
             recv |-> <<>>,
             send_closed |-> FALSE,
             recv_closed |-> FALSE,
-            worker |-> nil
+            worker |-> nil,
+            read_size |-> nil
         ]
     IN
     /\ conn_state[c] = nil
@@ -231,19 +238,40 @@ WaitOnEpoll(w) ==
 
 ------------------------------------------------------
 
-doHandleEpollEvent(w, ev) ==
+add_task_queue(w, task) ==
+    task_queue' = [task_queue EXCEPT ![w] = Append(@, task)]
+
+-----------
+
+onEpollEventFd(w, ev) ==
     LET
         task == [
             type |-> "ConsumeAction"
         ]
-
-        on_eventfd ==
-            /\ ev.type = "EventFd"
-            /\ task_queue' = [task_queue EXCEPT ![w] = Append(@, task)]
-            /\ need_dec_eventfd' = [need_dec_eventfd EXCEPT ![w] = TRUE]
     IN
+    /\ ev.type = "EventFd"
+    /\ add_task_queue(w, task)
+    /\ need_dec_eventfd' = [need_dec_eventfd EXCEPT ![w] = TRUE]
+
+-----------
+
+onEpollEventEPOLLIN(w, ev) ==
+    LET
+        task == [
+            type |-> "Read",
+            conn |-> ev.conn
+        ]
+    IN
+    /\ ev.type = "EPOLLIN"
+    /\ add_task_queue(w, task)
+    /\ UNCHANGED need_dec_eventfd
+
+-----------
+
+doHandleEpollEvent(w, ev) ==
     /\ worker_events' = [worker_events EXCEPT ![w] = @ \ {ev}]
-    /\ on_eventfd
+    /\ \/ onEpollEventFd(w, ev)
+       \/ onEpollEventEPOLLIN(w, ev)
     /\ UNCHANGED worker_pc
 
 HandleEpollEvent(w) ==
@@ -348,7 +376,7 @@ ConsumeActionQueue(w) ==
 
         on_normal ==
             /\ action_queue' = [action_queue EXCEPT ![w] = Tail(@)]
-            /\ task_queue' = [task_queue EXCEPT ![w] = Append(@, current_task[w])]
+            /\ add_task_queue(w, current_task[w])
             /\ \/ handleNewConnAction(w, action)
             /\ UNCHANGED need_dec_eventfd
     IN
