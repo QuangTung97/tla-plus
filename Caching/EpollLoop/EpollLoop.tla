@@ -115,7 +115,8 @@ Task ==
 WorkerPC == {
     "WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue",
     "ConsumeEventFd", "ConsumeActionQueue",
-    "WorkerConnRead", "MoveToReadBuf", "HandleReadBuf"
+    "WorkerConnRead", "MoveToReadBuf", "HandleReadBuf",
+    "MoveYieldQueue"
 }
 
 ------------------------------------------------------
@@ -320,7 +321,9 @@ doHandleEpollEvent(w, ev) ==
 HandleEpollEvent(w) ==
     LET
         on_empty ==
-            /\ goto(w, "HandleTaskQueue") \* TODO update
+            /\ IF yield_queue[w] = <<>>
+                THEN goto(w, "HandleTaskQueue")
+                ELSE goto(w, "MoveYieldQueue")
             /\ UNCHANGED worker_events
             /\ UNCHANGED task_queue
             /\ UNCHANGED need_dec_eventfd
@@ -389,6 +392,40 @@ HandleTaskQueue(w) ==
         ELSE on_normal
 
     /\ UNCHANGED yield_queue
+    /\ UNCHANGED need_dec_eventfd
+    /\ UNCHANGED action_queue
+    /\ UNCHANGED conn_state
+    /\ UNCHANGED eventfd_num
+    /\ normal_handle_unchanged
+
+------------------------------------------------------
+
+MoveYieldQueue(w) ==
+    LET
+        on_empty ==
+            /\ goto(w, "HandleTaskQueue")
+            /\ UNCHANGED yield_queue
+            /\ UNCHANGED task_queue
+
+        task == yield_queue[w][1]
+
+        duplicated ==
+            task \in Range(task_queue[w])
+
+        on_normal ==
+            /\ yield_queue' = [yield_queue EXCEPT ![w] = Tail(@)]
+            /\ IF duplicated
+                THEN UNCHANGED task_queue
+                ELSE add_task_queue(w, task)
+            /\ UNCHANGED worker_pc
+    IN
+    /\ worker_pc[w] = "MoveYieldQueue"
+
+    /\ IF yield_queue[w] = <<>>
+        THEN on_empty
+        ELSE on_normal
+
+    /\ UNCHANGED current_task
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_state
@@ -634,6 +671,7 @@ Next ==
         \/ WaitOnEpoll(w)
         \/ HandleEpollEvent(w)
         \/ HandleTaskQueue(w)
+        \/ MoveYieldQueue(w)
         \/ ConsumeEventFd(w)
         \/ ConsumeActionQueue(w)
         \/ WorkerConnRead(w)
