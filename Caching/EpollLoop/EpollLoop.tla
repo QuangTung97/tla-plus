@@ -1,5 +1,5 @@
 ---- MODULE EpollLoop ----
-EXTENDS TLC, Sequences, Naturals
+EXTENDS TLC, Sequences, Naturals, FiniteSets
 
 CONSTANTS Worker, Conn, Value, nil
 
@@ -7,7 +7,7 @@ VARIABLES
     action_queue, conn_state, epoll_events, eventfd_num,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_events,
-    task_queue, current_task, need_dec_eventfd
+    task_queue, current_task, yield_queue, need_dec_eventfd
 
 listen_vars == <<
     listen_pc, ready_conns, listen_local_conn, listen_local_worker
@@ -15,7 +15,7 @@ listen_vars == <<
 
 worker_vars == <<
     worker_pc, worker_events,
-    task_queue, current_task, need_dec_eventfd
+    task_queue, current_task, yield_queue, need_dec_eventfd
 >>
 
 vars == <<
@@ -52,11 +52,15 @@ Min2(a, b) ==
 ASSUME Min2(11, 12) = 11
 ASSUME Min2(13, 12) = 12
 
+-----------
+
+Range(f) == {f[x]: x \in DOMAIN f}
+
 ------------------------------------------------------
 
 Null(S) == S \union {nil}
 
-limit_send_buf == 3
+limit_send_buf == 2
 
 Action ==
     LET
@@ -131,6 +135,7 @@ TypeOK ==
     /\ worker_events \in [Worker -> (SUBSET EpollEvent)]
     /\ task_queue \in [Worker -> Seq(Task)]
     /\ current_task \in [Worker -> Null(Task)]
+    /\ yield_queue \in [Worker -> Seq(Task)]
     /\ need_dec_eventfd \in [Worker -> Null(BOOLEAN)]
 
 Init ==
@@ -148,6 +153,7 @@ Init ==
     /\ worker_events = [w \in Worker |-> {}]
     /\ task_queue = [w \in Worker |-> <<>>]
     /\ current_task = [w \in Worker |-> nil]
+    /\ yield_queue = [w \in Worker |-> <<>>]
     /\ need_dec_eventfd = [w \in Worker |-> nil]
 
 ------------------------------------------------------
@@ -263,6 +269,7 @@ WaitOnEpoll(w) ==
 
     /\ UNCHANGED current_task
     /\ UNCHANGED task_queue
+    /\ UNCHANGED yield_queue
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
     /\ UNCHANGED need_dec_eventfd
@@ -273,6 +280,9 @@ WaitOnEpoll(w) ==
 
 add_task_queue(w, task) ==
     task_queue' = [task_queue EXCEPT ![w] = Append(@, task)]
+
+add_yield_queue(w, task) ==
+    yield_queue' = [yield_queue EXCEPT ![w] = Append(@, task)]
 
 -----------
 
@@ -310,7 +320,7 @@ doHandleEpollEvent(w, ev) ==
 HandleEpollEvent(w) ==
     LET
         on_empty ==
-            /\ goto(w, "HandleTaskQueue")
+            /\ goto(w, "HandleTaskQueue") \* TODO update
             /\ UNCHANGED worker_events
             /\ UNCHANGED task_queue
             /\ UNCHANGED need_dec_eventfd
@@ -322,6 +332,7 @@ HandleEpollEvent(w) ==
             \E ev \in worker_events[w]: doHandleEpollEvent(w, ev)
 
     /\ UNCHANGED current_task
+    /\ UNCHANGED yield_queue
     /\ UNCHANGED conn_state
     /\ UNCHANGED epoll_events
     /\ UNCHANGED eventfd_num
@@ -377,6 +388,7 @@ HandleTaskQueue(w) ==
         THEN on_empty
         ELSE on_normal
 
+    /\ UNCHANGED yield_queue
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_state
@@ -394,6 +406,7 @@ ConsumeEventFd(w) ==
 
     /\ UNCHANGED current_task
     /\ UNCHANGED action_queue
+    /\ UNCHANGED yield_queue
     /\ UNCHANGED conn_state
     /\ UNCHANGED task_queue
     /\ normal_handle_unchanged
@@ -441,6 +454,7 @@ ConsumeActionQueue(w) ==
         ELSE on_normal
 
     /\ UNCHANGED eventfd_num
+    /\ UNCHANGED yield_queue
     /\ normal_handle_unchanged
 
 ------------------------------------------------------
@@ -478,6 +492,7 @@ WorkerConnRead(w) ==
         ELSE on_normal
 
     /\ UNCHANGED task_queue
+    /\ UNCHANGED yield_queue
     /\ worker_conn_read_unchanged
 
 ------------------------------------------------------
@@ -517,19 +532,34 @@ MoveToReadBuf(w) ==
         THEN on_full
         ELSE on_not_full
 
+    /\ UNCHANGED yield_queue
     /\ worker_conn_read_unchanged
 
 ------------------------------------------------------
+
+add_to_yield_queue(w) ==
+    /\ goto(w, "HandleTaskQueue")
+    /\ set_local(w, current_task, nil)
+    /\ add_yield_queue(w, current_task[w])
 
 HandleReadBuf(w) ==
     LET
         task == current_task[w]
         c == task.conn
+
+        when_normal ==
+            /\ add_back_task_queue(w)
+            /\ UNCHANGED yield_queue
+
+        when_yield ==
+            /\ add_to_yield_queue(w)
+            /\ UNCHANGED task_queue
     IN
     /\ worker_pc[w] = "HandleReadBuf"
 
     /\ conn_state' = [conn_state EXCEPT ![c].read_buf = <<>>]
-    /\ add_back_task_queue(w)
+    /\ \/ when_normal
+       \/ when_yield
 
     /\ worker_conn_read_unchanged
 
@@ -581,6 +611,7 @@ TerminateCond ==
         /\ eventfd_num[w] = 0
         /\ action_queue[w] = <<>>
         /\ task_queue[w] = <<>>
+        /\ yield_queue[w] = <<>>
         /\ need_dec_eventfd[w] = nil
         /\ current_task[w] = nil
 
@@ -678,5 +709,11 @@ WorkerConnStateInv ==
             /\ Len(state.read_buf) = state.read_size
         /\ worker_pc[w] = "MoveToReadBuf" =>
             /\ state.tmp_buf # <<>>
+
+-----------
+
+TaskQueueNotDuplicated ==
+    \A w \in Worker:
+        Cardinality(Range(task_queue[w])) = Len(task_queue[w])
 
 ====
