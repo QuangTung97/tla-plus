@@ -449,9 +449,13 @@ handleTaskReadConn(w, task) ==
     LET
         c == task.conn
         state == conn_state[c]
+
+        can_read ==
+            /\ Len(state.tmp_buf) = 0
+            /\ Len(state.read_buf) = 0
     IN
     /\ task.type = "Read"
-    /\ IF Len(state.tmp_buf) = 0
+    /\ IF can_read
         THEN goto(w, "WorkerConnRead")
         ELSE goto(w, "MoveToReadBuf")
 
@@ -752,6 +756,9 @@ WorkerConnWrite(w) ==
             /\ UNCHANGED conn_state
             /\ UNCHANGED <<conn_write_buf, conn_write_full>>
 
+        from_full ==
+            conn_write_full[c]
+
         on_normal ==
             /\ conn_state' = [conn_state EXCEPT
                     ![c].recv = @ \o SubSliceEnd(conn_write_buf[c], n)
@@ -759,13 +766,20 @@ WorkerConnWrite(w) ==
             /\ conn_write_buf' = [conn_write_buf EXCEPT
                     ![c] = SubSliceStart(@, n + 1)
                 ]
-            /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
 
             /\ goto(w, "HandleTaskQueue")
             /\ set_local(w, current_task, nil)
-            /\ task_queue' = [task_queue EXCEPT
-                    ![w] = @ \o <<current_task[w], read_task(c)>>
-                ]
+
+            /\ IF from_full THEN
+                    /\ task_queue' = [task_queue EXCEPT
+                            ![w] = @ \o <<current_task[w], read_task(c)>>
+                        ]
+                    /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
+                ELSE
+                    /\ task_queue' = [task_queue EXCEPT
+                            ![w] = Append(@, current_task[w])
+                        ]
+                    /\ UNCHANGED conn_write_full
 
             /\ UNCHANGED conn_writing
     IN
@@ -958,10 +972,9 @@ WorkerConnStateInv ==
         IN
         /\ worker_pc[w] = "WorkerConnRead" =>
             /\ state.tmp_buf = <<>>
+            /\ state.read_buf = <<>>
         /\ worker_pc[w] = "HandleReadBuf" =>
             /\ Len(state.read_buf) = state.read_size
-        /\ worker_pc[w] = "MoveToReadBuf" =>
-            /\ state.tmp_buf # <<>>
 
 -----------
 
