@@ -56,6 +56,12 @@ ASSUME Min2(13, 12) = 12
 
 Range(f) == {f[x]: x \in DOMAIN f}
 
+-----------
+
+NonEmptySubSet(S) == (SUBSET S) \ {{}}
+
+ASSUME NonEmptySubSet({11, 12}) = {{11}, {12}, {11, 12}}
+
 ------------------------------------------------------
 
 Null(S) == S \union {nil}
@@ -259,14 +265,28 @@ set_local(w, var, x) ==
 waitConsumeEpollEvents(w, sub) ==
     /\ epoll_events' = [epoll_events EXCEPT ![w] = @ \ sub]
     /\ worker_events' = [worker_events EXCEPT ![w] = sub]
-    /\ goto(w, "HandleEpollEvent")
 
 WaitOnEpoll(w) ==
+    LET
+        wait_cond ==
+            /\ epoll_events[w] = {}
+            /\ yield_queue[w] = <<>>
+
+        when_empty ==
+            /\ UNCHANGED epoll_events
+            /\ UNCHANGED worker_events
+
+        when_non_empty ==
+            \E sub \in NonEmptySubSet(epoll_events[w]):
+                waitConsumeEpollEvents(w, sub)
+    IN
     /\ worker_pc[w] = "WaitOnEpoll"
-    /\ epoll_events[w] # {}
-    /\ \E sub \in (SUBSET epoll_events[w]):
-        /\ sub # {}
-        /\ waitConsumeEpollEvents(w, sub)
+    /\ ~wait_cond
+
+    /\ goto(w, "HandleEpollEvent")
+    /\ IF epoll_events[w] = {}
+        THEN when_empty
+        ELSE when_non_empty
 
     /\ UNCHANGED current_task
     /\ UNCHANGED task_queue
