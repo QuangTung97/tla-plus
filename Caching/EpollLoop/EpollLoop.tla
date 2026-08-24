@@ -108,8 +108,13 @@ EpollEvent ==
             type: {"EPOLLIN"},
             conn: Conn
         ]
+
+        epollout == [
+            type: {"EPOLLOUT"},
+            conn: Conn
+        ]
     IN
-    UNION {eventfd, epollin}
+    UNION {eventfd, epollin, epollout}
 
 Task ==
     LET
@@ -368,10 +373,21 @@ onEpollEventEPOLLIN(w, ev) ==
 
 -----------
 
+onEpollEventEPOLLOUT(w, ev) ==
+    LET
+        task == write_task(ev.conn)
+    IN
+    /\ ev.type = "EPOLLOUT"
+    /\ add_task_queue(w, task)
+    /\ UNCHANGED need_dec_eventfd
+
+-----------
+
 doHandleEpollEvent(w, ev) ==
     /\ worker_events' = [worker_events EXCEPT ![w] = @ \ {ev}]
     /\ \/ onEpollEventFd(w, ev)
        \/ onEpollEventEPOLLIN(w, ev)
+       \/ onEpollEventEPOLLOUT(w, ev)
     /\ UNCHANGED worker_pc
 
 HandleEpollEvent(w) ==
@@ -771,6 +787,33 @@ ConnSend(c) ==
 
 ------------------------------------------------------
 
+ConnRecv(c) ==
+    LET
+        w == conn_state[c].worker
+
+        trigger_epoll_cond ==
+            /\ Len(conn_state[c].recv) = limit_buffer_size
+            /\ w # nil
+
+        event == [
+            type |-> "EPOLLOUT",
+            conn |-> c
+        ]
+    IN
+    /\ conn_state[c] # nil
+    /\ Len(conn_state[c].recv) > 0
+
+    /\ conn_state' = [conn_state EXCEPT ![c].recv = Tail(@)]
+
+    /\ IF trigger_epoll_cond
+        THEN add_epoll_event(w, event)
+        ELSE UNCHANGED epoll_events
+
+    /\ unchanged_conn_write_vars
+    /\ conn_unchanged
+
+------------------------------------------------------
+
 TerminateCond ==
     /\ listen_pc = "Init"
     /\ ready_conns = {}
@@ -822,6 +865,7 @@ Next ==
 
     \/ \E c \in Conn:
         \/ ConnSend(c)
+        \/ ConnRecv(c)
 
     \/ Terminated
 
@@ -911,12 +955,6 @@ ConnWriteFullAndTaskQueue ==
         LET
             w == conn_state[c].worker
 
-            pre_cond ==
-                /\ conn_state[c] # nil
-                /\ w # nil
-                /\ conn_write_full[c]
-                /\ Len(conn_state[c].recv) < limit_buffer_size
-
             all_tasks ==
                 UNION {
                     Range(task_queue[w]),
@@ -928,9 +966,8 @@ ConnWriteFullAndTaskQueue ==
 
             cond ==
                 /\ read_task(c) \notin all_tasks
-                /\ write_task(c) \in all_tasks
         IN
-            pre_cond => cond
+            conn_write_full[c] => cond
 
 -----------
 
