@@ -457,16 +457,26 @@ WorkerConnRead(w) ==
     LET
         c == current_task[w].conn
         data == conn_state[c].send
+
+        on_empty ==
+            /\ goto(w, "HandleTaskQueue")
+            /\ set_local(w, current_task, nil)
+            /\ UNCHANGED conn_state
+
+        on_normal ==
+            /\ goto(w, "MoveToReadBuf")
+            /\ conn_state' = [conn_state EXCEPT
+                    ![c].send = <<>>,
+                    ![c].tmp_buf = data
+                ]
+            /\ UNCHANGED current_task
     IN
     /\ worker_pc[w] = "WorkerConnRead"
-    /\ goto(w, "MoveToReadBuf")
 
-    /\ conn_state' = [conn_state EXCEPT
-            ![c].send = <<>>,
-            ![c].tmp_buf = data
-        ]
+    /\ IF data = <<>>
+        THEN on_empty
+        ELSE on_normal
 
-    /\ UNCHANGED current_task
     /\ UNCHANGED task_queue
     /\ worker_conn_read_unchanged
 
@@ -656,24 +666,17 @@ ConnStateReadInfoInv ==
 
 -----------
 
-WorkerConnReadWhenTmpEmpty ==
+WorkerConnStateInv ==
     \A w \in Worker:
         LET
             c == current_task[w].conn
             state == conn_state[c]
         IN
-        worker_pc[w] = "WorkerConnRead" => state.tmp_buf = <<>>
-
------------
-
-HandleReadBufWhenSizeFull ==
-    \A w \in Worker:
-        LET
-            c == current_task[w].conn
-            state == conn_state[c]
-            cond ==
-                Len(state.read_buf) = state.read_size
-        IN
-        worker_pc[w] = "HandleReadBuf" => cond
+        /\ worker_pc[w] = "WorkerConnRead" =>
+            /\ state.tmp_buf = <<>>
+        /\ worker_pc[w] = "HandleReadBuf" =>
+            /\ Len(state.read_buf) = state.read_size
+        /\ worker_pc[w] = "MoveToReadBuf" =>
+            /\ state.tmp_buf # <<>>
 
 ====
