@@ -321,6 +321,9 @@ add_task_queue(w, task) ==
 add_yield_queue(w, task) ==
     yield_queue' = [yield_queue EXCEPT ![w] = Append(@, task)]
 
+add_epoll_event(w, event) ==
+    epoll_events' = [epoll_events EXCEPT ![w] = @ \union {event}]
+
 -----------
 
 onEpollEventFd(w, ev) ==
@@ -495,10 +498,18 @@ handleNewConnAction(w, action) ==
                 ![conn].worker = w,
                 ![conn].read_size = size
             ]
+
+        event == [
+            type |-> "EPOLLIN",
+            conn |-> conn
+        ]
     IN
     /\ action.type = "NewConn"
     /\ \E size \in 1..limit_send_buf:
             init_conn(size)
+    /\ IF conn_state[conn].send = <<>>
+        THEN UNCHANGED epoll_events
+        ELSE add_epoll_event(w, event)
     /\ unchanged_conn_write_vars
 
 -----------
@@ -510,6 +521,7 @@ ConsumeActionQueue(w) ==
             /\ UNCHANGED action_queue
             /\ UNCHANGED task_queue
             /\ UNCHANGED conn_vars
+            /\ UNCHANGED epoll_events
 
         action == action_queue[w][1]
 
@@ -529,7 +541,8 @@ ConsumeActionQueue(w) ==
 
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED yield_queue
-    /\ normal_handle_unchanged
+    /\ UNCHANGED worker_events
+    /\ UNCHANGED listen_vars
 
 ------------------------------------------------------
 
@@ -618,6 +631,10 @@ add_to_yield_queue(w) ==
     /\ set_local(w, current_task, nil)
     /\ add_yield_queue(w, current_task[w])
 
+write_to_conn(c) ==
+    \E v \in Value:
+        conn_write_buf' = [conn_write_buf EXCEPT ![c] = Append(@, v)]
+
 HandleReadBuf(w) ==
     LET
         task == current_task[w]
@@ -630,22 +647,32 @@ HandleReadBuf(w) ==
         when_yield ==
             /\ add_to_yield_queue(w)
             /\ UNCHANGED task_queue
+
+        on_can_write ==
+            /\ conn_state' = [conn_state EXCEPT ![c].read_buf = <<>>]
+            /\ \/ when_normal
+               \/ when_yield
+            /\ \/ write_to_conn(c)
+               \/ UNCHANGED conn_write_buf
+            /\ UNCHANGED conn_write_full
+
+        on_write_full ==
+            /\ goto(w, "HandleTaskQueue")
+            /\ set_local(w, current_task, nil)
+            /\ UNCHANGED conn_state
+            /\ unchanged_conn_write_vars
+            /\ UNCHANGED task_queue
+            /\ UNCHANGED yield_queue
     IN
     /\ worker_pc[w] = "HandleReadBuf"
 
-    /\ conn_state' = [conn_state EXCEPT ![c].read_buf = <<>>]
-    /\ \/ when_normal
-       \/ when_yield
-
-    /\ UNCHANGED conn_write_buf \* TODO
-    /\ UNCHANGED conn_write_full
+    /\ IF Len(conn_write_buf[c]) < limit_send_buf
+        THEN on_can_write
+        ELSE on_write_full
 
     /\ worker_conn_read_unchanged
 
 ------------------------------------------------------
-
-add_epoll_event(w, event) ==
-    epoll_events' = [epoll_events EXCEPT ![w] = @ \union {event}]
 
 conn_unchanged ==
     /\ UNCHANGED listen_vars
@@ -694,6 +721,14 @@ TerminateCond ==
         /\ yield_queue[w] = <<>>
         /\ need_dec_eventfd[w] = nil
         /\ current_task[w] = nil
+    /\ \A c \in Conn:
+        conn_state[c] # nil =>
+            /\ conn_state[c].send = <<>>
+            /\ conn_state[c].recv = <<>>
+            /\ conn_state[c].read_buf = <<>>
+            /\ conn_state[c].tmp_buf = <<>>
+            /\ conn_write_buf[c] = <<>>
+            /\ conn_write_full[c] = FALSE
 
 Terminated ==
     /\ TerminateCond
@@ -796,5 +831,13 @@ WorkerConnStateInv ==
 TaskQueueNotDuplicated ==
     \A w \in Worker:
         Cardinality(Range(task_queue[w])) = Len(task_queue[w])
+
+-----------
+
+ConnWriteBufInv ==
+    \A c \in Conn:
+        /\ Len(conn_write_buf[c]) <= limit_send_buf
+        /\ conn_write_full[c] =>
+            Len(conn_write_buf[c]) = limit_send_buf
 
 ====
