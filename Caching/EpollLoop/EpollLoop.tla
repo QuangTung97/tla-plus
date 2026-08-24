@@ -3,12 +3,10 @@ EXTENDS TLC, Sequences, Naturals
 
 CONSTANTS Worker, Conn, Value, nil
 
-\* TODO remove worker_conn
-
 VARIABLES
     action_queue, conn_state, epoll_events, eventfd_num,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
-    worker_pc, worker_conn, worker_events,
+    worker_pc, worker_events,
     task_queue, current_task, need_dec_eventfd
 
 listen_vars == <<
@@ -16,7 +14,7 @@ listen_vars == <<
 >>
 
 worker_vars == <<
-    worker_pc, worker_conn, worker_events,
+    worker_pc, worker_events,
     task_queue, current_task, need_dec_eventfd
 >>
 
@@ -113,7 +111,7 @@ Task ==
 WorkerPC == {
     "WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue",
     "ConsumeEventFd", "ConsumeActionQueue",
-    "WorkerConnRead", "MoveToReadBuf"
+    "WorkerConnRead", "MoveToReadBuf", "HandleReadBuf"
 }
 
 ------------------------------------------------------
@@ -130,7 +128,6 @@ TypeOK ==
     /\ listen_local_worker \in Null(Worker)
 
     /\ worker_pc \in [Worker -> WorkerPC]
-    /\ worker_conn \in [Worker -> Null(Conn)]
     /\ worker_events \in [Worker -> (SUBSET EpollEvent)]
     /\ task_queue \in [Worker -> Seq(Task)]
     /\ current_task \in [Worker -> Null(Task)]
@@ -148,7 +145,6 @@ Init ==
     /\ listen_local_worker = nil
 
     /\ worker_pc = [w \in Worker |-> "WaitOnEpoll"]
-    /\ worker_conn = [w \in Worker |-> nil]
     /\ worker_events = [w \in Worker |-> {}]
     /\ task_queue = [w \in Worker |-> <<>>]
     /\ current_task = [w \in Worker |-> nil]
@@ -267,7 +263,6 @@ WaitOnEpoll(w) ==
 
     /\ UNCHANGED current_task
     /\ UNCHANGED task_queue
-    /\ UNCHANGED worker_conn
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
     /\ UNCHANGED need_dec_eventfd
@@ -327,7 +322,6 @@ HandleEpollEvent(w) ==
             \E ev \in worker_events[w]: doHandleEpollEvent(w, ev)
 
     /\ UNCHANGED current_task
-    /\ UNCHANGED worker_conn
     /\ UNCHANGED conn_state
     /\ UNCHANGED epoll_events
     /\ UNCHANGED eventfd_num
@@ -377,7 +371,6 @@ HandleTaskQueue(w) ==
         THEN on_empty
         ELSE on_normal
 
-    /\ UNCHANGED worker_conn
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_state
@@ -396,7 +389,6 @@ ConsumeEventFd(w) ==
     /\ UNCHANGED current_task
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_state
-    /\ UNCHANGED worker_conn
     /\ UNCHANGED task_queue
     /\ normal_handle_unchanged
 
@@ -407,7 +399,6 @@ handleNewConnAction(w, action) ==
         conn == action.conn
     IN
     /\ action.type = "NewConn"
-    /\ worker_conn' = [worker_conn EXCEPT ![w] = conn]
     /\ conn_state' = [conn_state EXCEPT
             ![conn].worker = w,
             ![conn].read_size = 1
@@ -421,7 +412,6 @@ ConsumeActionQueue(w) ==
             /\ set_local(w, need_dec_eventfd, nil)
             /\ UNCHANGED action_queue
             /\ UNCHANGED task_queue
-            /\ UNCHANGED worker_conn
             /\ UNCHANGED conn_state
 
         action == action_queue[w][1]
@@ -446,7 +436,6 @@ ConsumeActionQueue(w) ==
 ------------------------------------------------------
 
 worker_conn_read_unchanged ==
-    /\ UNCHANGED worker_conn
     /\ UNCHANGED action_queue
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED eventfd_num
@@ -595,12 +584,6 @@ EpollWaitOnlyWhenTaskQueueEmpty ==
 
 -----------
 
-ConnStateMatchWorkerConn ==
-    \A w \in Worker:
-        worker_conn[w] # nil => conn_state[worker_conn[w]].worker = w
-
------------
-
 NeedDecEventFdInv ==
     \A w \in Worker:
         /\ worker_pc[w] = "ConsumeEventFd" => need_dec_eventfd[w]
@@ -640,5 +623,27 @@ ConnStateReadInfoInv ==
                 /\ Len(state.read_buf) <= state.read_size
         IN
             pre_cond => cond
+
+-----------
+
+WorkerConnReadWhenTmpEmpty ==
+    \A w \in Worker:
+        LET
+            c == current_task[w].conn
+            state == conn_state[c]
+        IN
+        worker_pc[w] = "WorkerConnRead" => state.tmp_buf = <<>>
+
+-----------
+
+HandleReadBufWhenSizeFull ==
+    \A w \in Worker:
+        LET
+            c == current_task[w].conn
+            state == conn_state[c]
+            cond ==
+                Len(state.read_buf) = state.read_size
+        IN
+        worker_pc[w] = "HandleReadBuf" => cond
 
 ====
