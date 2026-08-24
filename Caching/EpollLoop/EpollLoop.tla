@@ -338,12 +338,23 @@ onEpollEventFd(w, ev) ==
 
 -----------
 
+read_task(c) == [
+    type |-> "Read",
+    conn |-> c
+]
+
+-----------
+
+write_task(c) == [
+    type |-> "Write",
+    conn |-> c
+]
+
+-----------
+
 onEpollEventEPOLLIN(w, ev) ==
     LET
-        task == [
-            type |-> "Read",
-            conn |-> ev.conn
-        ]
+        task == read_task(ev.conn)
     IN
     /\ ev.type = "EPOLLIN"
     /\ add_task_queue(w, task)
@@ -659,8 +670,10 @@ HandleReadBuf(w) ==
         on_write_full ==
             /\ goto(w, "HandleTaskQueue")
             /\ set_local(w, current_task, nil)
+            /\ conn_write_full' = [conn_write_full EXCEPT ![c] = TRUE]
+
+            /\ UNCHANGED conn_write_buf
             /\ UNCHANGED conn_state
-            /\ unchanged_conn_write_vars
             /\ UNCHANGED task_queue
             /\ UNCHANGED yield_queue
     IN
@@ -839,5 +852,30 @@ ConnWriteBufInv ==
         /\ Len(conn_write_buf[c]) <= limit_send_buf
         /\ conn_write_full[c] =>
             Len(conn_write_buf[c]) = limit_send_buf
+
+-----------
+
+ConnWriteFullAndTaskQueue ==
+    \A c \in Conn:
+        LET
+            w == conn_state[c].worker
+
+            all_tasks ==
+                UNION {
+                    Range(task_queue[w]),
+                    Range(yield_queue[w]),
+                    IF current_task[w] = nil
+                        THEN {}
+                        ELSE {current_task[w]}
+                }
+
+            pre_cond ==
+                conn_write_full[c]
+
+            cond ==
+                /\ read_task(c) \notin all_tasks
+                /\ write_task(c) \in all_tasks
+        IN
+            pre_cond => cond
 
 ====
