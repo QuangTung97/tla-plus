@@ -191,7 +191,7 @@ Init ==
 ------------------------------------------------------
 
 unchanged_conn_write_vars ==
-    UNCHANGED <<conn_write_buf, conn_write_full, conn_writing>>
+    UNCHANGED <<conn_write_buf, conn_write_full>>
 
 NewConn(c) ==
     LET
@@ -210,6 +210,7 @@ NewConn(c) ==
     /\ ready_conns' = ready_conns \union {c}
     /\ conn_state' = [conn_state EXCEPT ![c] = state]
 
+    /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ UNCHANGED action_queue
     /\ UNCHANGED worker_vars
@@ -348,6 +349,7 @@ onEpollEventFd(w, ev) ==
     /\ ev.type = "EventFd"
     /\ add_task_queue(w, task)
     /\ need_dec_eventfd' = [need_dec_eventfd EXCEPT ![w] = TRUE]
+    /\ UNCHANGED conn_writing
 
 -----------
 
@@ -363,6 +365,14 @@ write_task(c) == [
     conn |-> c
 ]
 
+do_add_write_task(w, c) ==
+    IF conn_writing[c] THEN
+        /\ UNCHANGED task_queue
+        /\ UNCHANGED conn_writing
+    ELSE
+        /\ add_task_queue(w, write_task(c))
+        /\ conn_writing' = [conn_writing EXCEPT ![c] = TRUE]
+
 -----------
 
 onEpollEventEPOLLIN(w, ev) ==
@@ -375,15 +385,13 @@ onEpollEventEPOLLIN(w, ev) ==
         THEN UNCHANGED task_queue
         ELSE add_task_queue(w, task)
     /\ UNCHANGED need_dec_eventfd
+    /\ UNCHANGED conn_writing
 
 -----------
 
 onEpollEventEPOLLOUT(w, ev) ==
-    LET
-        task == write_task(ev.conn)
-    IN
     /\ ev.type = "EPOLLOUT"
-    /\ add_task_queue(w, task)
+    /\ do_add_write_task(w, ev.conn)
     /\ UNCHANGED need_dec_eventfd
 
 -----------
@@ -401,6 +409,7 @@ HandleEpollEvent(w) ==
             /\ IF yield_queue[w] = <<>>
                 THEN goto(w, "HandleTaskQueue")
                 ELSE goto(w, "MoveYieldQueue")
+            /\ UNCHANGED conn_writing
             /\ UNCHANGED worker_events
             /\ UNCHANGED task_queue
             /\ UNCHANGED need_dec_eventfd
@@ -411,9 +420,9 @@ HandleEpollEvent(w) ==
         ELSE
             \E ev \in worker_events[w]: doHandleEpollEvent(w, ev)
 
+    /\ UNCHANGED <<conn_state, conn_write_buf, conn_write_full>>
     /\ UNCHANGED current_task
     /\ UNCHANGED yield_queue
-    /\ UNCHANGED conn_vars
     /\ UNCHANGED epoll_events
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
@@ -555,6 +564,7 @@ handleNewConnAction(w, action) ==
     /\ IF conn_state[conn].send = <<>>
         THEN UNCHANGED epoll_events
         ELSE add_epoll_event(w, event)
+    /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
 
 -----------
@@ -625,6 +635,7 @@ WorkerConnRead(w) ==
 
     /\ UNCHANGED task_queue
     /\ UNCHANGED yield_queue
+    /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ worker_conn_unchanged
 
@@ -666,6 +677,7 @@ MoveToReadBuf(w) ==
         ELSE on_not_full
 
     /\ UNCHANGED yield_queue
+    /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ worker_conn_unchanged
 
@@ -679,14 +691,6 @@ add_to_yield_queue(w) ==
 write_to_conn(c) ==
     \E v \in Value:
         conn_write_buf' = [conn_write_buf EXCEPT ![c] = Append(@, v)]
-
-do_add_write_task(w, c) ==
-    IF conn_writing[c] THEN
-        /\ UNCHANGED task_queue
-        /\ UNCHANGED conn_writing
-    ELSE
-        /\ add_task_queue(w, write_task(c))
-        /\ conn_writing' = [conn_writing EXCEPT ![c] = TRUE]
 
 HandleReadBuf(w) ==
     LET
@@ -799,6 +803,7 @@ ConnSend(c) ==
         THEN add_epoll_event(w, event)
         ELSE UNCHANGED epoll_events
 
+    /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ conn_unchanged
 
@@ -826,6 +831,7 @@ ConnRecv(c) ==
         THEN add_epoll_event(w, event)
         ELSE UNCHANGED epoll_events
 
+    /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ conn_unchanged
 
