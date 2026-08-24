@@ -544,6 +544,10 @@ ConsumeEventFd(w) ==
     /\ normal_handle_unchanged
 
 ------------------------------------------------------
+epollin_event(c) == [
+    type |-> "EPOLLIN",
+    conn |-> c
+]
 
 handleNewConnAction(w, action) ==
     LET
@@ -555,10 +559,7 @@ handleNewConnAction(w, action) ==
                 ![conn].read_size = size
             ]
 
-        event == [
-            type |-> "EPOLLIN",
-            conn |-> conn
-        ]
+        event == epollin_event(conn)
     IN
     /\ action.type = "NewConn"
     /\ \E size \in 1..limit_buffer_size:
@@ -620,6 +621,7 @@ WorkerConnRead(w) ==
             /\ goto(w, "HandleTaskQueue")
             /\ set_local(w, current_task, nil)
             /\ UNCHANGED conn_state
+            /\ do_add_write_task(w, c)
 
         on_normal ==
             /\ goto(w, "MoveToReadBuf")
@@ -628,6 +630,8 @@ WorkerConnRead(w) ==
                     ![c].tmp_buf = data
                 ]
             /\ UNCHANGED current_task
+            /\ UNCHANGED task_queue
+            /\ UNCHANGED conn_writing
     IN
     /\ worker_pc[w] = "WorkerConnRead"
 
@@ -635,9 +639,7 @@ WorkerConnRead(w) ==
         THEN on_empty
         ELSE on_normal
 
-    /\ UNCHANGED task_queue
     /\ UNCHANGED yield_queue
-    /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ worker_conn_unchanged
 
@@ -702,10 +704,11 @@ HandleReadBuf(w) ==
         when_normal ==
             /\ add_back_task_queue(w)
             /\ UNCHANGED yield_queue
+            /\ UNCHANGED conn_writing
 
         when_yield ==
             /\ add_to_yield_queue(w)
-            /\ UNCHANGED task_queue
+            /\ do_add_write_task(w, c)
 
         clear_read_buf(size) ==
             conn_state' = [conn_state EXCEPT
@@ -720,7 +723,6 @@ HandleReadBuf(w) ==
             /\ \/ write_to_conn(c)
                \/ UNCHANGED conn_write_buf
             /\ UNCHANGED conn_write_full
-            /\ UNCHANGED conn_writing
 
         on_write_full ==
             /\ goto(w, "HandleTaskQueue")
@@ -833,6 +835,11 @@ ConnSend(c) ==
 
 ------------------------------------------------------
 
+epollout_event(c) == [
+    type |-> "EPOLLOUT",
+    conn |-> c
+]
+
 ConnRecv(c) ==
     LET
         w == conn_state[c].worker
@@ -841,10 +848,7 @@ ConnRecv(c) ==
             /\ Len(conn_state[c].recv) = limit_buffer_size
             /\ w # nil
 
-        event == [
-            type |-> "EPOLLOUT",
-            conn |-> c
-        ]
+        event == epollout_event(c)
     IN
     /\ conn_state[c] # nil
     /\ Len(conn_state[c].recv) > 0
@@ -1001,6 +1005,12 @@ current_task_as_set(w) ==
         THEN {}
         ELSE {current_task[w]}
 
+running_tasks(w) ==
+    UNION {
+        Range(task_queue[w]),
+        current_task_as_set(w)
+    }
+
 -----------
 
 ConnWriteFullAndTaskQueue ==
@@ -1036,15 +1046,16 @@ ConnWritingInv ==
                 /\ conn_state[c] # nil
                 /\ w # nil
 
-            running_tasks == UNION {
-                Range(task_queue[w]),
-                current_task_as_set(w)
-            }
 
             cond ==
-                conn_writing[c] <=> write_task(c) \in running_tasks
+                conn_writing[c] <=> write_task(c) \in running_tasks(w)
         IN
             pre_cond => cond
+
+-----------
+
+all_epoll_events(w) ==
+    epoll_events[w] \union worker_events[w]
 
 -----------
 
@@ -1057,8 +1068,6 @@ ReadTaskExistWhenHaveData ==
             pre_cond ==
                 /\ state # nil
                 /\ w # nil
-                /\ epoll_events[w] = {}
-                /\ worker_events[w] = {}
                 /\ ~conn_write_full[c]
                 /\ \/ state.read_buf # <<>>
                    \/ state.send # <<>>
@@ -1068,11 +1077,32 @@ ReadTaskExistWhenHaveData ==
                 Range(yield_queue[w]),
                 current_task_as_set(w)
             }
+
+            cond ==
+                \/ read_task(c) \in all_tasks
+                \/ epollin_event(c) \in all_epoll_events(w)
         IN
-            pre_cond => read_task(c) \in all_tasks
+            pre_cond => cond
 
 -----------
 
-\* TODO must be writing when read is yield
+MustWriteWhenReadTaskNotReady ==
+    \A c \in Conn:
+        LET
+            state == conn_state[c]
+            w == state.worker
+
+            pre_cond ==
+                /\ state # nil
+                /\ w # nil
+                /\ read_task(c) \notin running_tasks(w)
+                /\ conn_write_buf[c] # <<>>
+                /\ Len(state.recv) < limit_buffer_size
+
+            cond ==
+                \/ conn_writing[c]
+                \/ epollout_event(c) \in all_epoll_events(w)
+        IN
+            pre_cond => cond
 
 ====
