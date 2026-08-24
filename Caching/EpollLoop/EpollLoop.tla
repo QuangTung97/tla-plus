@@ -121,13 +121,19 @@ Task ==
             type: {"Read"},
             conn: Conn
         ]
+
+        conn_write == [
+            type: {"Write"},
+            conn: Conn
+        ]
     IN
-    UNION {consume_action, conn_read}
+    UNION {consume_action, conn_read, conn_write}
 
 WorkerPC == {
     "WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue",
     "ConsumeEventFd", "ConsumeActionQueue",
     "WorkerConnRead", "MoveToReadBuf", "HandleReadBuf",
+    "WorkerConnWrite",
     "MoveYieldQueue"
 }
 
@@ -421,6 +427,12 @@ handleTaskReadConn(w, task) ==
 
 -----------
 
+handleTaskWriteConn(w, task) ==
+    /\ task.type = "Write"
+    /\ goto(w, "WorkerConnWrite")
+
+-----------
+
 HandleTaskQueue(w) ==
     LET
         on_empty ==
@@ -435,6 +447,7 @@ HandleTaskQueue(w) ==
             /\ set_local(w, current_task, task)
             /\ \/ handleTaskConsumeAction(w, task)
                \/ handleTaskReadConn(w, task)
+               \/ handleTaskWriteConn(w, task)
     IN
     /\ worker_pc[w] = "HandleTaskQueue"
     /\ IF task_queue[w] = <<>>
@@ -557,7 +570,7 @@ ConsumeActionQueue(w) ==
 
 ------------------------------------------------------
 
-worker_conn_read_unchanged ==
+worker_conn_unchanged ==
     /\ UNCHANGED action_queue
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED eventfd_num
@@ -592,7 +605,7 @@ WorkerConnRead(w) ==
     /\ UNCHANGED task_queue
     /\ UNCHANGED yield_queue
     /\ unchanged_conn_write_vars
-    /\ worker_conn_read_unchanged
+    /\ worker_conn_unchanged
 
 ------------------------------------------------------
 
@@ -633,7 +646,7 @@ MoveToReadBuf(w) ==
 
     /\ UNCHANGED yield_queue
     /\ unchanged_conn_write_vars
-    /\ worker_conn_read_unchanged
+    /\ worker_conn_unchanged
 
 ------------------------------------------------------
 
@@ -671,10 +684,10 @@ HandleReadBuf(w) ==
             /\ goto(w, "HandleTaskQueue")
             /\ set_local(w, current_task, nil)
             /\ conn_write_full' = [conn_write_full EXCEPT ![c] = TRUE]
+            /\ add_task_queue(w, write_task(c))
 
             /\ UNCHANGED conn_write_buf
             /\ UNCHANGED conn_state
-            /\ UNCHANGED task_queue
             /\ UNCHANGED yield_queue
     IN
     /\ worker_pc[w] = "HandleReadBuf"
@@ -683,7 +696,33 @@ HandleReadBuf(w) ==
         THEN on_can_write
         ELSE on_write_full
 
-    /\ worker_conn_read_unchanged
+    /\ worker_conn_unchanged
+
+------------------------------------------------------
+
+WorkerConnWrite(w) ==
+    LET
+        c == current_task[w].conn
+        state == conn_state[c]
+
+        remain == limit_send_buf - Len(state.recv)
+        data_len == Len(conn_write_buf[c])
+        n == Min2(remain, data_len)
+
+        append_data == SubSliceEnd(conn_write_buf[c], n)
+    IN
+    /\ worker_pc[w] = "WorkerConnWrite"
+    /\ conn_state' = [conn_state EXCEPT
+            ![c].recv = @ \o append_data
+        ]
+    /\ conn_write_buf' = [conn_write_buf EXCEPT
+            ![c] = SubSliceStart(@, n + 1)
+        ]
+    /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
+    /\ add_back_task_queue(w)
+
+    /\ UNCHANGED yield_queue
+    /\ worker_conn_unchanged
 
 ------------------------------------------------------
 
@@ -768,6 +807,7 @@ Next ==
         \/ WorkerConnRead(w)
         \/ MoveToReadBuf(w)
         \/ HandleReadBuf(w)
+        \/ WorkerConnWrite(w)
 
     \/ \E c \in Conn:
         \/ ConnSend(c)
@@ -869,13 +909,10 @@ ConnWriteFullAndTaskQueue ==
                         ELSE {current_task[w]}
                 }
 
-            pre_cond ==
-                conn_write_full[c]
-
             cond ==
                 /\ read_task(c) \notin all_tasks
                 /\ write_task(c) \in all_tasks
         IN
-            pre_cond => cond
+            conn_write_full[c] => cond
 
 ====
