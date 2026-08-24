@@ -346,8 +346,14 @@ handleTaskConsumeAction(w, task) ==
 -----------
 
 handleTaskReadConn(w, task) ==
+    LET
+        c == task.conn
+        state == conn_state[c]
+    IN
     /\ task.type = "Read"
-    /\ goto(w, "WorkerConnRead")
+    /\ IF Len(state.tmp_buf) = 0
+        THEN goto(w, "WorkerConnRead")
+        ELSE goto(w, "MoveToReadBuf")
 
 -----------
 
@@ -362,7 +368,7 @@ HandleTaskQueue(w) ==
 
         on_normal ==
             /\ task_queue' = [task_queue EXCEPT ![w] = Tail(@)]
-            /\ current_task' = [current_task EXCEPT ![w] = task]
+            /\ set_local(w, current_task, task)
             /\ \/ handleTaskConsumeAction(w, task)
                \/ handleTaskReadConn(w, task)
     IN
@@ -397,12 +403,16 @@ ConsumeEventFd(w) ==
 handleNewConnAction(w, action) ==
     LET
         conn == action.conn
+
+        init_conn(size) ==
+            conn_state' = [conn_state EXCEPT
+                ![conn].worker = w,
+                ![conn].read_size = size
+            ]
     IN
     /\ action.type = "NewConn"
-    /\ conn_state' = [conn_state EXCEPT
-            ![conn].worker = w,
-            ![conn].read_size = 1
-        ]
+    /\ \E size \in 1..limit_send_buf:
+            init_conn(size)
 
 -----------
 
@@ -462,6 +472,11 @@ WorkerConnRead(w) ==
 
 ------------------------------------------------------
 
+add_back_task_queue(w) ==
+    /\ goto(w, "HandleTaskQueue")
+    /\ set_local(w, current_task, nil)
+    /\ add_task_queue(w, current_task[w])
+
 MoveToReadBuf(w) ==
     LET
         c == current_task[w].conn
@@ -479,7 +494,7 @@ MoveToReadBuf(w) ==
             /\ UNCHANGED current_task
 
         on_not_full ==
-            /\ goto(w, "HandleTaskQueue")
+            /\ add_back_task_queue(w)
     IN
     /\ worker_pc[w] = "MoveToReadBuf"
 
@@ -491,6 +506,20 @@ MoveToReadBuf(w) ==
     /\ IF n + Len(state.read_buf) = state.read_size
         THEN on_full
         ELSE on_not_full
+
+    /\ worker_conn_read_unchanged
+
+------------------------------------------------------
+
+HandleReadBuf(w) ==
+    LET
+        task == current_task[w]
+        c == task.conn
+    IN
+    /\ worker_pc[w] = "HandleReadBuf"
+
+    /\ conn_state' = [conn_state EXCEPT ![c].read_buf = <<>>]
+    /\ add_back_task_queue(w)
 
     /\ worker_conn_read_unchanged
 
@@ -568,6 +597,7 @@ Next ==
         \/ ConsumeActionQueue(w)
         \/ WorkerConnRead(w)
         \/ MoveToReadBuf(w)
+        \/ HandleReadBuf(w)
 
     \/ \E c \in Conn:
         \/ ConnSend(c)
