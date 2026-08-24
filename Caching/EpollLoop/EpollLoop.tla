@@ -1,7 +1,7 @@
 ---- MODULE EpollLoop ----
 EXTENDS TLC, Sequences, Naturals, FiniteSets
 
-CONSTANTS Worker, Conn, Value, nil
+CONSTANTS Worker, Conn, Value, nil, limit_buffer_size
 
 VARIABLES
     action_queue, epoll_events, eventfd_num,
@@ -72,8 +72,6 @@ ASSUME NonEmptySubSet({11, 12}) = {{11}, {12}, {11, 12}}
 
 Null(S) == S \union {nil}
 
-limit_buffer_size == 1
-
 Action ==
     LET
         new_conn == [
@@ -88,8 +86,8 @@ ConnState == [
     send: Seq(Value),
     recv: Seq(Value),
 
-    send_closed: BOOLEAN,
-    recv_closed: BOOLEAN,
+    client_closed: BOOLEAN,
+    server_closed: BOOLEAN,
 
     worker: Null(Worker),
 
@@ -198,8 +196,8 @@ NewConn(c) ==
         state == [
             send |-> <<>>,
             recv |-> <<>>,
-            send_closed |-> FALSE,
-            recv_closed |-> FALSE,
+            client_closed |-> FALSE,
+            server_closed |-> FALSE,
             worker |-> nil,
             read_size |-> nil,
             tmp_buf |-> <<>>,
@@ -709,8 +707,14 @@ HandleReadBuf(w) ==
             /\ add_to_yield_queue(w)
             /\ UNCHANGED task_queue
 
+        clear_read_buf(size) ==
+            conn_state' = [conn_state EXCEPT
+                ![c].read_buf = <<>>,
+                ![c].read_size = size
+            ]
+
         on_can_write ==
-            /\ conn_state' = [conn_state EXCEPT ![c].read_buf = <<>>]
+            /\ \E size \in 1..limit_buffer_size: clear_read_buf(size)
             /\ \/ when_normal
                \/ when_yield
             /\ \/ write_to_conn(c)
