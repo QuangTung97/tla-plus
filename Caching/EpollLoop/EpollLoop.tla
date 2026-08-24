@@ -3,6 +3,8 @@ EXTENDS TLC, Sequences, Naturals
 
 CONSTANTS Worker, Conn, Value, nil
 
+\* TODO remove worker_conn
+
 VARIABLES
     action_queue, conn_state, epoll_events, eventfd_num,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
@@ -26,6 +28,34 @@ vars == <<
 
 ------------------------------------------------------
 
+SubSliceStart(S, pos) ==
+    IF pos > Len(S)
+        THEN <<>>
+        ELSE SubSeq(S, pos, Len(S))
+
+ASSUME SubSliceStart(<<11, 12, 13>>, 2) = <<12, 13>>
+ASSUME SubSliceStart(<<11, 12, 13>>, 5) = <<>>
+
+-----------
+
+SubSliceEnd(S, pos) ==
+    IF pos < 1
+        THEN <<>>
+        ELSE SubSeq(S, 1, pos)
+
+ASSUME SubSliceEnd(<<11, 12, 13>>, 0) = <<>>
+ASSUME SubSliceEnd(<<11, 12, 13>>, 2) = <<11, 12>>
+
+-----------
+
+Min2(a, b) ==
+    IF a < b THEN a ELSE b
+
+ASSUME Min2(11, 12) = 11
+ASSUME Min2(13, 12) = 12
+
+------------------------------------------------------
+
 Null(S) == S \union {nil}
 
 limit_send_buf == 3
@@ -43,10 +73,15 @@ Action ==
 ConnState == [
     send: Seq(Value),
     recv: Seq(Value),
+
     send_closed: BOOLEAN,
     recv_closed: BOOLEAN,
+
     worker: Null(Worker),
-    read_size: Null(Nat)
+
+    read_size: Null(Nat),
+    tmp_buf: Seq(Value),
+    read_buf: Seq(Value)
 ]
 
 EpollEvent ==
@@ -77,7 +112,8 @@ Task ==
 
 WorkerPC == {
     "WaitOnEpoll", "HandleEpollEvent", "HandleTaskQueue",
-    "ConsumeEventFd", "ConsumeActionQueue"
+    "ConsumeEventFd", "ConsumeActionQueue",
+    "WorkerConnRead", "MoveToReadBuf"
 }
 
 ------------------------------------------------------
@@ -128,7 +164,9 @@ NewConn(c) ==
             send_closed |-> FALSE,
             recv_closed |-> FALSE,
             worker |-> nil,
-            read_size |-> nil
+            read_size |-> nil,
+            tmp_buf |-> <<>>,
+            read_buf |-> <<>>
         ]
     IN
     /\ conn_state[c] = nil
@@ -303,11 +341,21 @@ normal_handle_unchanged ==
     /\ UNCHANGED worker_events
     /\ UNCHANGED listen_vars
 
+-----------
+
 handleTaskConsumeAction(w, task) ==
     /\ task.type = "ConsumeAction"
     /\ IF need_dec_eventfd[w]
         THEN goto(w, "ConsumeEventFd")
         ELSE goto(w, "ConsumeActionQueue")
+
+-----------
+
+handleTaskReadConn(w, task) ==
+    /\ task.type = "Read"
+    /\ goto(w, "WorkerConnRead")
+
+-----------
 
 HandleTaskQueue(w) ==
     LET
@@ -322,6 +370,7 @@ HandleTaskQueue(w) ==
             /\ task_queue' = [task_queue EXCEPT ![w] = Tail(@)]
             /\ current_task' = [current_task EXCEPT ![w] = task]
             /\ \/ handleTaskConsumeAction(w, task)
+               \/ handleTaskReadConn(w, task)
     IN
     /\ worker_pc[w] = "HandleTaskQueue"
     /\ IF task_queue[w] = <<>>
@@ -359,7 +408,10 @@ handleNewConnAction(w, action) ==
     IN
     /\ action.type = "NewConn"
     /\ worker_conn' = [worker_conn EXCEPT ![w] = conn]
-    /\ conn_state' = [conn_state EXCEPT ![conn].worker = w]
+    /\ conn_state' = [conn_state EXCEPT
+            ![conn].worker = w,
+            ![conn].read_size = 1
+        ]
 
 -----------
 
@@ -390,6 +442,68 @@ ConsumeActionQueue(w) ==
 
     /\ UNCHANGED eventfd_num
     /\ normal_handle_unchanged
+
+------------------------------------------------------
+
+worker_conn_read_unchanged ==
+    /\ UNCHANGED worker_conn
+    /\ UNCHANGED action_queue
+    /\ UNCHANGED need_dec_eventfd
+    /\ UNCHANGED eventfd_num
+    /\ normal_handle_unchanged
+
+------------------------------------------------------
+
+WorkerConnRead(w) ==
+    LET
+        c == current_task[w].conn
+        data == conn_state[c].send
+    IN
+    /\ worker_pc[w] = "WorkerConnRead"
+    /\ goto(w, "MoveToReadBuf")
+
+    /\ conn_state' = [conn_state EXCEPT
+            ![c].send = <<>>,
+            ![c].tmp_buf = data
+        ]
+
+    /\ UNCHANGED current_task
+    /\ UNCHANGED task_queue
+    /\ worker_conn_read_unchanged
+
+------------------------------------------------------
+
+MoveToReadBuf(w) ==
+    LET
+        c == current_task[w].conn
+        state == conn_state[c]
+
+        remain == state.read_size - Len(state.read_buf)
+        n == Min2(Len(state.tmp_buf), remain)
+
+        new_tmp_buf == SubSliceStart(state.tmp_buf, n + 1)
+        append_data == SubSliceEnd(state.tmp_buf, n)
+
+        on_full ==
+            /\ goto(w, "HandleReadBuf")
+            /\ UNCHANGED task_queue
+            /\ UNCHANGED current_task
+
+        on_not_full ==
+            /\ goto(w, "HandleTaskQueue")
+    IN
+    /\ worker_pc[w] = "MoveToReadBuf"
+
+    /\ conn_state' = [conn_state EXCEPT
+            ![c].tmp_buf = new_tmp_buf,
+            ![c].read_buf = @ \o append_data
+        ]
+
+    /\ IF n + Len(state.read_buf) = state.read_size
+        THEN on_full
+        ELSE on_not_full
+
+    /\ worker_conn_read_unchanged
 
 ------------------------------------------------------
 
@@ -463,6 +577,8 @@ Next ==
         \/ HandleTaskQueue(w)
         \/ ConsumeEventFd(w)
         \/ ConsumeActionQueue(w)
+        \/ WorkerConnRead(w)
+        \/ MoveToReadBuf(w)
 
     \/ \E c \in Conn:
         \/ ConnSend(c)
@@ -495,5 +611,34 @@ NeedDecEventFdInv ==
 CurrentTaskInv ==
     \A w \in Worker:
         /\ worker_pc[w] = "HandleTaskQueue" => current_task[w] = nil
+
+-----------
+
+ConnReadSizeInv ==
+    \A c \in Conn:
+        LET
+            cond ==
+                conn_state[c].worker # nil <=> conn_state[c].read_size # nil
+        IN
+            conn_state[c] # nil => cond
+
+-----------
+
+ConnStateReadInfoInv ==
+    \A c \in Conn:
+        LET
+            state == conn_state[c]
+
+            pre_cond ==
+                /\ state # nil
+                /\ state.worker # nil
+
+            cond ==
+                /\ Len(state.send) <= limit_send_buf
+                /\ Len(state.tmp_buf) <= limit_send_buf
+                /\ Len(state.read_buf) <= limit_send_buf
+                /\ Len(state.read_buf) <= state.read_size
+        IN
+            pre_cond => cond
 
 ====
