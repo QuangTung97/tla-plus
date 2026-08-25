@@ -467,13 +467,19 @@ handleTaskReadConn(w, task) ==
         c == task.conn
         state == conn_state[c]
 
+        match_read_size ==
+            Len(state.read_buf) = state.read_size
+
         can_read ==
-            /\ Len(state.tmp_buf) = 0
+            Len(state.tmp_buf) = 0
     IN
     /\ task.type = "Read"
-    /\ IF can_read
-        THEN goto(w, "WorkerConnRead")
-        ELSE goto(w, "MoveToReadBuf")
+    /\ IF match_read_size THEN
+            goto(w, "HandleReadBuf")
+        ELSE IF can_read THEN
+            goto(w, "WorkerConnRead")
+        ELSE
+            goto(w, "MoveToReadBuf")
 
 -----------
 
