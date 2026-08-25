@@ -887,6 +887,7 @@ ConnRecv(c) ==
 TerminateCond ==
     /\ listen_pc = "Init"
     /\ ready_conns = {}
+    /\ allow_close_conn = FALSE
     /\ \A w \in Worker:
         /\ worker_pc[w] = "WaitOnEpoll"
         /\ epoll_events[w] = {}
@@ -941,7 +942,13 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 ------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
+
+-----------
 
 EpollWaitOnlyWhenTaskQueueEmpty ==
     \A w \in Worker:
