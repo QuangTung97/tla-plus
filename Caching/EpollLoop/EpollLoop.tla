@@ -5,14 +5,14 @@ CONSTANTS Worker, Conn, Value, nil, limit_buffer_size
 
 VARIABLES
     action_queue, epoll_events, eventfd_num,
-    conn_state, conn_write_buf, conn_write_full, conn_writing,
+    conn_state, conn_write_buf, conn_write_full, conn_writing, conn_reading,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_events,
     task_queue, current_task, yield_queue, need_dec_eventfd,
     stop_send, allow_close_conn
 
 conn_vars == <<
-    conn_state, conn_write_buf, conn_write_full, conn_writing
+    conn_state, conn_write_buf, conn_write_full, conn_writing, conn_reading
 >>
 
 listen_vars == <<
@@ -160,6 +160,7 @@ TypeOK ==
     /\ conn_write_buf \in [Conn -> Seq(Value)]
     /\ conn_write_full \in [Conn -> BOOLEAN]
     /\ conn_writing \in [Conn -> BOOLEAN]
+    /\ conn_reading \in [Conn -> BOOLEAN]
 
     /\ listen_pc \in {"Init", "PushNewConn", "IncEventFd"}
     /\ ready_conns \subseteq Conn
@@ -185,6 +186,7 @@ Init ==
     /\ conn_write_buf = [c \in Conn |-> <<>>]
     /\ conn_write_full = [c \in Conn |-> FALSE]
     /\ conn_writing = [c \in Conn |-> FALSE]
+    /\ conn_reading = [c \in Conn |-> FALSE]
 
     /\ listen_pc = "Init"
     /\ ready_conns = {}
@@ -225,6 +227,7 @@ NewConn(c) ==
 
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
+    /\ UNCHANGED conn_reading
     /\ UNCHANGED action_queue
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
@@ -373,6 +376,7 @@ onEpollEventFd(w, ev) ==
     /\ add_task_queue(w, task)
     /\ need_dec_eventfd' = [need_dec_eventfd EXCEPT ![w] = TRUE]
     /\ UNCHANGED conn_writing
+    /\ UNCHANGED conn_reading
 
 -----------
 
@@ -404,9 +408,12 @@ onEpollEventEPOLLIN(w, ev) ==
         task == read_task(c)
     IN
     /\ ev.type = "EPOLLIN"
-    /\ IF conn_write_full[c]
-        THEN UNCHANGED task_queue
-        ELSE add_task_queue(w, task)
+    /\ IF conn_write_full[c] THEN
+            /\ UNCHANGED task_queue
+            /\ UNCHANGED conn_reading
+        ELSE
+            /\ add_task_queue(w, task)
+            /\ conn_reading' = [conn_reading EXCEPT ![c] = TRUE]
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED conn_writing
 
@@ -416,6 +423,7 @@ onEpollEventEPOLLOUT(w, ev) ==
     /\ ev.type = "EPOLLOUT"
     /\ do_add_write_task(w, ev.conn, conn_write_buf[ev.conn])
     /\ UNCHANGED need_dec_eventfd
+    /\ UNCHANGED conn_reading
 
 -----------
 
@@ -433,6 +441,7 @@ HandleEpollEvent(w) ==
                 THEN goto(w, "HandleTaskQueue")
                 ELSE goto(w, "MoveYieldQueue")
             /\ UNCHANGED conn_writing
+            /\ UNCHANGED conn_reading
             /\ UNCHANGED worker_events
             /\ UNCHANGED task_queue
             /\ UNCHANGED need_dec_eventfd
@@ -594,16 +603,22 @@ handleNewConnAction(w, action) ==
                 ![conn].read_size = size
             ]
 
+        need_notify ==
+            \/ conn_state[conn].send # <<>>
+            \/ conn_state[conn].client_closed
+
         event == epollin_event(conn)
     IN
     /\ action.type = "NewConn"
     /\ \E size \in 1..limit_buffer_size:
             init_conn(size)
-    /\ IF conn_state[conn].send = <<>>
-        THEN UNCHANGED epoll_events
-        ELSE add_epoll_event(w, event)
+    /\ IF need_notify
+        THEN add_epoll_event(w, event)
+        ELSE UNCHANGED epoll_events
+
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
+    /\ UNCHANGED conn_reading
 
 -----------
 
@@ -659,6 +674,7 @@ WorkerConnRead(w) ==
             /\ set_local(w, current_task, nil)
             /\ UNCHANGED conn_state
             /\ do_add_write_task(w, c, conn_write_buf[c])
+            /\ conn_reading' = [conn_reading EXCEPT ![c] = FALSE]
 
         on_normal ==
             /\ goto(w, "MoveToReadBuf")
@@ -669,6 +685,7 @@ WorkerConnRead(w) ==
             /\ UNCHANGED current_task
             /\ UNCHANGED task_queue
             /\ UNCHANGED conn_writing
+            /\ UNCHANGED conn_reading
     IN
     /\ worker_pc[w] = "WorkerConnRead"
 
@@ -720,6 +737,7 @@ MoveToReadBuf(w) ==
     /\ UNCHANGED yield_queue
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
+    /\ UNCHANGED conn_reading
     /\ worker_conn_unchanged
 
 ------------------------------------------------------
@@ -754,6 +772,7 @@ HandleReadBuf(w) ==
             /\ \/ when_normal
                \/ when_yield
             /\ UNCHANGED conn_write_full
+            /\ UNCHANGED conn_reading
 
         on_write_full ==
             /\ goto(w, "HandleTaskQueue")
@@ -870,6 +889,7 @@ ConnSend(c) ==
 
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
+    /\ UNCHANGED conn_reading
     /\ conn_unchanged
 
 ------------------------------------------------------
@@ -905,6 +925,9 @@ ConnRecv(c) ==
 ------------------------------------------------------
 
 CloseConn(c) ==
+    LET
+        w == conn_state[c].worker
+    IN
     /\ conn_state[c] # nil
     /\ ~conn_state[c].client_closed
 
@@ -913,10 +936,13 @@ CloseConn(c) ==
             ![c].send = <<>>,
             ![c].recv = <<>>
         ]
+    /\ IF w # nil
+        THEN add_epoll_event(w, epollin_event(c))
+        ELSE UNCHANGED epoll_events
 
-    /\ UNCHANGED epoll_events
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
+    /\ UNCHANGED conn_reading
     /\ conn_unchanged
 
 ------------------------------------------------------
@@ -962,8 +988,7 @@ TerminateCond ==
             /\ state.tmp_buf = <<>>
             /\ conn_write_buf[c] = <<>>
             /\ conn_write_full[c] = FALSE
-            /\ state.client_closed = FALSE
-            /\ state.server_closed = FALSE
+            /\ state.client_closed => state.server_closed
 
 Terminated ==
     /\ TerminateCond
@@ -1097,6 +1122,13 @@ running_tasks(w) ==
         current_task_as_set(w)
     }
 
+all_tasks(w) ==
+    UNION {
+        Range(task_queue[w]),
+        Range(yield_queue[w]),
+        current_task_as_set(w)
+    }
+
 -----------
 
 ConnWriteFullAndTaskQueue ==
@@ -1104,14 +1136,8 @@ ConnWriteFullAndTaskQueue ==
         LET
             w == conn_state[c].worker
 
-            all_tasks == UNION {
-                Range(task_queue[w]),
-                Range(yield_queue[w]),
-                current_task_as_set(w)
-            }
-
             cond ==
-                /\ read_task(c) \notin all_tasks
+                /\ read_task(c) \notin all_tasks(w)
         IN
             conn_write_full[c] => cond
 
@@ -1132,9 +1158,24 @@ ConnWritingInv ==
                 /\ conn_state[c] # nil
                 /\ w # nil
 
-
             cond ==
                 conn_writing[c] <=> write_task(c) \in running_tasks(w)
+        IN
+            pre_cond => cond
+
+-----------
+
+ConnReadingInv ==
+    \A c \in Conn:
+        LET
+            w == conn_state[c].worker
+
+            pre_cond ==
+                /\ conn_state[c] # nil
+                /\ w # nil
+
+            cond ==
+                conn_reading[c] <=> read_task(c) \in all_tasks(w)
         IN
             pre_cond => cond
 
@@ -1157,14 +1198,8 @@ ReadTaskExistWhenHaveData ==
                 /\ ~conn_write_full[c]
                 /\ state.send # <<>>
 
-            all_tasks == UNION {
-                Range(task_queue[w]),
-                Range(yield_queue[w]),
-                current_task_as_set(w)
-            }
-
             cond ==
-                \/ read_task(c) \in all_tasks
+                \/ read_task(c) \in all_tasks(w)
                 \/ epollin_event(c) \in all_epoll_events(w)
         IN
             pre_cond => cond
@@ -1204,6 +1239,27 @@ CanNotWriteToClosedConn ==
             cond ==
                 /\ state.send = <<>>
                 /\ state.recv = <<>>
+        IN
+            pre_cond => cond
+
+-----------
+
+ThereMustBeRunningTaskWhenPartialClosed ==
+    \A c \in Conn:
+        LET
+            state == conn_state[c]
+            w == state.worker
+
+            pre_cond ==
+                /\ state # nil
+                /\ w # nil
+                /\ state.client_closed
+                /\ ~state.server_closed
+
+            cond ==
+                \/ conn_reading[c]
+                \/ conn_writing[c]
+                \/ epollin_event(c) \in all_epoll_events(w)
         IN
             pre_cond => cond
 
