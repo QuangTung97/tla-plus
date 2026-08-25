@@ -9,7 +9,7 @@ VARIABLES
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_events,
     task_queue, current_task, yield_queue, need_dec_eventfd,
-    stop_send
+    stop_send, allow_close_conn
 
 conn_vars == <<
     conn_state, conn_write_buf, conn_write_full, conn_writing
@@ -24,7 +24,7 @@ worker_vars == <<
     task_queue, current_task, yield_queue, need_dec_eventfd
 >>
 
-aux_vars == <<stop_send>>
+aux_vars == <<stop_send, allow_close_conn>>
 
 vars == <<
     action_queue, epoll_events, eventfd_num,
@@ -174,6 +174,7 @@ TypeOK ==
     /\ need_dec_eventfd \in [Worker -> Null(BOOLEAN)]
 
     /\ stop_send \in BOOLEAN
+    /\ allow_close_conn \in BOOLEAN
 
 Init ==
     /\ action_queue = [w \in Worker |-> <<>>]
@@ -198,6 +199,7 @@ Init ==
     /\ need_dec_eventfd = [w \in Worker |-> nil]
 
     /\ stop_send = FALSE
+    /\ allow_close_conn = TRUE
 
 ------------------------------------------------------
 
@@ -353,6 +355,11 @@ add_yield_queue(w, task) ==
 
 add_epoll_event(w, event) ==
     epoll_events' = [epoll_events EXCEPT ![w] = @ \union {event}]
+
+-----------
+
+conn_is_closed(c) ==
+    conn_state[c].client_closed
 
 -----------
 
@@ -571,6 +578,7 @@ ConsumeEventFd(w) ==
     /\ normal_handle_unchanged
 
 ------------------------------------------------------
+
 epollin_event(c) == [
     type |-> "EPOLLIN",
     conn |-> c
@@ -828,6 +836,7 @@ conn_unchanged ==
     /\ UNCHANGED action_queue
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED worker_vars
+    /\ UNCHANGED aux_vars
 
 ConnSend(c) ==
     LET
@@ -838,10 +847,7 @@ ConnSend(c) ==
             /\ state.send = <<>>
             /\ w # nil
 
-        event == [
-            type |-> "EPOLLIN",
-            conn |-> c
-        ]
+        event == epollin_event(c)
 
         total_size == Len(state.send) + Len(state.tmp_buf) + Len(state.read_buf)
 
@@ -851,6 +857,7 @@ ConnSend(c) ==
                 \/ (total_size % state.read_size) = 0
     IN
     /\ state # nil
+    /\ ~conn_is_closed(c)
     /\ Len(state.send) < limit_buffer_size
     /\ is_aligned => ~stop_send
 
@@ -864,7 +871,6 @@ ConnSend(c) ==
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ conn_unchanged
-    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -894,19 +900,40 @@ ConnRecv(c) ==
 
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
-    /\ UNCHANGED aux_vars
     /\ conn_unchanged
 
 ------------------------------------------------------
+
+CloseConn(c) ==
+    /\ conn_state[c] # nil
+    /\ ~conn_state[c].client_closed
+
+    /\ conn_state' = [conn_state EXCEPT
+            ![c].client_closed = TRUE,
+            ![c].send = <<>>,
+            ![c].recv = <<>>
+        ]
+
+    /\ UNCHANGED epoll_events
+    /\ UNCHANGED conn_writing
+    /\ unchanged_conn_write_vars
+    /\ conn_unchanged
+
+------------------------------------------------------
+
+
+aux_unchanged ==
+    /\ UNCHANGED <<action_queue, epoll_events, eventfd_num>>
+    /\ UNCHANGED listen_vars
+    /\ UNCHANGED worker_vars
+    /\ UNCHANGED conn_vars
 
 StopSend ==
     /\ ~stop_send
     /\ stop_send' = TRUE
 
-    /\ UNCHANGED <<action_queue, epoll_events, eventfd_num>>
-    /\ UNCHANGED listen_vars
-    /\ UNCHANGED worker_vars
-    /\ UNCHANGED conn_vars
+    /\ UNCHANGED allow_close_conn
+    /\ aux_unchanged
 
 ------------------------------------------------------
 
@@ -925,13 +952,18 @@ TerminateCond ==
         /\ need_dec_eventfd[w] = nil
         /\ current_task[w] = nil
     /\ \A c \in Conn:
-        conn_state[c] # nil =>
-            /\ conn_state[c].send = <<>>
-            /\ conn_state[c].recv = <<>>
-            /\ conn_state[c].read_buf = <<>>
-            /\ conn_state[c].tmp_buf = <<>>
+        LET
+            state == conn_state[c]
+        IN
+        state # nil =>
+            /\ state.send = <<>>
+            /\ state.recv = <<>>
+            /\ state.read_buf = <<>>
+            /\ state.tmp_buf = <<>>
             /\ conn_write_buf[c] = <<>>
             /\ conn_write_full[c] = FALSE
+            /\ state.client_closed = FALSE
+            /\ state.server_closed = FALSE
 
 Terminated ==
     /\ TerminateCond
@@ -963,6 +995,7 @@ Next ==
     \/ \E c \in Conn:
         \/ ConnSend(c)
         \/ ConnRecv(c)
+        \/ CloseConn(c)
 
     \/ StopSend
     \/ Terminated
@@ -1017,6 +1050,7 @@ ConnStateReadInfoInv ==
 
             cond ==
                 /\ Len(state.send) <= limit_buffer_size
+                /\ Len(state.recv) <= limit_buffer_size
                 /\ Len(state.tmp_buf) <= limit_buffer_size
                 /\ Len(state.read_buf) <= limit_buffer_size
                 /\ Len(state.read_buf) <= state.read_size
@@ -1153,6 +1187,23 @@ MustWriteWhenReadTaskNotReady ==
             cond ==
                 \/ conn_writing[c]
                 \/ epollout_event(c) \in all_epoll_events(w)
+        IN
+            pre_cond => cond
+
+-----------
+
+CanNotWriteToClosedConn ==
+    \A c \in Conn:
+        LET
+            state == conn_state[c]
+
+            pre_cond ==
+                /\ state # nil
+                /\ state.client_closed
+
+            cond ==
+                /\ state.send = <<>>
+                /\ state.recv = <<>>
         IN
             pre_cond => cond
 
