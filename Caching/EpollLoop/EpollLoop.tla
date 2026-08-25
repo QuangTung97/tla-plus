@@ -364,6 +364,10 @@ add_epoll_event(w, event) ==
 conn_is_closed(c) ==
     conn_state[c].client_closed
 
+conn_fully_closed(c) ==
+    /\ conn_state[c].client_closed
+    /\ conn_state[c].server_closed
+
 -----------
 
 onEpollEventFd(w, ev) ==
@@ -406,14 +410,24 @@ onEpollEventEPOLLIN(w, ev) ==
     LET
         c == ev.conn
         task == read_task(c)
+
+        do_add_read_task ==
+            /\ add_task_queue(w, task)
+            /\ conn_reading' = [conn_reading EXCEPT ![c] = TRUE]
     IN
     /\ ev.type = "EPOLLIN"
-    /\ IF conn_write_full[c] THEN
+
+    /\ IF conn_fully_closed(c) THEN
+            /\ UNCHANGED task_queue
+            /\ UNCHANGED conn_reading
+        ELSE IF conn_is_closed(c) THEN
+            do_add_read_task
+        ELSE IF conn_write_full[c] THEN
             /\ UNCHANGED task_queue
             /\ UNCHANGED conn_reading
         ELSE
-            /\ add_task_queue(w, task)
-            /\ conn_reading' = [conn_reading EXCEPT ![c] = TRUE]
+            do_add_read_task
+
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED conn_writing
 
@@ -664,10 +678,37 @@ worker_conn_unchanged ==
 
 ------------------------------------------------------
 
+do_server_close(c, reading, writing) ==
+    LET
+        can_close ==
+            /\ ~reading
+            /\ ~writing
+
+        update_closed ==
+            conn_state' = [conn_state EXCEPT
+                ![c].server_closed = TRUE,
+                ![c].read_buf = <<>>,
+                ![c].tmp_buf = <<>>
+            ]
+    IN
+    /\ IF can_close
+        THEN update_closed
+        ELSE UNCHANGED conn_state
+    /\ conn_write_buf' = [conn_write_buf EXCEPT ![c] = <<>>]
+    /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
+
 WorkerConnRead(w) ==
     LET
         c == current_task[w].conn
         data == conn_state[c].send
+
+        on_closed ==
+            /\ goto(w, "HandleTaskQueue")
+            /\ set_local(w, current_task, nil)
+            /\ conn_reading' = [conn_reading EXCEPT ![c] = FALSE]
+            /\ do_server_close(c, FALSE, conn_writing[c])
+            /\ UNCHANGED conn_writing
+            /\ UNCHANGED task_queue
 
         on_empty ==
             /\ goto(w, "HandleTaskQueue")
@@ -675,6 +716,7 @@ WorkerConnRead(w) ==
             /\ UNCHANGED conn_state
             /\ do_add_write_task(w, c, conn_write_buf[c])
             /\ conn_reading' = [conn_reading EXCEPT ![c] = FALSE]
+            /\ unchanged_conn_write_vars
 
         on_normal ==
             /\ goto(w, "MoveToReadBuf")
@@ -686,15 +728,18 @@ WorkerConnRead(w) ==
             /\ UNCHANGED task_queue
             /\ UNCHANGED conn_writing
             /\ UNCHANGED conn_reading
+            /\ unchanged_conn_write_vars
     IN
     /\ worker_pc[w] = "WorkerConnRead"
 
-    /\ IF data = <<>>
-        THEN on_empty
-        ELSE on_normal
+    /\ IF conn_is_closed(c) THEN
+            on_closed
+        ELSE IF data = <<>> THEN
+            on_empty
+        ELSE
+            on_normal
 
     /\ UNCHANGED yield_queue
-    /\ unchanged_conn_write_vars
     /\ worker_conn_unchanged
 
 ------------------------------------------------------
@@ -779,6 +824,7 @@ HandleReadBuf(w) ==
             /\ set_local(w, current_task, nil)
             /\ conn_write_full' = [conn_write_full EXCEPT ![c] = TRUE]
             /\ do_add_write_task(w, c, conn_write_buf[c])
+            /\ conn_reading' = [conn_reading EXCEPT ![c] = FALSE]
 
             /\ UNCHANGED conn_write_buf
             /\ UNCHANGED conn_state
@@ -799,6 +845,14 @@ WorkerConnWrite(w) ==
         c == current_task[w].conn
         state == conn_state[c]
 
+        on_closed ==
+            /\ goto(w, "HandleTaskQueue")
+            /\ set_local(w, current_task, nil)
+            /\ conn_writing' = [conn_writing EXCEPT ![c] = FALSE]
+            /\ do_server_close(c, conn_reading[c], FALSE)
+            /\ UNCHANGED conn_reading
+            /\ UNCHANGED task_queue
+
         data_len == Len(conn_write_buf[c])
         remain == limit_buffer_size - Len(state.recv)
         n == Min2(remain, data_len)
@@ -811,9 +865,20 @@ WorkerConnWrite(w) ==
             /\ UNCHANGED task_queue
             /\ UNCHANGED conn_state
             /\ UNCHANGED <<conn_write_buf, conn_write_full>>
+            /\ UNCHANGED conn_reading
 
         from_full ==
             conn_write_full[c]
+
+        append_read_write_task ==
+            task_queue' = [task_queue EXCEPT
+                ![w] = @ \o <<current_task[w], read_task(c)>>
+            ]
+
+        append_write_task ==
+            task_queue' = [task_queue EXCEPT
+                ![w] = Append(@, current_task[w])
+            ]
 
         on_normal ==
             /\ conn_state' = [conn_state EXCEPT
@@ -827,23 +892,24 @@ WorkerConnWrite(w) ==
             /\ set_local(w, current_task, nil)
 
             /\ IF from_full THEN
-                    /\ task_queue' = [task_queue EXCEPT
-                            ![w] = @ \o <<current_task[w], read_task(c)>>
-                        ]
+                    /\ append_read_write_task
                     /\ conn_write_full' = [conn_write_full EXCEPT ![c] = FALSE]
+                    /\ conn_reading' = [conn_reading EXCEPT ![c] = TRUE]
                 ELSE
-                    /\ task_queue' = [task_queue EXCEPT
-                            ![w] = Append(@, current_task[w])
-                        ]
+                    /\ append_write_task
                     /\ UNCHANGED conn_write_full
+                    /\ UNCHANGED conn_reading
 
             /\ UNCHANGED conn_writing
     IN
     /\ worker_pc[w] = "WorkerConnWrite"
 
-    /\ IF n = 0
-        THEN on_empty
-        ELSE on_normal
+    /\ IF conn_is_closed(c) THEN
+            on_closed
+        ELSE IF n = 0 THEN
+            on_empty
+        ELSE
+            on_normal
 
     /\ UNCHANGED yield_queue
     /\ worker_conn_unchanged
@@ -920,6 +986,7 @@ ConnRecv(c) ==
 
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
+    /\ UNCHANGED conn_reading
     /\ conn_unchanged
 
 ------------------------------------------------------
@@ -1136,10 +1203,14 @@ ConnWriteFullAndTaskQueue ==
         LET
             w == conn_state[c].worker
 
+            pre_cond ==
+                /\ conn_write_full[c]
+                /\ ~conn_is_closed(c)
+
             cond ==
                 /\ read_task(c) \notin all_tasks(w)
         IN
-            conn_write_full[c] => cond
+            pre_cond => cond
 
 -----------
 
@@ -1222,6 +1293,7 @@ MustWriteWhenReadTaskNotReady ==
             cond ==
                 \/ conn_writing[c]
                 \/ epollout_event(c) \in all_epoll_events(w)
+                \/ conn_is_closed(c)
         IN
             pre_cond => cond
 
@@ -1260,6 +1332,28 @@ ThereMustBeRunningTaskWhenPartialClosed ==
                 \/ conn_reading[c]
                 \/ conn_writing[c]
                 \/ epollin_event(c) \in all_epoll_events(w)
+        IN
+            pre_cond => cond
+
+-----------
+
+FullClosedInv ==
+    \A c \in Conn:
+        LET
+            state == conn_state[c]
+
+            pre_cond ==
+                /\ state # nil
+                /\ state.client_closed
+                /\ state.server_closed
+
+            cond ==
+                /\ ~conn_reading[c]
+                /\ ~conn_writing[c]
+                /\ conn_write_buf[c] = <<>>
+                /\ conn_write_full[c] = FALSE
+                /\ state.tmp_buf = <<>>
+                /\ state.read_buf = <<>>
         IN
             pre_cond => cond
 
