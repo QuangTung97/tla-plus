@@ -72,6 +72,11 @@ NonEmptySubSet(S) == (SUBSET S) \ {{}}
 
 ASSUME NonEmptySubSet({11, 12}) = {{11}, {12}, {11, 12}}
 
+-----------
+
+ASSUME 5 % 3 = 2
+ASSUME 0 % 3 = 0
+
 ------------------------------------------------------
 
 Null(S) == S \union {nil}
@@ -464,7 +469,6 @@ handleTaskReadConn(w, task) ==
 
         can_read ==
             /\ Len(state.tmp_buf) = 0
-            /\ Len(state.read_buf) = 0
     IN
     /\ task.type = "Read"
     /\ IF can_read
@@ -729,14 +733,8 @@ HandleReadBuf(w) ==
             /\ add_to_yield_queue(w)
             /\ do_add_write_task(w, c, conn_write_buf'[c])
 
-        clear_read_buf(size) ==
-            conn_state' = [conn_state EXCEPT
-                ![c].read_buf = <<>>,
-                ![c].read_size = size
-            ]
-
         on_can_write ==
-            /\ \E size \in 1..limit_buffer_size: clear_read_buf(size)
+            /\ conn_state' = [conn_state EXCEPT ![c].read_buf = <<>>]
             /\ \/ write_to_conn(c)
                \/ UNCHANGED conn_write_buf
             /\ \/ when_normal
@@ -842,8 +840,9 @@ ConnSend(c) ==
         total_size == Len(state.send) + Len(state.tmp_buf) + Len(state.read_buf)
 
         is_aligned ==
-            \/ total_size = 0
-            \/ total_size = state.read_size
+            state.read_size # nil =>
+                \/ total_size = 0
+                \/ (total_size % state.read_size) = 0
     IN
     /\ state # nil
     /\ Len(state.send) < limit_buffer_size
@@ -1028,7 +1027,6 @@ WorkerConnStateInv ==
         IN
         /\ worker_pc[w] = "WorkerConnRead" =>
             /\ state.tmp_buf = <<>>
-            /\ state.read_buf = <<>>
         /\ worker_pc[w] = "HandleReadBuf" =>
             /\ Len(state.read_buf) = state.read_size
 
@@ -1117,8 +1115,7 @@ ReadTaskExistWhenHaveData ==
                 /\ state # nil
                 /\ w # nil
                 /\ ~conn_write_full[c]
-                /\ \/ state.read_buf # <<>>
-                   \/ state.send # <<>>
+                /\ state.send # <<>>
 
             all_tasks == UNION {
                 Range(task_queue[w]),
