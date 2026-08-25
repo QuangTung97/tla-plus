@@ -995,6 +995,7 @@ CloseConn(c) ==
     LET
         w == conn_state[c].worker
     IN
+    /\ allow_close_conn
     /\ conn_state[c] # nil
     /\ ~conn_state[c].client_closed
 
@@ -1014,7 +1015,6 @@ CloseConn(c) ==
 
 ------------------------------------------------------
 
-
 aux_unchanged ==
     /\ UNCHANGED <<action_queue, epoll_events, eventfd_num>>
     /\ UNCHANGED listen_vars
@@ -1030,10 +1030,20 @@ StopSend ==
 
 ------------------------------------------------------
 
+DisableAllowCloseConn ==
+    /\ allow_close_conn
+    /\ allow_close_conn' = FALSE
+
+    /\ UNCHANGED stop_send
+    /\ aux_unchanged
+
+------------------------------------------------------
+
 TerminateCond ==
     /\ listen_pc = "Init"
     /\ ready_conns = {}
-    /\ stop_send = TRUE
+    /\ stop_send
+    /\ ~allow_close_conn
     /\ \A w \in Worker:
         /\ worker_pc[w] = "WaitOnEpoll"
         /\ epoll_events[w] = {}
@@ -1090,6 +1100,7 @@ Next ==
         \/ CloseConn(c)
 
     \/ StopSend
+    \/ DisableAllowCloseConn
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
