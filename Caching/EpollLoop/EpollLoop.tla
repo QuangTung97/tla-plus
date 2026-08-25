@@ -9,7 +9,7 @@ VARIABLES
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_events,
     task_queue, current_task, yield_queue, need_dec_eventfd,
-    allow_close_conn
+    stop_send
 
 conn_vars == <<
     conn_state, conn_write_buf, conn_write_full, conn_writing
@@ -24,12 +24,14 @@ worker_vars == <<
     task_queue, current_task, yield_queue, need_dec_eventfd
 >>
 
+aux_vars == <<stop_send>>
+
 vars == <<
     action_queue, epoll_events, eventfd_num,
     conn_vars,
     listen_vars,
     worker_vars,
-    allow_close_conn
+    aux_vars
 >>
 
 ------------------------------------------------------
@@ -166,7 +168,7 @@ TypeOK ==
     /\ yield_queue \in [Worker -> Seq(Task)]
     /\ need_dec_eventfd \in [Worker -> Null(BOOLEAN)]
 
-    /\ allow_close_conn \in BOOLEAN
+    /\ stop_send \in BOOLEAN
 
 Init ==
     /\ action_queue = [w \in Worker |-> <<>>]
@@ -190,7 +192,7 @@ Init ==
     /\ yield_queue = [w \in Worker |-> <<>>]
     /\ need_dec_eventfd = [w \in Worker |-> nil]
 
-    /\ allow_close_conn = TRUE
+    /\ stop_send = FALSE
 
 ------------------------------------------------------
 
@@ -220,7 +222,7 @@ NewConn(c) ==
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
     /\ UNCHANGED <<listen_pc, listen_local_conn, listen_local_worker>>
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -237,7 +239,7 @@ AcceptConn(c) ==
     /\ UNCHANGED conn_vars
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -258,7 +260,7 @@ PushNewConn(w) ==
     /\ UNCHANGED <<ready_conns, listen_local_conn>>
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -288,7 +290,7 @@ IncEventFd ==
     /\ UNCHANGED conn_vars
     /\ UNCHANGED action_queue
     /\ UNCHANGED worker_vars
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -334,7 +336,7 @@ WaitOnEpoll(w) ==
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED conn_vars
     /\ UNCHANGED listen_vars
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -436,7 +438,7 @@ HandleEpollEvent(w) ==
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
     /\ UNCHANGED listen_vars
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -504,7 +506,7 @@ HandleTaskQueue(w) ==
     /\ UNCHANGED conn_vars
     /\ UNCHANGED eventfd_num
     /\ normal_handle_unchanged
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -538,7 +540,7 @@ MoveYieldQueue(w) ==
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_vars
     /\ UNCHANGED eventfd_num
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
     /\ normal_handle_unchanged
 
 ------------------------------------------------------
@@ -555,7 +557,7 @@ ConsumeEventFd(w) ==
     /\ UNCHANGED yield_queue
     /\ UNCHANGED conn_vars
     /\ UNCHANGED task_queue
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
     /\ normal_handle_unchanged
 
 ------------------------------------------------------
@@ -616,7 +618,7 @@ ConsumeActionQueue(w) ==
     /\ UNCHANGED yield_queue
     /\ UNCHANGED worker_events
     /\ UNCHANGED listen_vars
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -625,7 +627,7 @@ worker_conn_unchanged ==
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED eventfd_num
     /\ normal_handle_unchanged
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -825,19 +827,27 @@ conn_unchanged ==
 
 ConnSend(c) ==
     LET
-        w == conn_state[c].worker
+        state == conn_state[c]
+        w == state.worker
 
         trigger_epoll_cond ==
-            /\ conn_state[c].send = <<>>
+            /\ state.send = <<>>
             /\ w # nil
 
         event == [
             type |-> "EPOLLIN",
             conn |-> c
         ]
+
+        total_size == Len(state.send) + Len(state.tmp_buf) + Len(state.read_buf)
+
+        is_aligned ==
+            \/ total_size = 0
+            \/ total_size = state.read_size
     IN
-    /\ conn_state[c] # nil
-    /\ Len(conn_state[c].send) < limit_buffer_size
+    /\ state # nil
+    /\ Len(state.send) < limit_buffer_size
+    /\ is_aligned => ~stop_send
 
     /\ \E v \in Value:
         conn_state' = [conn_state EXCEPT ![c].send = Append(@, v)]
@@ -849,7 +859,7 @@ ConnSend(c) ==
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ conn_unchanged
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
 
@@ -879,15 +889,26 @@ ConnRecv(c) ==
 
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
-    /\ UNCHANGED allow_close_conn
+    /\ UNCHANGED aux_vars
     /\ conn_unchanged
+
+------------------------------------------------------
+
+StopSend ==
+    /\ ~stop_send
+    /\ stop_send' = TRUE
+
+    /\ UNCHANGED <<action_queue, epoll_events, eventfd_num>>
+    /\ UNCHANGED listen_vars
+    /\ UNCHANGED worker_vars
+    /\ UNCHANGED conn_vars
 
 ------------------------------------------------------
 
 TerminateCond ==
     /\ listen_pc = "Init"
     /\ ready_conns = {}
-    /\ allow_close_conn = FALSE
+    /\ stop_send = TRUE
     /\ \A w \in Worker:
         /\ worker_pc[w] = "WaitOnEpoll"
         /\ epoll_events[w] = {}
@@ -938,11 +959,12 @@ Next ==
         \/ ConnSend(c)
         \/ ConnRecv(c)
 
+    \/ StopSend
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
 
-FairSpec == Spec /\ WF_vars(Next)
+FairSpec == Spec /\ WF_vars(Next) /\ SF_vars(StopSend)
 
 ------------------------------------------------------
 
