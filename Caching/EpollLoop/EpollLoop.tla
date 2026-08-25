@@ -6,7 +6,8 @@ CONSTANTS Worker, Conn, Value, nil, limit_buffer_size
 VARIABLES
     action_queue, epoll_events, eventfd_num,
     conn_state, conn_write_buf, conn_write_full, conn_writing, conn_reading,
-    listen_pc, ready_conns, listen_local_conn, listen_local_worker,
+    listen_pc, ready_conns, listen_local_conn,
+    listen_local_worker, listen_shutdown,
     worker_pc, worker_events,
     task_queue, current_task, yield_queue, need_dec_eventfd,
     stop_send, allow_close_conn
@@ -16,7 +17,8 @@ conn_vars == <<
 >>
 
 listen_vars == <<
-    listen_pc, ready_conns, listen_local_conn, listen_local_worker
+    listen_pc, ready_conns, listen_local_conn,
+    listen_local_worker, listen_shutdown
 >>
 
 worker_vars == <<
@@ -87,8 +89,12 @@ Action ==
             type: {"NewConn"},
             conn: Conn
         ]
+
+        shutdown == [
+            type: {"Shutdown"}
+        ]
     IN
-    UNION {new_conn}
+    UNION {new_conn, shutdown}
 
 
 ConnState == [
@@ -162,10 +168,11 @@ TypeOK ==
     /\ conn_writing \in [Conn -> BOOLEAN]
     /\ conn_reading \in [Conn -> BOOLEAN]
 
-    /\ listen_pc \in {"Init", "PushNewConn", "IncEventFd"}
+    /\ listen_pc \in {"Init", "PushNewConn", "IncEventFd", "Terminated"}
     /\ ready_conns \subseteq Conn
     /\ listen_local_conn \in Null(Conn)
     /\ listen_local_worker \in Null(Worker)
+    /\ listen_shutdown \in BOOLEAN
 
     /\ worker_pc \in [Worker -> WorkerPC]
     /\ worker_events \in [Worker -> (SUBSET EpollEvent)]
@@ -192,6 +199,7 @@ Init ==
     /\ ready_conns = {}
     /\ listen_local_conn = nil
     /\ listen_local_worker = nil
+    /\ listen_shutdown = FALSE
 
     /\ worker_pc = [w \in Worker |-> "WaitOnEpoll"]
     /\ worker_events = [w \in Worker |-> {}]
@@ -222,6 +230,7 @@ NewConn(c) ==
         ]
     IN
     /\ conn_state[c] = nil
+    /\ ~listen_shutdown
     /\ ready_conns' = ready_conns \union {c}
     /\ conn_state' = [conn_state EXCEPT ![c] = state]
 
@@ -232,6 +241,7 @@ NewConn(c) ==
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
     /\ UNCHANGED <<listen_pc, listen_local_conn, listen_local_worker>>
+    /\ UNCHANGED listen_shutdown
     /\ UNCHANGED aux_vars
 
 ------------------------------------------------------
@@ -244,6 +254,52 @@ AcceptConn(c) ==
     /\ ready_conns' = ready_conns \ {c}
     /\ listen_local_conn' = c
 
+    /\ UNCHANGED listen_shutdown
+    /\ UNCHANGED listen_local_worker
+    /\ UNCHANGED action_queue
+    /\ UNCHANGED conn_vars
+    /\ UNCHANGED worker_vars
+    /\ UNCHANGED <<epoll_events, eventfd_num>>
+    /\ UNCHANGED aux_vars
+
+------------------------------------------------------
+
+StopListening ==
+    LET
+        action == [
+            type |-> "Shutdown"
+        ]
+
+        event == [
+            type |-> "EventFd"
+        ]
+    IN
+    /\ listen_pc = "Init"
+    /\ listen_shutdown
+    /\ ready_conns = {}
+
+    /\ listen_pc' = "Terminated"
+    /\ action_queue' = [w \in Worker |-> Append(action_queue[w], action)]
+    /\ eventfd_num' = [w \in Worker |-> eventfd_num[w] + 1]
+    /\ epoll_events' = [w \in Worker |-> epoll_events[w] \union {event}]
+
+    /\ UNCHANGED ready_conns
+    /\ UNCHANGED listen_local_conn
+    /\ UNCHANGED listen_shutdown
+    /\ UNCHANGED listen_local_worker
+    /\ UNCHANGED conn_vars
+    /\ UNCHANGED worker_vars
+    /\ UNCHANGED aux_vars
+
+------------------------------------------------------
+
+ShutdownSystem ==
+    /\ allow_close_conn
+    /\ ~listen_shutdown
+    /\ listen_shutdown' = TRUE
+
+    /\ UNCHANGED ready_conns
+    /\ UNCHANGED <<listen_pc, listen_local_conn, listen_local_worker>>
     /\ UNCHANGED listen_local_worker
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_vars
@@ -267,6 +323,7 @@ PushNewConn(w) ==
     /\ listen_local_worker' = w
 
     /\ UNCHANGED conn_vars
+    /\ UNCHANGED listen_shutdown
     /\ UNCHANGED <<ready_conns, listen_local_conn>>
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
@@ -296,6 +353,7 @@ IncEventFd ==
         THEN add_to_epoll
         ELSE UNCHANGED epoll_events
 
+    /\ UNCHANGED listen_shutdown
     /\ UNCHANGED ready_conns
     /\ UNCHANGED conn_vars
     /\ UNCHANGED action_queue
@@ -636,6 +694,15 @@ handleNewConnAction(w, action) ==
 
 -----------
 
+handleShutdownAction(w, action) ==
+    /\ action.type = "Shutdown" \* TODO
+
+    /\ UNCHANGED conn_reading
+    /\ UNCHANGED conn_writing
+    /\ UNCHANGED epoll_events
+
+-----------
+
 ConsumeActionQueue(w) ==
     LET
         on_empty ==
@@ -651,6 +718,7 @@ ConsumeActionQueue(w) ==
             /\ action_queue' = [action_queue EXCEPT ![w] = Tail(@)]
             /\ add_task_queue(w, current_task[w])
             /\ \/ handleNewConnAction(w, action)
+               \/ handleShutdownAction(w, action)
             /\ UNCHANGED need_dec_eventfd
     IN
     /\ worker_pc[w] = "ConsumeActionQueue"
@@ -1040,7 +1108,7 @@ DisableAllowCloseConn ==
 ------------------------------------------------------
 
 TerminateCond ==
-    /\ listen_pc = "Init"
+    /\ listen_pc \in {"Init", "Terminated"}
     /\ ready_conns = {}
     /\ stop_send
     /\ ~allow_close_conn
@@ -1101,6 +1169,8 @@ Next ==
 
     \/ StopSend
     \/ DisableAllowCloseConn
+    \/ ShutdownSystem
+    \/ StopListening
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
