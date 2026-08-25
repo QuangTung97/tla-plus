@@ -8,7 +8,8 @@ VARIABLES
     conn_state, conn_write_buf, conn_write_full, conn_writing,
     listen_pc, ready_conns, listen_local_conn, listen_local_worker,
     worker_pc, worker_events,
-    task_queue, current_task, yield_queue, need_dec_eventfd
+    task_queue, current_task, yield_queue, need_dec_eventfd,
+    allow_close_conn
 
 conn_vars == <<
     conn_state, conn_write_buf, conn_write_full, conn_writing
@@ -27,7 +28,8 @@ vars == <<
     action_queue, epoll_events, eventfd_num,
     conn_vars,
     listen_vars,
-    worker_vars
+    worker_vars,
+    allow_close_conn
 >>
 
 ------------------------------------------------------
@@ -164,6 +166,8 @@ TypeOK ==
     /\ yield_queue \in [Worker -> Seq(Task)]
     /\ need_dec_eventfd \in [Worker -> Null(BOOLEAN)]
 
+    /\ allow_close_conn \in BOOLEAN
+
 Init ==
     /\ action_queue = [w \in Worker |-> <<>>]
     /\ epoll_events = [w \in Worker |-> {}]
@@ -185,6 +189,8 @@ Init ==
     /\ current_task = [w \in Worker |-> nil]
     /\ yield_queue = [w \in Worker |-> <<>>]
     /\ need_dec_eventfd = [w \in Worker |-> nil]
+
+    /\ allow_close_conn = TRUE
 
 ------------------------------------------------------
 
@@ -214,6 +220,7 @@ NewConn(c) ==
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
     /\ UNCHANGED <<listen_pc, listen_local_conn, listen_local_worker>>
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -230,6 +237,7 @@ AcceptConn(c) ==
     /\ UNCHANGED conn_vars
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -250,6 +258,7 @@ PushNewConn(w) ==
     /\ UNCHANGED <<ready_conns, listen_local_conn>>
     /\ UNCHANGED worker_vars
     /\ UNCHANGED <<epoll_events, eventfd_num>>
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -279,6 +288,7 @@ IncEventFd ==
     /\ UNCHANGED conn_vars
     /\ UNCHANGED action_queue
     /\ UNCHANGED worker_vars
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -324,6 +334,7 @@ WaitOnEpoll(w) ==
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED conn_vars
     /\ UNCHANGED listen_vars
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -425,6 +436,7 @@ HandleEpollEvent(w) ==
     /\ UNCHANGED eventfd_num
     /\ UNCHANGED action_queue
     /\ UNCHANGED listen_vars
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -492,6 +504,7 @@ HandleTaskQueue(w) ==
     /\ UNCHANGED conn_vars
     /\ UNCHANGED eventfd_num
     /\ normal_handle_unchanged
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -525,6 +538,7 @@ MoveYieldQueue(w) ==
     /\ UNCHANGED action_queue
     /\ UNCHANGED conn_vars
     /\ UNCHANGED eventfd_num
+    /\ UNCHANGED allow_close_conn
     /\ normal_handle_unchanged
 
 ------------------------------------------------------
@@ -541,6 +555,7 @@ ConsumeEventFd(w) ==
     /\ UNCHANGED yield_queue
     /\ UNCHANGED conn_vars
     /\ UNCHANGED task_queue
+    /\ UNCHANGED allow_close_conn
     /\ normal_handle_unchanged
 
 ------------------------------------------------------
@@ -601,6 +616,7 @@ ConsumeActionQueue(w) ==
     /\ UNCHANGED yield_queue
     /\ UNCHANGED worker_events
     /\ UNCHANGED listen_vars
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -609,6 +625,7 @@ worker_conn_unchanged ==
     /\ UNCHANGED need_dec_eventfd
     /\ UNCHANGED eventfd_num
     /\ normal_handle_unchanged
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -832,6 +849,7 @@ ConnSend(c) ==
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
     /\ conn_unchanged
+    /\ UNCHANGED allow_close_conn
 
 ------------------------------------------------------
 
@@ -861,6 +879,7 @@ ConnRecv(c) ==
 
     /\ UNCHANGED conn_writing
     /\ unchanged_conn_write_vars
+    /\ UNCHANGED allow_close_conn
     /\ conn_unchanged
 
 ------------------------------------------------------
