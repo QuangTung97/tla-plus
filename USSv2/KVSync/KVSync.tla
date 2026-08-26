@@ -149,16 +149,16 @@ UpdateKV(k, v) ==
                 old \union {k}
     IN
     /\ ~stop_update
-
     /\ state[k] # v
+
     /\ state' = [state EXCEPT ![k] = v]
     /\ channel' = [c \in Conn |-> update_channel(c, channel[c])]
     /\ conn_sync_keys' = [
             c \in Conn |-> update_sync_keys(c, conn_sync_keys[c])
         ]
     /\ watch_list' = {}
-    /\ UNCHANGED init_sync
 
+    /\ UNCHANGED init_sync
     /\ UNCHANGED conn_state
     /\ UNCHANGED node_vars
     /\ UNCHANGED aux_vars
@@ -327,6 +327,7 @@ StartServerConn(n) ==
     IN
     /\ dst_pc[n] = "Init"
     /\ c # nil
+    /\ ~conn_state[c].closed
 
     /\ set_local(dst_local_conn, n, c)
     /\ set_local(dst_init_keys, n, {})
@@ -464,7 +465,13 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next) /\ SF_vars(StopUpdate)
+
 ---------------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
+
+-----------------------
 
 StopCondInv ==
     StopCond =>
