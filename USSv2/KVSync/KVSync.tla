@@ -1,20 +1,25 @@
 ---- MODULE KVSync ----
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-CONSTANTS Node, Key, Value, Conn, nil
+CONSTANTS Node, Key, Value, Conn, nil, conn_buf_size
 
 VARIABLES
-    state, watch_list, conn_state, channel, conn_sync_keys,
+    state, watch_list, channel, conn_sync_keys,
+    conn_state,
     src_pc, src_local_conn,
-    dst_pc, sync_state,
+    dst_pc, dst_local_conn, sync_state,
     key_list, stop_update
+
+client_vars == <<
+    state, watch_list, channel, conn_sync_keys
+>>
 
 src_vars == <<
     src_pc, src_local_conn
 >>
 
 dst_vars == <<
-    dst_pc, sync_state
+    dst_pc, dst_local_conn, sync_state
 >>
 
 node_vars == <<
@@ -26,7 +31,8 @@ aux_vars == <<
 >>
 
 vars == <<
-    state, watch_list, conn_state, channel, conn_sync_keys,
+    client_vars,
+    conn_state,
     node_vars,
     aux_vars
 >>
@@ -61,7 +67,7 @@ init_state_store == [k \in Key |-> nil]
 
 SrcPC == {"Init", "NewWatchChan", "SetWatchChan", "WaitOnChan"}
 
-DstPC == {"Init"}
+DstPC == {"Init", "ReadFromConn"}
 
 -----------------------
 
@@ -101,14 +107,16 @@ Channel == [
 TypeOK ==
     /\ state \in StateStore
     /\ watch_list \subseteq Conn
-    /\ conn_state \in [Conn -> Null(ConnState)]
     /\ channel \in [Conn -> Null(Channel)]
     /\ conn_sync_keys \in [Conn -> SUBSET Key]
+
+    /\ conn_state \in [Conn -> Null(ConnState)]
 
     /\ src_pc \in [Node -> SrcPC]
     /\ src_local_conn \in [Node -> Null(Conn)]
 
     /\ dst_pc \in [Node -> DstPC]
+    /\ dst_local_conn \in [Node -> Null(Conn)]
     /\ sync_state \in [Node -> StateStore]
 
     /\ key_list \in PermSeq(Key)
@@ -125,6 +133,7 @@ Init ==
     /\ src_local_conn = [n \in Node |-> nil]
 
     /\ dst_pc = [n \in Node |-> "Init"]
+    /\ dst_local_conn = [n \in Node |-> nil]
     /\ sync_state = [n \in Node |-> init_state_store]
 
     /\ key_list \in PermSeq(Key)
@@ -263,6 +272,7 @@ WaitOnChan(n) ==
     /\ src_pc[n] = "WaitOnChan"
     /\ channel[c].data # <<>>
 
+    /\ Len(conn_state[c].data) < conn_buf_size
     /\ channel' = [channel EXCEPT ![c].data = Tail(@)]
     /\ conn_state' = [conn_state EXCEPT ![c].data = Append(@, action)]
     /\ src_goto(n, "SetWatchChan")
@@ -271,6 +281,52 @@ WaitOnChan(n) ==
     /\ UNCHANGED src_local_conn
     /\ UNCHANGED watch_list
     /\ src_action_unchanged
+
+---------------------------------------------------------------
+
+dst_goto(n, l) ==
+    set_local(dst_pc, n, l)
+
+dst_action_unchanged ==
+    /\ UNCHANGED state
+    /\ UNCHANGED client_vars
+    /\ UNCHANGED src_vars
+    /\ UNCHANGED aux_vars
+
+---------------------------------------------------------------
+
+StartServerConn(n) ==
+    LET
+        c == src_local_conn[n]
+    IN
+    /\ dst_pc[n] = "Init"
+    /\ c # nil
+
+    /\ set_local(dst_local_conn, n, c)
+    /\ dst_goto(n, "ReadFromConn")
+
+    /\ UNCHANGED sync_state
+    /\ UNCHANGED conn_state
+    /\ dst_action_unchanged
+
+---------------------------------------------------------------
+
+ReadFromConn(n) ==
+    LET
+        c == dst_local_conn[n]
+        action == conn_state[c].data[1]
+        k == action.key
+        v == action.value
+    IN
+    /\ dst_pc[n] = "ReadFromConn"
+    /\ conn_state[c].data # <<>>
+
+    /\ conn_state' = [conn_state EXCEPT ![c].data = Tail(@)]
+    /\ sync_state' = [sync_state EXCEPT ![n][k] = v]
+
+    /\ UNCHANGED dst_local_conn
+    /\ UNCHANGED dst_pc
+    /\ dst_action_unchanged
 
 ---------------------------------------------------------------
 
@@ -292,6 +348,7 @@ StopCond ==
     /\ \A n \in Node:
         /\ src_pc[n] = "WaitOnChan"
         /\ channel[src_local_conn[n]].data = <<>>
+        /\ dst_pc[n] = "ReadFromConn"
     /\ \A c \in Conn:
         conn_state[c] # nil =>
             /\ conn_state[c].data = <<>>
@@ -315,6 +372,8 @@ Next ==
         \/ NewWatchChan(n)
         \/ SetWatchChan(n)
         \/ WaitOnChan(n)
+        \/ StartServerConn(n)
+        \/ ReadFromConn(n)
     \/ StopUpdate
     \/ Terminated
 
@@ -343,5 +402,12 @@ ChannelInv ==
             /\ Len(channel[c].data) = 0
             /\ conn_state[c] # nil
             /\ conn_sync_keys[c] = {}
+
+-----------------------
+
+ConnStateInv ==
+    \A c \in Conn:
+        conn_state[c] # nil =>
+            Len(conn_state[c].data) <= conn_buf_size
 
 ====
