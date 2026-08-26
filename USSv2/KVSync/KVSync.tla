@@ -8,7 +8,7 @@ VARIABLES
     conn_state,
     src_pc, src_local_conn,
     dst_pc, dst_local_conn, sync_state,
-    key_list, stop_update
+    stop_update
 
 client_vars == <<
     state, watch_list, channel, conn_sync_keys
@@ -27,7 +27,7 @@ node_vars == <<
 >>
 
 aux_vars == <<
-    key_list, stop_update
+    stop_update
 >>
 
 vars == <<
@@ -91,15 +91,13 @@ put_action(k, v) == [
 
 ConnState == [
     data: Seq(Action),
-    client_closed: BOOLEAN,
-    server_closed: BOOLEAN
+    closed: BOOLEAN
 ]
 
 -----------------------
 
 Channel == [
-    data: Seq(Action),
-    closed: BOOLEAN
+    data: Seq(Action)
 ]
 
 ---------------------------------------------------------------
@@ -119,7 +117,6 @@ TypeOK ==
     /\ dst_local_conn \in [Node -> Null(Conn)]
     /\ sync_state \in [Node -> StateStore]
 
-    /\ key_list \in PermSeq(Key)
     /\ stop_update \in BOOLEAN
 
 Init ==
@@ -136,7 +133,6 @@ Init ==
     /\ dst_local_conn = [n \in Node |-> nil]
     /\ sync_state = [n \in Node |-> init_state_store]
 
-    /\ key_list \in PermSeq(Key)
     /\ stop_update = FALSE
 
 ---------------------------------------------------------------
@@ -195,8 +191,7 @@ NewConn(n, c) ==
     LET
         new_conn == [
             data |-> <<>>,
-            client_closed |-> FALSE,
-            server_closed |-> FALSE
+            closed |-> FALSE
         ]
     IN
     /\ src_pc[n] = "Init"
@@ -218,8 +213,7 @@ NewWatchChan(n) ==
         c == src_local_conn[n]
 
         empty_chan == [
-            data |-> <<>>,
-            closed |-> FALSE
+            data |-> <<>>
         ]
     IN
     /\ src_pc[n] = "NewWatchChan"
@@ -268,17 +262,32 @@ WaitOnChan(n) ==
     LET
         c == src_local_conn[n]
         action == channel[c].data[1]
+
+        wait_cond ==
+            /\ channel[c].data = <<>>
+            /\ ~conn_state[c].closed
+
+        on_closed ==
+            /\ src_goto(n, "Init")
+            /\ set_local(src_local_conn, n, nil)
+            /\ UNCHANGED channel
+            /\ UNCHANGED conn_state
+
+        on_normal ==
+            /\ Len(conn_state[c].data) < conn_buf_size
+            /\ channel' = [channel EXCEPT ![c].data = Tail(@)]
+            /\ conn_state' = [conn_state EXCEPT ![c].data = Append(@, action)]
+            /\ src_goto(n, "SetWatchChan")
+            /\ UNCHANGED src_local_conn
     IN
     /\ src_pc[n] = "WaitOnChan"
-    /\ channel[c].data # <<>>
+    /\ ~wait_cond
 
-    /\ Len(conn_state[c].data) < conn_buf_size
-    /\ channel' = [channel EXCEPT ![c].data = Tail(@)]
-    /\ conn_state' = [conn_state EXCEPT ![c].data = Append(@, action)]
-    /\ src_goto(n, "SetWatchChan")
+    /\ IF conn_state[c].closed
+        THEN on_closed
+        ELSE on_normal
 
     /\ UNCHANGED conn_sync_keys
-    /\ UNCHANGED src_local_conn
     /\ UNCHANGED watch_list
     /\ src_action_unchanged
 
@@ -315,18 +324,52 @@ ReadFromConn(n) ==
     LET
         c == dst_local_conn[n]
         action == conn_state[c].data[1]
+
+        wait_cond ==
+            /\ conn_state[c].data = <<>>
+            /\ ~conn_state[c].closed
+
+        on_closed ==
+            /\ dst_goto(n, "Init")
+            /\ set_local(dst_local_conn, n, nil)
+            /\ UNCHANGED conn_state
+            /\ UNCHANGED sync_state
+
         k == action.key
         v == action.value
+
+        on_normal ==
+            /\ conn_state' = [conn_state EXCEPT ![c].data = Tail(@)]
+            /\ sync_state' = [sync_state EXCEPT ![n][k] = v]
+            /\ UNCHANGED dst_local_conn
+            /\ UNCHANGED dst_pc
     IN
     /\ dst_pc[n] = "ReadFromConn"
-    /\ conn_state[c].data # <<>>
+    /\ ~wait_cond
 
-    /\ conn_state' = [conn_state EXCEPT ![c].data = Tail(@)]
-    /\ sync_state' = [sync_state EXCEPT ![n][k] = v]
+    /\ IF conn_state[c].closed
+        THEN on_closed
+        ELSE on_normal
 
-    /\ UNCHANGED dst_local_conn
-    /\ UNCHANGED dst_pc
     /\ dst_action_unchanged
+
+---------------------------------------------------------------
+
+ConnClose(c) ==
+    LET
+        allow_cond ==
+            /\ \A n \in Node: src_local_conn[n] # nil
+            /\ \E c1 \in Conn: conn_state[c1] = nil
+    IN
+    /\ conn_state[c] # nil
+    /\ ~conn_state[c].closed
+    /\ allow_cond
+
+    /\ conn_state' = [conn_state EXCEPT ![c].closed = TRUE]
+
+    /\ UNCHANGED client_vars
+    /\ UNCHANGED node_vars
+    /\ UNCHANGED aux_vars
 
 ---------------------------------------------------------------
 
@@ -334,7 +377,6 @@ StopUpdate ==
     /\ ~stop_update
     /\ stop_update' = TRUE
 
-    /\ UNCHANGED key_list
     /\ UNCHANGED state
     /\ UNCHANGED conn_sync_keys
     /\ UNCHANGED watch_list
@@ -346,16 +388,19 @@ StopUpdate ==
 
 StopCond ==
     /\ \A n \in Node:
+        LET
+            c == src_local_conn[n]
+        IN
         /\ src_pc[n] = "WaitOnChan"
-        /\ channel[src_local_conn[n]].data = <<>>
-        /\ dst_pc[n] = "ReadFromConn"
-    /\ \A c \in Conn:
-        conn_state[c] # nil =>
-            /\ conn_state[c].data = <<>>
+        /\ channel[c].data = <<>>
+        /\ src_local_conn[n] = dst_local_conn[n]
+        /\ conn_state[c].data = <<>>
 
 TerminateCond ==
-    /\ stop_update
     /\ StopCond
+    /\ \A n \in Node:
+        /\ dst_pc[n] = "ReadFromConn"
+    /\ stop_update
 
 Terminated ==
     /\ TerminateCond
@@ -374,6 +419,8 @@ Next ==
         \/ WaitOnChan(n)
         \/ StartServerConn(n)
         \/ ReadFromConn(n)
+    \/ \E c \in Conn:
+        \/ ConnClose(c)
     \/ StopUpdate
     \/ Terminated
 
