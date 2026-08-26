@@ -4,14 +4,14 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 CONSTANTS Node, Key, Value, Conn, nil, conn_buf_size
 
 VARIABLES
-    state, watch_list, channel, conn_sync_keys,
+    state, init_sync, watch_list, channel, conn_sync_keys,
     conn_state,
     src_pc, src_local_conn,
-    dst_pc, dst_local_conn, sync_state,
+    dst_pc, dst_local_conn, sync_state, dst_init_keys,
     stop_update
 
 client_vars == <<
-    state, watch_list, channel, conn_sync_keys
+    state, init_sync, watch_list, channel, conn_sync_keys
 >>
 
 src_vars == <<
@@ -19,7 +19,7 @@ src_vars == <<
 >>
 
 dst_vars == <<
-    dst_pc, dst_local_conn, sync_state
+    dst_pc, dst_local_conn, sync_state, dst_init_keys
 >>
 
 node_vars == <<
@@ -40,22 +40,6 @@ vars == <<
 ---------------------------------------------------------------
 
 Null(S) == S \union {nil}
-
------------------------
-
-PermSeq(S) ==
-    LET
-        n == Cardinality(S)
-        domain == 1..n
-        all_seqs == [domain -> S]
-
-        cond(seq) ==
-            \A i, j \in domain:
-                seq[i] = seq[j] => i = j
-    IN
-        {s \in all_seqs: cond(s)}
-
-ASSUME PermSeq({11, 12}) = {<<11, 12>>, <<12, 11>>}
 
 ---------------------------------------------------------------
 
@@ -78,13 +62,20 @@ Action ==
             key: Key,
             value: Null(Value)
         ]
+        finish == [
+            type: {"Finish"}
+        ]
     IN
-        UNION {put}
+        UNION {put, finish}
 
 put_action(k, v) == [
     type |-> "Put",
     key |-> k,
     value |-> v
+]
+
+finish_action == [
+    type |-> "Finish"
 ]
 
 -----------------------
@@ -104,6 +95,7 @@ Channel == [
 
 TypeOK ==
     /\ state \in StateStore
+    /\ init_sync \in [Conn -> BOOLEAN]
     /\ watch_list \subseteq Conn
     /\ channel \in [Conn -> Null(Channel)]
     /\ conn_sync_keys \in [Conn -> SUBSET Key]
@@ -116,11 +108,13 @@ TypeOK ==
     /\ dst_pc \in [Node -> DstPC]
     /\ dst_local_conn \in [Node -> Null(Conn)]
     /\ sync_state \in [Node -> StateStore]
+    /\ dst_init_keys \in [Node -> Null(SUBSET Key)]
 
     /\ stop_update \in BOOLEAN
 
 Init ==
     /\ state = init_state_store
+    /\ init_sync = [c \in Conn |-> FALSE]
     /\ watch_list = {}
     /\ conn_state = [c \in Conn |-> nil]
     /\ channel = [c \in Conn |-> nil]
@@ -132,6 +126,7 @@ Init ==
     /\ dst_pc = [n \in Node |-> "Init"]
     /\ dst_local_conn = [n \in Node |-> nil]
     /\ sync_state = [n \in Node |-> init_state_store]
+    /\ dst_init_keys = [n \in Node |-> nil]
 
     /\ stop_update = FALSE
 
@@ -162,6 +157,7 @@ UpdateKV(k, v) ==
             c \in Conn |-> update_sync_keys(c, conn_sync_keys[c])
         ]
     /\ watch_list' = {}
+    /\ UNCHANGED init_sync
 
     /\ UNCHANGED conn_state
     /\ UNCHANGED node_vars
@@ -201,6 +197,7 @@ NewConn(n, c) ==
     /\ set_local(conn_state, c, new_conn)
     /\ set_local(src_local_conn, n, c)
     /\ set_local(conn_sync_keys, c, non_nil_keys)
+    /\ set_local(init_sync, c, TRUE)
 
     /\ UNCHANGED channel
     /\ UNCHANGED watch_list
@@ -222,6 +219,7 @@ NewWatchChan(n) ==
     /\ set_local(channel, c, empty_chan)
 
     /\ UNCHANGED watch_list
+    /\ UNCHANGED init_sync
     /\ UNCHANGED conn_sync_keys
     /\ UNCHANGED conn_state
     /\ UNCHANGED src_local_conn
@@ -229,28 +227,46 @@ NewWatchChan(n) ==
 
 ---------------------------------------------------------------
 
+push_to_chan(c, action) ==
+    channel' = [channel EXCEPT ![c].data = Append(@, action)]
+
 SetWatchChan(n) ==
     LET
         c == src_local_conn[n]
+
+        empty_cond ==
+            /\ conn_sync_keys[c] = {}
+            /\ init_sync[c] = FALSE
 
         on_empty ==
             /\ watch_list' = watch_list \union {c}
             /\ UNCHANGED conn_sync_keys
             /\ UNCHANGED channel
+            /\ UNCHANGED init_sync
 
         action(k) == put_action(k, state[k])
 
         on_non_empty(k) ==
             /\ conn_sync_keys' = [conn_sync_keys EXCEPT ![c] = @ \ {k} ]
-            /\ channel' = [channel EXCEPT ![c].data = Append(@, action(k))]
+            /\ push_to_chan(c, action(k))
             /\ UNCHANGED watch_list
+            /\ UNCHANGED init_sync
+
+        on_finish_init ==
+            /\ push_to_chan(c, finish_action)
+            /\ set_local(init_sync, c, FALSE)
+            /\ UNCHANGED watch_list
+            /\ UNCHANGED conn_sync_keys
     IN
     /\ src_pc[n] = "SetWatchChan"
 
     /\ src_goto(n, "WaitOnChan")
-    /\ IF conn_sync_keys[c] = {}
-        THEN on_empty
-        ELSE \E k \in conn_sync_keys[c]: on_non_empty(k)
+    /\ IF empty_cond THEN
+            on_empty
+        ELSE IF conn_sync_keys[c] # {} THEN
+            \E k \in conn_sync_keys[c]: on_non_empty(k)
+        ELSE
+            on_finish_init
 
     /\ UNCHANGED src_local_conn
     /\ UNCHANGED conn_state
@@ -289,6 +305,7 @@ WaitOnChan(n) ==
 
     /\ UNCHANGED conn_sync_keys
     /\ UNCHANGED watch_list
+    /\ UNCHANGED init_sync
     /\ src_action_unchanged
 
 ---------------------------------------------------------------
@@ -312,6 +329,7 @@ StartServerConn(n) ==
     /\ c # nil
 
     /\ set_local(dst_local_conn, n, c)
+    /\ set_local(dst_init_keys, n, {})
     /\ dst_goto(n, "ReadFromConn")
 
     /\ UNCHANGED sync_state
@@ -332,15 +350,37 @@ ReadFromConn(n) ==
         on_closed ==
             /\ dst_goto(n, "Init")
             /\ set_local(dst_local_conn, n, nil)
+            /\ set_local(dst_init_keys, n, nil)
             /\ UNCHANGED conn_state
             /\ UNCHANGED sync_state
+
+        finish_new_value(k) ==
+            IF k \in dst_init_keys[n]
+                THEN sync_state[n][k]
+                ELSE nil
+
+        new_sync_state == [k \in Key |-> finish_new_value(k)]
+
+        on_finish ==
+            /\ action.type = "Finish"
+            /\ sync_state' = [sync_state EXCEPT ![n] = new_sync_state]
+            /\ set_local(dst_init_keys, n, {})
 
         k == action.key
         v == action.value
 
+        on_put ==
+            /\ action.type = "Put"
+            /\ sync_state' = [sync_state EXCEPT ![n][k] = v]
+            /\ IF dst_init_keys[n] = nil THEN
+                    UNCHANGED dst_init_keys
+                ELSE
+                    dst_init_keys' = [dst_init_keys EXCEPT ![n] = @ \union {k}]
+
         on_normal ==
             /\ conn_state' = [conn_state EXCEPT ![c].data = Tail(@)]
-            /\ sync_state' = [sync_state EXCEPT ![n][k] = v]
+            /\ \/ on_put
+               \/ on_finish
             /\ UNCHANGED dst_local_conn
             /\ UNCHANGED dst_pc
     IN
@@ -377,10 +417,7 @@ StopUpdate ==
     /\ ~stop_update
     /\ stop_update' = TRUE
 
-    /\ UNCHANGED state
-    /\ UNCHANGED conn_sync_keys
-    /\ UNCHANGED watch_list
-    /\ UNCHANGED channel
+    /\ UNCHANGED client_vars
     /\ UNCHANGED conn_state
     /\ UNCHANGED node_vars
 
@@ -395,6 +432,7 @@ StopCond ==
         /\ channel[c].data = <<>>
         /\ src_local_conn[n] = dst_local_conn[n]
         /\ conn_state[c].data = <<>>
+        /\ init_sync[c] = FALSE
 
 TerminateCond ==
     /\ StopCond
@@ -456,5 +494,18 @@ ConnStateInv ==
     \A c \in Conn:
         conn_state[c] # nil =>
             Len(conn_state[c].data) <= conn_buf_size
+
+-----------------------
+
+InitSyncInv ==
+    \A c \in Conn:
+        /\ conn_state[c] = nil => init_sync[c] = FALSE
+        /\ init_sync[c] = TRUE => c \notin watch_list
+
+-----------------------
+
+DstInitKeysInv ==
+    \A n \in Node:
+        dst_pc[n] = "Init" => dst_init_keys[n] = nil
 
 ====
