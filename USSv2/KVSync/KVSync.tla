@@ -4,13 +4,13 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 CONSTANTS Node, Key, Value, Conn, nil
 
 VARIABLES
-    state, conn_state,
-    src_pc, src_local_conn, channel, conn_sync_keys,
+    state, watch_list, conn_state, channel, conn_sync_keys,
+    src_pc, src_local_conn,
     dst_pc, sync_state,
     key_list, stop_update
 
 src_vars == <<
-    src_pc, src_local_conn, channel, conn_sync_keys
+    src_pc, src_local_conn
 >>
 
 dst_vars == <<
@@ -26,7 +26,7 @@ aux_vars == <<
 >>
 
 vars == <<
-    state, conn_state,
+    state, watch_list, conn_state, channel, conn_sync_keys,
     node_vars,
     aux_vars
 >>
@@ -59,7 +59,7 @@ init_state_store == [k \in Key |-> nil]
 
 -----------------------
 
-SrcPC == {"Init", "RegisterWatcher", "WaitOnChan"}
+SrcPC == {"Init", "NewWatchChan", "SetWatchChan", "WaitOnChan"}
 
 DstPC == {"Init"}
 
@@ -70,7 +70,7 @@ Action ==
         put == [
             type: {"Put"},
             key: Key,
-            value: Value
+            value: Null(Value)
         ]
     IN
         UNION {put}
@@ -84,6 +84,7 @@ put_action(k, v) == [
 -----------------------
 
 ConnState == [
+    data: Seq(Action),
     client_closed: BOOLEAN,
     server_closed: BOOLEAN
 ]
@@ -99,12 +100,13 @@ Channel == [
 
 TypeOK ==
     /\ state \in StateStore
+    /\ watch_list \subseteq Conn
     /\ conn_state \in [Conn -> Null(ConnState)]
+    /\ channel \in [Conn -> Null(Channel)]
+    /\ conn_sync_keys \in [Conn -> SUBSET Key]
 
     /\ src_pc \in [Node -> SrcPC]
     /\ src_local_conn \in [Node -> Null(Conn)]
-    /\ channel \in [Conn -> Null(Channel)]
-    /\ conn_sync_keys \in [Conn -> SUBSET Key]
 
     /\ dst_pc \in [Node -> DstPC]
     /\ sync_state \in [Node -> StateStore]
@@ -114,12 +116,13 @@ TypeOK ==
 
 Init ==
     /\ state = init_state_store
+    /\ watch_list = {}
     /\ conn_state = [c \in Conn |-> nil]
+    /\ channel = [c \in Conn |-> nil]
+    /\ conn_sync_keys = [c \in Conn |-> {}]
 
     /\ src_pc = [n \in Node |-> "Init"]
     /\ src_local_conn = [n \in Node |-> nil]
-    /\ channel = [c \in Conn |-> nil]
-    /\ conn_sync_keys = [c \in Conn |-> {}]
 
     /\ dst_pc = [n \in Node |-> "Init"]
     /\ sync_state = [n \in Node |-> init_state_store]
@@ -130,11 +133,30 @@ Init ==
 ---------------------------------------------------------------
 
 UpdateKV(k, v) ==
+    LET
+        update_channel(c, old) ==
+            IF c \in watch_list THEN
+                [old EXCEPT !.data = Append(@, put_action(k, v))]
+            ELSE
+                old
+
+        update_sync_keys(c, old) ==
+            IF conn_state[c] = nil THEN
+                old
+            ELSE IF c \in watch_list THEN
+                old
+            ELSE
+                old \union {k}
+    IN
     /\ ~stop_update
 
     /\ state[k] # v
     /\ state' = [state EXCEPT ![k] = v]
-    /\ UNCHANGED conn_sync_keys \* TODO
+    /\ channel' = [c \in Conn |-> update_channel(c, channel[c])]
+    /\ conn_sync_keys' = [
+            c \in Conn |-> update_sync_keys(c, conn_sync_keys[c])
+        ]
+    /\ watch_list' = {}
 
     /\ UNCHANGED conn_state
     /\ UNCHANGED node_vars
@@ -163,6 +185,7 @@ src_action_unchanged ==
 NewConn(n, c) ==
     LET
         new_conn == [
+            data |-> <<>>,
             client_closed |-> FALSE,
             server_closed |-> FALSE
         ]
@@ -170,49 +193,83 @@ NewConn(n, c) ==
     /\ src_pc[n] = "Init"
     /\ conn_state[c] = nil
 
-    /\ src_goto(n, "RegisterWatcher")
+    /\ src_goto(n, "NewWatchChan")
     /\ set_local(conn_state, c, new_conn)
     /\ set_local(src_local_conn, n, c)
+    /\ set_local(conn_sync_keys, c, non_nil_keys)
 
     /\ UNCHANGED channel
-    /\ UNCHANGED conn_sync_keys
+    /\ UNCHANGED watch_list
     /\ src_action_unchanged
 
 ---------------------------------------------------------------
 
-RegisterWatcher(n) ==
+NewWatchChan(n) ==
     LET
         c == src_local_conn[n]
-
-        init_sync_keys == non_nil_keys
 
         empty_chan == [
             data |-> <<>>,
             closed |-> FALSE
         ]
-
-        on_empty ==
-            /\ set_local(channel, c, empty_chan)
-            /\ set_local(conn_sync_keys, c, {})
-
-
-        chan_data(k) == [empty_chan EXCEPT
-            !.data = <<put_action(k, state[k])>>
-        ]
-
-        on_sync_key(k) ==
-            /\ set_local(channel, c, chan_data(k))
-            /\ set_local(conn_sync_keys, c, init_sync_keys \ {k})
     IN
-    /\ src_pc[n] = "RegisterWatcher"
+    /\ src_pc[n] = "NewWatchChan"
 
-    /\ src_goto(n, "WaitOnChan")
-    /\ IF init_sync_keys = {}
-        THEN on_empty
-        ELSE \E k \in init_sync_keys: on_sync_key(k)
+    /\ src_goto(n, "SetWatchChan")
+    /\ set_local(channel, c, empty_chan)
 
+    /\ UNCHANGED watch_list
+    /\ UNCHANGED conn_sync_keys
     /\ UNCHANGED conn_state
     /\ UNCHANGED src_local_conn
+    /\ src_action_unchanged
+
+---------------------------------------------------------------
+
+SetWatchChan(n) ==
+    LET
+        c == src_local_conn[n]
+
+        on_empty ==
+            /\ watch_list' = watch_list \union {c}
+            /\ UNCHANGED conn_sync_keys
+            /\ UNCHANGED channel
+
+        action(k) == put_action(k, state[k])
+
+        on_non_empty(k) ==
+            /\ conn_sync_keys' = [conn_sync_keys EXCEPT ![c] = @ \ {k} ]
+            /\ channel' = [channel EXCEPT ![c].data = Append(@, action(k))]
+            /\ UNCHANGED watch_list
+    IN
+    /\ src_pc[n] = "SetWatchChan"
+
+    /\ src_goto(n, "WaitOnChan")
+    /\ IF conn_sync_keys[c] = {}
+        THEN on_empty
+        ELSE \E k \in conn_sync_keys[c]: on_non_empty(k)
+
+    /\ UNCHANGED src_local_conn
+    /\ UNCHANGED conn_state
+    /\ src_action_unchanged
+
+---------------------------------------------------------------
+
+WaitOnChan(n) ==
+    LET
+        c == src_local_conn[n]
+        action == channel[c].data[1]
+    IN
+    /\ src_pc[n] = "WaitOnChan"
+    /\ channel[c].data # <<>>
+
+    /\ channel' = [channel EXCEPT ![c].data = Tail(@)]
+    /\ conn_state' = [conn_state EXCEPT ![c].data = Append(@, action)]
+    /\ src_goto(n, "SetWatchChan")
+
+    /\ UNCHANGED conn_sync_keys
+    /\ UNCHANGED src_local_conn
+    /\ UNCHANGED watch_list
     /\ src_action_unchanged
 
 ---------------------------------------------------------------
@@ -223,6 +280,9 @@ StopUpdate ==
 
     /\ UNCHANGED key_list
     /\ UNCHANGED state
+    /\ UNCHANGED conn_sync_keys
+    /\ UNCHANGED watch_list
+    /\ UNCHANGED channel
     /\ UNCHANGED conn_state
     /\ UNCHANGED node_vars
 
@@ -232,6 +292,9 @@ StopCond ==
     /\ \A n \in Node:
         /\ src_pc[n] = "WaitOnChan"
         /\ channel[src_local_conn[n]].data = <<>>
+    /\ \A c \in Conn:
+        conn_state[c] # nil =>
+            /\ conn_state[c].data = <<>>
 
 TerminateCond ==
     /\ stop_update
@@ -249,7 +312,9 @@ Next ==
     \/ \E n \in Node, c \in Conn:
         \/ NewConn(n, c)
     \/ \E n \in Node:
-        \/ RegisterWatcher(n)
+        \/ NewWatchChan(n)
+        \/ SetWatchChan(n)
+        \/ WaitOnChan(n)
     \/ StopUpdate
     \/ Terminated
 
@@ -267,6 +332,16 @@ StopCondInv ==
 ConnSyncKeysInv ==
     \A c \in Conn:
         /\ conn_state[c] = nil => conn_sync_keys[c] = {}
-        /\ conn_sync_keys[c] \subseteq non_nil_keys
+
+-----------------------
+
+ChannelInv ==
+    \A c \in Conn:
+        /\ channel[c] # nil => Len(channel[c].data) <= 1
+        /\ c \in watch_list =>
+            /\ conn_state[c] # nil
+            /\ Len(channel[c].data) = 0
+            /\ conn_state[c] # nil
+            /\ conn_sync_keys[c] = {}
 
 ====
