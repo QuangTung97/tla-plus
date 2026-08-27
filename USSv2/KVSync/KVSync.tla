@@ -373,7 +373,7 @@ ReadFromConn(n) ==
         on_put ==
             /\ action.type = "Put"
             /\ sync_state' = [sync_state EXCEPT ![n][k] = v]
-            /\ IF dst_init_keys[n] = nil THEN
+            /\ IF dst_init_keys[n] = nil \/ v = nil THEN
                     UNCHANGED dst_init_keys
                 ELSE
                     dst_init_keys' = [dst_init_keys EXCEPT ![n] = @ \union {k}]
