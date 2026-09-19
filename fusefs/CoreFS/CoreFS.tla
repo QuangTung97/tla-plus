@@ -42,8 +42,8 @@ LogEntry ==
             type: {"Split"},
             file: File,
             prev: Null(File),
-            disks: SubSetNonEmpty(Disk),
-            primary: Disk
+            sub_files: SUBSET File,
+            config: EntryConfig
         ]
     IN
     UNION {split_entry}
@@ -56,12 +56,12 @@ init_config(disks, primary) == [
     primary |-> primary
 ]
 
-init_log_entry(root, disks, primary) == [
+init_log_entry(root, config) == [
     type |-> "Split",
     file |-> root,
     prev |-> nil,
-    disks |-> disks,
-    primary |-> primary
+    sub_files |-> File,
+    config |-> config
 ]
 
 FileContent == [
@@ -87,10 +87,11 @@ Init ==
     /\ \E root \in File:
         /\ global_parent_file = [f \in File |-> root]
         /\ \E disks \in SubSetNonEmpty(Disk): \E primary \in disks:
-            /\ global_config = [init_entry_config EXCEPT
-                    ![root] = init_config(disks, primary)
-                ]
-            /\ global_log = <<init_log_entry(root, disks, primary)>>
+            LET
+                config == init_config(disks, primary)
+            IN
+            /\ global_config = [init_entry_config EXCEPT ![root] = config]
+            /\ global_log = <<init_log_entry(root, config)>>
 
     /\ file_content = [d \in Disk |-> [f \in File |-> nil]]
     /\ disk_parent_file = [d \in Disk |-> [f \in File |-> nil]]
@@ -103,13 +104,34 @@ global_entry_files == {global_parent_file[f]: f \in File}
 
 --------------------------------------------------------------------
 
+DiskSyncLog(d) ==
+    LET
+        offset == disk_log_offset[d] + 1
+        entry == global_log[offset]
+        root == entry.file
+
+        update_parent_file(old) ==
+            [f \in File |-> IF f \in entry.sub_files THEN root ELSE old[f]]
+    IN
+    /\ disk_log_offset[d] < Len(global_log)
+
+    /\ disk_log_offset' = [disk_log_offset EXCEPT ![d] = @ + 1]
+    /\ disk_config' = [disk_config EXCEPT ![d][root] = entry.config]
+    /\ disk_parent_file' = [disk_parent_file EXCEPT ![d] = update_parent_file(@)]
+
+    /\ UNCHANGED file_content
+    /\ UNCHANGED global_vars
+
+--------------------------------------------------------------------
+
 UpdateFileData(d, f, v) ==
     LET
         root == disk_parent_file[d][f]
+        content == file_content[d]
     IN
     /\ root # nil
-    /\ file_content[f].data # v
-    /\ file_content' = [file_content EXCEPT ![f].data = v]
+    /\ content[f] # nil
+    /\ content[f].data # v
 
 --------------------------------------------------------------------
 
@@ -119,6 +141,8 @@ Terminated ==
 --------------------------------------------------------------------
 
 Next ==
+    \/ \E d \in Disk:
+        \/ DiskSyncLog(d)
     \/ \E d \in Disk, f \in File, v \in Value:
         \/ UpdateFileData(d, f, v)
     \/ Terminated
