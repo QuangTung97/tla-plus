@@ -5,16 +5,18 @@ CONSTANTS File, Disk, Value, Attr, nil
 
 VARIABLES
     global_parent_file, global_config, global_log,
-    file_content, disk_parent_file, disk_config,
-    disk_log_offset
+    disk_file_mem, disk_file_content, disk_parent_file,
+    disk_config, disk_global_offset,
+    disk_mem_log, disk_log
 
 global_vars == <<
     global_parent_file, global_config, global_log
 >>
 
 disk_vars == <<
-    file_content, disk_parent_file, disk_config,
-    disk_log_offset
+    disk_file_mem, disk_file_content, disk_parent_file,
+    disk_config, disk_global_offset,
+    disk_mem_log, disk_log
 >>
 
 vars == <<
@@ -71,6 +73,14 @@ FileContent == [
 
 DiskFileContent == [File -> Null(FileContent)]
 
+DiskLogEntry ==
+    LET
+        add_file == [
+            type: {"AddFile"}
+        ]
+    IN
+    UNION {add_file}
+
 --------------------------------------------------------------------
 
 TypeOK ==
@@ -78,10 +88,14 @@ TypeOK ==
     /\ global_config \in [File -> Null(EntryConfig)]
     /\ global_log \in Seq(LogEntry)
 
-    /\ file_content \in [Disk -> DiskFileContent]
+    /\ disk_file_content \in [Disk -> DiskFileContent]
+    /\ disk_file_mem \in [Disk -> DiskFileContent]
     /\ disk_parent_file \in [Disk -> [File -> Null(File)]]
     /\ disk_config \in [Disk -> [File -> Null(EntryConfig)]]
-    /\ disk_log_offset \in [Disk -> Nat]
+    /\ disk_global_offset \in [Disk -> Nat]
+
+    /\ disk_log \in [Disk -> Seq(DiskLogEntry)]
+    /\ disk_mem_log \in [Disk -> Seq(DiskLogEntry)]
 
 Init ==
     /\ \E root \in File:
@@ -93,10 +107,15 @@ Init ==
             /\ global_config = [init_entry_config EXCEPT ![root] = config]
             /\ global_log = <<init_log_entry(root, config)>>
 
-    /\ file_content = [d \in Disk |-> [f \in File |-> nil]]
+    /\ disk_file_content = [d \in Disk |-> [f \in File |-> nil]]
+    /\ disk_file_mem = [d \in Disk |-> [f \in File |-> nil]]
+
     /\ disk_parent_file = [d \in Disk |-> [f \in File |-> nil]]
     /\ disk_config = [d \in Disk |-> [f \in File |-> nil]]
-    /\ disk_log_offset = [d \in Disk |-> 0]
+    /\ disk_global_offset = [d \in Disk |-> 0]
+
+    /\ disk_log = [d \in Disk |-> <<>>]
+    /\ disk_mem_log = [d \in Disk |-> <<>>]
 
 --------------------------------------------------------------------
 
@@ -106,32 +125,37 @@ global_entry_files == {global_parent_file[f]: f \in File}
 
 DiskSyncLog(d) ==
     LET
-        offset == disk_log_offset[d] + 1
+        offset == disk_global_offset[d] + 1
         entry == global_log[offset]
         root == entry.file
 
         update_parent_file(old) ==
             [f \in File |-> IF f \in entry.sub_files THEN root ELSE old[f]]
     IN
-    /\ disk_log_offset[d] < Len(global_log)
+    /\ disk_global_offset[d] < Len(global_log)
 
-    /\ disk_log_offset' = [disk_log_offset EXCEPT ![d] = @ + 1]
+    /\ disk_global_offset' = [disk_global_offset EXCEPT ![d] = @ + 1]
     /\ disk_config' = [disk_config EXCEPT ![d][root] = entry.config]
     /\ disk_parent_file' = [disk_parent_file EXCEPT ![d] = update_parent_file(@)]
 
-    /\ UNCHANGED file_content
+    /\ UNCHANGED <<disk_file_content, disk_file_mem>>
+    /\ UNCHANGED <<disk_log, disk_mem_log>>
     /\ UNCHANGED global_vars
+
+--------------------------------------------------------------------
 
 --------------------------------------------------------------------
 
 UpdateFileData(d, f, v) ==
     LET
         root == disk_parent_file[d][f]
-        content == file_content[d]
+        content == disk_file_content[d]
+        primary == disk_config[d][root].primary
     IN
     /\ root # nil
     /\ content[f] # nil
     /\ content[f].data # v
+    /\ primary = d
 
 --------------------------------------------------------------------
 
