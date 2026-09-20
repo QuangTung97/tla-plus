@@ -76,7 +76,8 @@ DiskFileContent == [File -> Null(FileContent)]
 DiskLogEntry ==
     LET
         add_file == [
-            type: {"AddFile"}
+            type: {"AddFile"},
+            file: File
         ]
     IN
     UNION {add_file}
@@ -144,6 +145,36 @@ DiskSyncLog(d) ==
 
 --------------------------------------------------------------------
 
+AddFile(d, f, v, a) ==
+    LET
+        root == disk_parent_file[d][f]
+        content == disk_file_mem[d]
+        primary == disk_config[d][root].primary
+
+        file_data == [
+            data |-> v,
+            attr |-> a
+        ]
+
+        entry == [
+            type |-> "AddFile",
+            file |-> f
+        ]
+    IN
+    /\ root # nil
+    /\ content[f] = nil
+    /\ primary = d
+
+    /\ disk_file_mem' = [disk_file_mem EXCEPT ![d][f] = file_data]
+    /\ disk_mem_log' = [disk_mem_log EXCEPT ![d] = Append(@, entry)]
+
+    /\ UNCHANGED disk_log
+    /\ UNCHANGED disk_config
+    /\ UNCHANGED disk_global_offset
+    /\ UNCHANGED disk_parent_file
+    /\ UNCHANGED disk_file_content
+    /\ UNCHANGED global_vars
+
 --------------------------------------------------------------------
 
 UpdateFileData(d, f, v) ==
@@ -167,6 +198,8 @@ Terminated ==
 Next ==
     \/ \E d \in Disk:
         \/ DiskSyncLog(d)
+    \/ \E d \in Disk, f \in File, v \in Value, a \in Attr:
+        \/ AddFile(d, f, v, a)
     \/ \E d \in Disk, f \in File, v \in Value:
         \/ UpdateFileData(d, f, v)
     \/ Terminated
