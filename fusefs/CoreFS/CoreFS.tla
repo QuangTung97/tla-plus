@@ -5,21 +5,27 @@ CONSTANTS File, Disk, Value, Attr, nil
 
 VARIABLES
     global_config, global_log,
-    disk_config, disk_config_offset, disk_pending_actions,
-    created_files
+    disk_config, disk_config_offset,
+    created_files,
+    file_config
 
 global_vars == <<
     global_config, global_log
 >>
 
 disk_vars == <<
-    disk_config, disk_config_offset, disk_pending_actions
+    disk_config, disk_config_offset
+>>
+
+file_vars == <<
+    file_config
 >>
 
 vars == <<
     global_vars,
     disk_vars,
-    created_files
+    created_files,
+    file_vars
 >>
 
 --------------------------------------------------------------------
@@ -36,6 +42,14 @@ EntryConfig == [
     epoch: Epoch,
     disks: SubSetNonEmpty(Disk),
     primary: Disk
+]
+
+DiskEntryConfig == [
+    epoch: Epoch,
+    disks: SubSetNonEmpty(Disk),
+    primary: Disk,
+    state: {"Ready", "SetupNew", "Unused"},
+    split_from: Null(File)
 ]
 
 empty_config == [f \in File |-> nil]
@@ -62,11 +76,8 @@ init_split_log_entry(root, config) == [
     config |-> config
 ]
 
-DiskPendingAction == [
-    type: {"Split"},
-    parent: Null(File),
-    file: File,
-    state: {"Finishing"}
+FileConfig == [
+    sub_files: SUBSET File
 ]
 
 --------------------------------------------------------------------
@@ -75,11 +86,12 @@ TypeOK ==
     /\ global_config \in [File -> Null(EntryConfig)]
     /\ global_log \in Seq(GlobalLogEntry)
 
-    /\ disk_config \in [Disk -> [File -> Null(EntryConfig)]]
+    /\ disk_config \in [Disk -> [File -> Null(DiskEntryConfig)]]
     /\ disk_config_offset \in [Disk -> Nat]
-    /\ disk_pending_actions \in [Disk -> Seq(DiskPendingAction)]
 
     /\ created_files \subseteq File
+
+    /\ file_config \in [DiskFile -> Null(FileConfig)]
 
 Init ==
     /\ \E root \in File, disks \in SubSetNonEmpty(Disk): \E primary \in disks:
@@ -92,7 +104,8 @@ Init ==
 
     /\ disk_config = [d \in Disk |-> empty_config]
     /\ disk_config_offset = [d \in Disk |-> 0]
-    /\ disk_pending_actions = [d \in Disk |-> <<>>]
+
+    /\ file_config = [df \in DiskFile |-> nil]
 
 --------------------------------------------------------------------
 
@@ -102,58 +115,60 @@ DiskSyncLog(d) ==
         entry == global_log[offset]
         root == entry.file
 
-        action == [
-            type |-> "Split",
-            parent |-> nil,
-            file |-> root,
-            state |-> "Finishing"
-        ]
+        in_list == d \in entry.config.disks
 
-        append_action ==
-            disk_pending_actions' = [disk_pending_actions EXCEPT
-                ![d] = Append(@, action)
-            ]
+        conf == [
+            epoch |-> entry.config.epoch,
+            disks |-> entry.config.disks,
+            primary |-> entry.config.primary,
+            state |-> IF in_list THEN "SetupNew" ELSE "Unused",
+            split_from |-> entry.parent
+        ]
     IN
     /\ disk_config_offset[d] < Len(global_log)
 
     /\ disk_config_offset' = [disk_config_offset EXCEPT ![d] = @ + 1]
 
     /\ entry.type = "Split"
-    /\ disk_config' = [disk_config EXCEPT ![d][root] = entry.config]
-
-    /\ IF d \in entry.config.disks
-        THEN append_action
-        ELSE UNCHANGED disk_pending_actions
+    /\ disk_config' = [disk_config EXCEPT ![d][root] = conf]
 
     /\ UNCHANGED global_vars
     /\ UNCHANGED created_files
+    /\ UNCHANGED file_vars
 
 --------------------------------------------------------------------
 
-DiskHandleAction(d) ==
+DiskHandleSetupNew(d, f) ==
     LET
-        action == disk_pending_actions[d][1]
+        df == <<d, f>>
+        conf == disk_config[d][f]
 
-        remove_action ==
-            disk_pending_actions' = [disk_pending_actions
-                EXCEPT ![d] = Tail(@)
-            ]
+        init_file_config == [
+            sub_files |-> {}
+        ]
     IN
-    /\ disk_pending_actions[d] # <<>>
+    /\ conf # nil
+    /\ conf.state = "SetupNew"
+    /\ d = conf.primary
 
-    /\ action.type = "Split"
-    /\ action.state = "Finishing"
-    /\ remove_action
+    /\ file_config' = [file_config EXCEPT ![df] = init_file_config]
+    /\ disk_config' = [disk_config EXCEPT ![d][f].state = "Ready"]
 
     /\ UNCHANGED global_vars
-    /\ UNCHANGED <<disk_config, disk_config_offset>>
+    /\ UNCHANGED disk_config_offset
     /\ UNCHANGED created_files
 
 --------------------------------------------------------------------
 
 Terminated ==
-    /\ \A d \in Disk:
-        /\ disk_pending_actions[d] = <<>>
+    /\ \A d \in Disk, f \in File:
+        disk_config[d][f] # nil =>
+            IF d \in disk_config[d][f].disks THEN
+               /\ disk_config[d][f].split_from = nil
+               /\ disk_config[d][f].state = "Ready"
+            ELSE
+               /\ disk_config[d][f].split_from = nil
+               /\ disk_config[d][f].state = "Unused"
     /\ UNCHANGED vars
 
 --------------------------------------------------------------------
@@ -161,7 +176,8 @@ Terminated ==
 Next ==
     \/ \E d \in Disk:
         \/ DiskSyncLog(d)
-        \/ DiskHandleAction(d)
+    \/ \E d \in Disk, f \in File:
+        \/ DiskHandleSetupNew(d, f)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
