@@ -5,7 +5,7 @@ CONSTANTS File, Disk, Value, Attr, nil
 
 VARIABLES
     global_config, global_log,
-    disk_config, disk_config_offset,
+    disk_config, disk_config_offset, disk_primary_state,
     created_files,
     file_config, file_mem_config,
     file_log, file_written_pos, file_commit_pos,
@@ -16,7 +16,7 @@ global_vars == <<
 >>
 
 disk_vars == <<
-    disk_config, disk_config_offset
+    disk_config, disk_config_offset, disk_primary_state
 >>
 
 file_vars == <<
@@ -57,7 +57,10 @@ EntryConfig == [
 DiskEntryConfig == [
     epoch: Epoch,
     disks: SubSetNonEmpty(Disk),
-    primary: Disk,
+    primary: Disk
+]
+
+DiskPrimaryState == [
     state: {"Ready", "SetupNew", "Unused"},
     split_from: Null(File)
 ]
@@ -107,6 +110,7 @@ TypeOK ==
 
     /\ disk_config \in [DiskFile -> Null(DiskEntryConfig)]
     /\ disk_config_offset \in [Disk -> Nat]
+    /\ disk_primary_state \in [DiskFile -> Null(DiskPrimaryState)]
 
     /\ created_files \subseteq File
 
@@ -129,6 +133,7 @@ Init ==
 
     /\ disk_config = [df \in DiskFile |-> nil]
     /\ disk_config_offset = [d \in Disk |-> 0]
+    /\ disk_primary_state = [df \in DiskFile |-> nil]
 
     /\ file_config = [df \in DiskFile |-> nil]
     /\ file_mem_config = [df \in DiskFile |-> nil]
@@ -152,10 +157,18 @@ DiskSyncLog(d) ==
         conf == [
             epoch |-> entry.config.epoch,
             disks |-> entry.config.disks,
-            primary |-> entry.config.primary,
-            state |-> IF in_list THEN "SetupNew" ELSE "Unused",
+            primary |-> entry.config.primary
+        ]
+
+        disk_state == [
+            state |-> "SetupNew",
             split_from |-> entry.parent
         ]
+
+        on_primary ==
+            /\ disk_primary_state' = [disk_primary_state EXCEPT
+                    ![df] = disk_state
+                ]
     IN
     /\ disk_config_offset[d] < Len(global_log)
 
@@ -163,6 +176,9 @@ DiskSyncLog(d) ==
 
     /\ entry.type = "Split"
     /\ disk_config' = [disk_config EXCEPT ![df] = conf]
+    /\ IF entry.config.primary = d
+        THEN on_primary
+        ELSE UNCHANGED disk_primary_state
 
     /\ UNCHANGED global_vars
     /\ UNCHANGED created_files
@@ -174,6 +190,7 @@ DiskHandleSetupNew(d, f) ==
     LET
         df == <<d, f>>
         conf == disk_config[df]
+        state == disk_primary_state[df]
         mem_conf == file_mem_config[df]
 
         init_file_config == [
@@ -189,8 +206,8 @@ DiskHandleSetupNew(d, f) ==
 
         init_replicate_pos == [d1 \in Disk |-> 0]
     IN
-    /\ conf # nil
-    /\ conf.state = "SetupNew"
+    /\ state # nil
+    /\ state.state = "SetupNew"
     /\ d = conf.primary \* only for primary
     /\ mem_conf # nil => mem_conf.epoch < conf.epoch
 
@@ -251,7 +268,9 @@ FlushLog(d, f) ==
         on_setup_new ==
             /\ entry.type = "SetupNew"
             /\ file_config' = [file_config EXCEPT ![df] = entry.config]
-            /\ disk_config' = [disk_config EXCEPT ![df].state = "Ready"]
+            /\ disk_primary_state' = [disk_primary_state
+                    EXCEPT ![df].state = "Ready"
+                ]
     IN
     /\ file_checkpoint_pos[df] < file_commit_pos[df]
 
@@ -263,6 +282,7 @@ FlushLog(d, f) ==
     /\ UNCHANGED file_replicate_pos
     /\ UNCHANGED file_log
     /\ UNCHANGED file_mem_config
+    /\ UNCHANGED disk_config
     /\ UNCHANGED disk_config_offset
     /\ UNCHANGED created_files
     /\ UNCHANGED global_vars
@@ -271,14 +291,16 @@ FlushLog(d, f) ==
 
 Terminated ==
     /\ \A d \in Disk, f \in File:
-        LET df == <<d, f>> IN
+        LET
+            df == <<d, f>>
+            state == disk_primary_state[df]
+        IN
         disk_config[df] # nil =>
-            IF d \in disk_config[df].disks THEN
-               /\ disk_config[df].split_from = nil
-               /\ disk_config[df].state = "Ready"
+            IF d = disk_config[df].primary THEN
+               /\ state.split_from = nil
+               /\ state.state = "Ready"
             ELSE
-               /\ disk_config[df].split_from = nil
-               /\ disk_config[df].state = "Unused"
+               /\ state = nil
     /\ UNCHANGED vars
 
 --------------------------------------------------------------------
