@@ -289,6 +289,40 @@ FlushLog(d, f) ==
 
 --------------------------------------------------------------------
 
+ReplicateLog(f, d1, d2) ==
+    LET
+        df1 == <<d1, f>>
+        df2 == <<d2, f>>
+
+        conf1 == file_mem_config[df1]
+
+        index == Len(file_log[df2]) + 1
+        entry == file_log[df1][index]
+
+        on_setup_new ==
+            /\ entry.type = "SetupNew"
+            /\ file_mem_config' = [file_mem_config EXCEPT ![df2] = entry.config]
+    IN
+    /\ d1 # d2
+    /\ conf1 # nil
+    /\ conf1.primary = d1
+    /\ d2 \in conf1.disks
+    /\ index <= Len(file_log[df1])
+
+    /\ file_log' = [file_log EXCEPT ![df2] = Append(@, entry)]
+    /\ on_setup_new
+
+    /\ UNCHANGED file_config
+    /\ UNCHANGED file_commit_pos
+    /\ UNCHANGED file_written_pos
+    /\ UNCHANGED file_replicate_pos
+    /\ UNCHANGED file_checkpoint_pos
+    /\ UNCHANGED disk_vars
+    /\ UNCHANGED created_files
+    /\ UNCHANGED global_vars
+
+--------------------------------------------------------------------
+
 Terminated ==
     /\ \A d \in Disk, f \in File:
         LET
@@ -312,6 +346,8 @@ Next ==
         \/ DiskHandleSetupNew(d, f)
         \/ WriteLog(d, f)
         \/ FlushLog(d, f)
+    \/ \E f \in File, d1 \in Disk, d2 \in Disk:
+        \/ ReplicateLog(f, d1, d2)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
