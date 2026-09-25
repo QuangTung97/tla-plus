@@ -1,33 +1,25 @@
 ---- MODULE CoreStore ----
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-CONSTANTS Node, File, nil
+CONSTANTS Node, File, Value, nil
 
 VARIABLES
-    global_epoch,
-    node_epoch, node_isr, node_leader,
-    node_leader_log,
-    node_acc_epoch, node_acc_log,
-    pc, node_expect_isr
+    global_config,
+    node_config, node_log,
+    node_db_file, disk_file
 
 global_vars == <<
-    global_epoch
+    global_config
 >>
 
 node_vars == <<
-    node_epoch, node_isr, node_leader,
-    node_leader_log,
-    pc, node_expect_isr
->>
-
-acc_vars == <<
-    node_acc_epoch, node_acc_log
+    node_config, node_log,
+    node_db_file, disk_file
 >>
 
 vars == <<
     global_vars,
-    node_vars,
-    acc_vars
+    node_vars
 >>
 
 ----------------------------------------------------------------------
@@ -38,100 +30,105 @@ NonEmpty(S) == (SUBSET S) \ {{}}
 
 ASSUME NonEmpty({1, 2}) = {{1}, {2}, {1, 2}}
 
+Max(S) == CHOOSE x \in S: (\A y \in S: y <= x)
+
+ASSUME Max({11, 12, 13}) = 13
+
 ----------------------------------------------------------------------
 
 Epoch == 10..19
 
+Version == 1..9
+
+Config == [
+    epoch: Epoch,
+    isr: NonEmpty(Node),
+    primary: Node
+]
+
 LogEntry ==
     LET
-        new_leader ==[
+        add_file == [
+            type: {"AddFile"},
             epoch: Epoch,
-            leader: Node,
-            isr: NonEmpty(Node)
+            file: File,
+            version: Version
+        ]
+
+        remove_file == [
+            type: {"RemoveFile"},
+            epoch: Epoch,
+            file: File,
+            version: Version
+        ]
+
+        finish_add == [
+            type: {"FinishAdd"},
+            epoch: Epoch,
+            file: File,
+            version: Version
         ]
     IN
-        UNION {new_leader}
-
-PC == {"Init", "StartElection", "Loop"}
+        UNION {add_file, remove_file, finish_add}
 
 ----------------------------------------------------------------------
 
 TypeOK ==
-    /\ global_epoch \in Epoch
+    /\ global_config \in Config
 
-    /\ node_epoch \in [Node -> Epoch]
-    /\ node_isr \in [Node -> SUBSET Node]
-    /\ node_leader \in [Node -> Null(Node)]
-    /\ node_leader_log \in [Node -> Seq(LogEntry)]
+    /\ node_config \in [Node -> Null(Config)]
+    /\ node_log \in [Node -> Seq(LogEntry)]
 
-    /\ node_acc_epoch \in [Node -> Epoch]
-    /\ node_acc_log \in [Node -> Seq(LogEntry)]
-
-    /\ pc \in [Node -> PC]
-    /\ node_expect_isr \in [Node -> Null(NonEmpty(Node))]
+    /\ node_db_file \in [Node -> [File -> Null(Value)]]
+    /\ disk_file \in [Node -> [File -> Null(Value)]]
 
 Init ==
-    /\ global_epoch = 10
+    /\ \E isr \in NonEmpty(Node): \E primary \in isr:
+        global_config = [
+            epoch |-> 10,
+            isr |-> isr,
+            primary |-> primary
+        ]
+    /\ node_config = [n \in Node |-> nil]
+    /\ node_log = [n \in Node |-> <<>>]
 
-    /\ node_epoch = [n \in Node |-> 10]
-    /\ node_isr = [n \in Node |-> {}]
-    /\ node_leader = [n \in Node |-> nil]
-    /\ node_leader_log = [n \in Node |-> <<>>]
-
-    /\ node_acc_epoch = [n \in Node |-> 10]
-    /\ node_acc_log = [n \in Node |-> <<>>]
-
-    /\ pc = [n \in Node |-> "Init"]
-    /\ node_expect_isr = [n \in Node |-> nil]
+    /\ node_db_file = [n \in Node |-> [f \in File |-> nil]]
+    /\ disk_file = [n \in Node |-> [f \in File |-> nil]]
 
 ----------------------------------------------------------------------
-
-goto(n, l) ==
-    pc' = [pc EXCEPT ![n] = l]
 
 set_local(n, var, x) ==
     var' = [var EXCEPT ![n] = x]
 
 ----------------------------------------------------------------------
 
-NodeBegin(n, isr) ==
-    /\ n \in isr
-    /\ pc[n] = "Init"
+SyncConfig(n) ==
+    /\ node_config[n] # nil => node_config[n].epoch < global_config.epoch
+    /\ node_config' = [node_config EXCEPT ![n] = global_config]
 
-    /\ goto(n, "StartElection")
-    /\ set_local(n, node_expect_isr, isr)
-
-    /\ UNCHANGED <<node_epoch, node_isr>>
-    /\ UNCHANGED node_leader
-    /\ UNCHANGED node_leader_log
-    /\ UNCHANGED acc_vars
-    /\ UNCHANGED global_epoch
+    /\ UNCHANGED <<node_log>>
+    /\ UNCHANGED <<node_db_file, disk_file>>
+    /\ UNCHANGED global_vars
 
 ----------------------------------------------------------------------
 
-StartElection(n) ==
+AddFile(n, f) ==
     LET
-        isr == node_expect_isr[n]
+        conf == node_config[n]
 
         entry == [
-            epoch |-> global_epoch',
-            leader |-> n,
-            isr |-> isr
+            type |-> "AddFile",
+            epoch |-> conf.epoch
         ]
     IN
-    /\ pc[n] = "StartElection"
+    /\ conf # nil
+    /\ conf.primary = n
 
-    /\ global_epoch' = global_epoch + 1
-    /\ set_local(n, node_epoch, global_epoch')
-    /\ set_local(n, node_leader, n)
-    /\ set_local(n, node_isr, isr)
-    /\ node_leader_log' = [node_leader_log EXCEPT ![n] = Append(@, entry)]
+    /\ node_log' = [node_log EXCEPT ![n] = Append(@, entry)]
 
-    /\ goto(n, "Loop")
-    /\ set_local(n, node_expect_isr, nil)
-
-    /\ UNCHANGED acc_vars
-
+    /\ UNCHANGED disk_file
+    /\ UNCHANGED <<node_config>>
+    /\ UNCHANGED global_vars
 
 ----------------------------------------------------------------------
 
@@ -143,11 +140,14 @@ Terminated ==
 
 Next ==
     \/ \E n \in Node:
-        \/ \E isr \in NonEmpty(Node): NodeBegin(n, isr)
-        \/ StartElection(n)
+        \/ SyncConfig(n)
+    \/ \E n \in Node, f \in File:
+        \/ AddFile(n, f)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
+
+----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
 
