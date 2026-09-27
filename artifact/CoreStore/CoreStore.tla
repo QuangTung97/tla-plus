@@ -5,16 +5,16 @@ CONSTANTS Node, File, Value, nil
 
 VARIABLES
     global_config,
-    node_config, node_log,
-    node_db_file, disk_file
+    node_epoch, node_config, node_log,
+    node_mem_file, node_db_file, disk_file
 
 global_vars == <<
     global_config
 >>
 
 node_vars == <<
-    node_config, node_log,
-    node_db_file, disk_file
+    node_epoch, node_config, node_log,
+    node_mem_file, node_db_file, disk_file
 >>
 
 vars == <<
@@ -71,14 +71,23 @@ LogEntry ==
     IN
         UNION {add_file, remove_file, finish_add}
 
+MemFile == [
+    value: Value,
+    log_pos: Nat,
+    committed: BOOLEAN,
+    num_sync: Nat
+]
+
 ----------------------------------------------------------------------
 
 TypeOK ==
     /\ global_config \in Config
 
+    /\ node_epoch \in [Node -> Epoch]
     /\ node_config \in [Node -> Null(Config)]
     /\ node_log \in [Node -> Seq(LogEntry)]
 
+    /\ node_mem_file \in [Node -> [File -> Null(MemFile)]]
     /\ node_db_file \in [Node -> [File -> Null(Value)]]
     /\ disk_file \in [Node -> [File -> Null(Value)]]
 
@@ -89,9 +98,12 @@ Init ==
             isr |-> isr,
             primary |-> primary
         ]
+
+    /\ node_epoch = [n \in Node |-> 10]
     /\ node_config = [n \in Node |-> nil]
     /\ node_log = [n \in Node |-> <<>>]
 
+    /\ node_mem_file = [n \in Node |-> [f \in File |-> nil]]
     /\ node_db_file = [n \in Node |-> [f \in File |-> nil]]
     /\ disk_file = [n \in Node |-> [f \in File |-> nil]]
 
@@ -106,28 +118,68 @@ SyncConfig(n) ==
     /\ node_config[n] # nil => node_config[n].epoch < global_config.epoch
     /\ node_config' = [node_config EXCEPT ![n] = global_config]
 
-    /\ UNCHANGED <<node_log>>
-    /\ UNCHANGED <<node_db_file, disk_file>>
+    /\ UNCHANGED node_epoch
+    /\ UNCHANGED node_log
+    /\ UNCHANGED <<node_mem_file, node_db_file, disk_file>>
     /\ UNCHANGED global_vars
 
 ----------------------------------------------------------------------
 
-AddFile(n, f) ==
+AddFile(n, f, v) ==
     LET
         conf == node_config[n]
 
         entry == [
             type |-> "AddFile",
-            epoch |-> conf.epoch
+            epoch |-> conf.epoch,
+            file |-> f,
+            version |-> 1
+        ]
+
+        index == Len(node_log[n]) + 1
+
+        mem_file == [
+            value |-> v,
+            log_pos |-> index,
+            committed |-> FALSE,
+            num_sync |-> 0
         ]
     IN
     /\ conf # nil
     /\ conf.primary = n
+    /\ node_mem_file[n][f] = nil
 
     /\ node_log' = [node_log EXCEPT ![n] = Append(@, entry)]
+    /\ node_mem_file' = [node_mem_file EXCEPT ![n][f] = mem_file]
 
+    /\ UNCHANGED node_epoch
+    /\ UNCHANGED node_db_file
     /\ UNCHANGED disk_file
     /\ UNCHANGED <<node_config>>
+    /\ UNCHANGED global_vars
+
+----------------------------------------------------------------------
+
+ReplicateLog(l, n) ==
+    LET
+        conf == node_config[l]
+        index == Len(node_log[n]) + 1
+        entry == node_log[l][index]
+    IN
+    /\ l # n
+    /\ conf # nil
+    /\ conf.primary = l
+    /\ n \in conf.isr
+    /\ index <= Len(node_log[l])
+    /\ node_epoch[n] <= node_epoch[l]
+
+    /\ node_epoch' = [node_epoch EXCEPT ![n] = node_epoch[l]]
+    /\ node_log' = [node_log EXCEPT ![n] = Append(@, entry)]
+
+    /\ UNCHANGED node_mem_file
+    /\ UNCHANGED node_db_file
+    /\ UNCHANGED node_config
+    /\ UNCHANGED disk_file
     /\ UNCHANGED global_vars
 
 ----------------------------------------------------------------------
@@ -141,13 +193,20 @@ Terminated ==
 Next ==
     \/ \E n \in Node:
         \/ SyncConfig(n)
-    \/ \E n \in Node, f \in File:
-        \/ AddFile(n, f)
+    \/ \E n \in Node, f \in File, v \in Value:
+        \/ AddFile(n, f, v)
+    \/ \E l \in Node, n \in Node:
+        \/ ReplicateLog(l, n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
 
 ----------------------------------------------------------------------
+
+ConfigEpochAndNodeEpochInv ==
+    \A n \in Node:
+        node_config[n] # nil =>
+            node_config[n].epoch <= node_epoch[n]
 
 ----------------------------------------------------------------------
 
