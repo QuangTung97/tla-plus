@@ -6,6 +6,7 @@ CONSTANTS Node, File, Value, nil
 VARIABLES
     global_config,
     node_epoch, node_config, node_log,
+    replicated_pos, commit_pos,
     node_mem_file, node_db_file, disk_file
 
 global_vars == <<
@@ -14,6 +15,7 @@ global_vars == <<
 
 node_vars == <<
     node_epoch, node_config, node_log,
+    replicated_pos, commit_pos,
     node_mem_file, node_db_file, disk_file
 >>
 
@@ -34,6 +36,10 @@ Max(S) == CHOOSE x \in S: (\A y \in S: y <= x)
 
 ASSUME Max({11, 12, 13}) = 13
 
+Min(S) == CHOOSE x \in S: (\A y \in S: y >= x)
+
+ASSUME Min({11, 12, 13}) = 11
+
 ----------------------------------------------------------------------
 
 Epoch == 10..19
@@ -43,7 +49,7 @@ Version == 1..9
 Config == [
     epoch: Epoch,
     isr: NonEmpty(Node),
-    primary: Node
+    leader: Node
 ]
 
 LogEntry ==
@@ -75,7 +81,8 @@ MemFile == [
     value: Value,
     log_pos: Nat,
     committed: BOOLEAN,
-    num_sync: Nat
+    num_need_sync: Nat,
+    num_synced: Nat
 ]
 
 ----------------------------------------------------------------------
@@ -86,22 +93,26 @@ TypeOK ==
     /\ node_epoch \in [Node -> Epoch]
     /\ node_config \in [Node -> Null(Config)]
     /\ node_log \in [Node -> Seq(LogEntry)]
+    /\ replicated_pos \in [Node -> Null([Node -> Nat])]
+    /\ commit_pos \in [Node -> Null(Nat)]
 
     /\ node_mem_file \in [Node -> [File -> Null(MemFile)]]
     /\ node_db_file \in [Node -> [File -> Null(Value)]]
     /\ disk_file \in [Node -> [File -> Null(Value)]]
 
 Init ==
-    /\ \E isr \in NonEmpty(Node): \E primary \in isr:
+    /\ \E isr \in NonEmpty(Node): \E leader \in isr:
         global_config = [
             epoch |-> 10,
             isr |-> isr,
-            primary |-> primary
+            leader |-> leader
         ]
 
     /\ node_epoch = [n \in Node |-> 10]
     /\ node_config = [n \in Node |-> nil]
     /\ node_log = [n \in Node |-> <<>>]
+    /\ replicated_pos = [n \in Node |-> nil]
+    /\ commit_pos = [n \in Node |-> nil]
 
     /\ node_mem_file = [n \in Node |-> [f \in File |-> nil]]
     /\ node_db_file = [n \in Node |-> [f \in File |-> nil]]
@@ -115,13 +126,37 @@ set_local(n, var, x) ==
 ----------------------------------------------------------------------
 
 SyncConfig(n) ==
+    LET
+        init_pos == [n1 \in Node |-> 0] \* TODO flush pos
+
+        on_leader ==
+            /\ replicated_pos' = [replicated_pos EXCEPT ![n] = init_pos]
+            /\ commit_pos' = [commit_pos EXCEPT ![n] = 0] \* TODO
+
+        on_follower ==
+            /\ replicated_pos' = [replicated_pos EXCEPT ![n] = nil]
+            /\ commit_pos' = [commit_pos EXCEPT ![n] = nil]
+    IN
     /\ node_config[n] # nil => node_config[n].epoch < global_config.epoch
     /\ node_config' = [node_config EXCEPT ![n] = global_config]
+    /\ IF global_config.leader = n
+        THEN on_leader
+        ELSE on_follower
 
     /\ UNCHANGED node_epoch
     /\ UNCHANGED node_log
     /\ UNCHANGED <<node_mem_file, node_db_file, disk_file>>
     /\ UNCHANGED global_vars
+
+----------------------------------------------------------------------
+
+update_commit_pos(l) ==
+    LET
+        replicated_set == {replicated_pos'[l][n]: n \in node_config[l].isr}
+
+        new_pos == Min(replicated_set)
+    IN
+    /\ commit_pos' = [commit_pos EXCEPT ![l] = new_pos]
 
 ----------------------------------------------------------------------
 
@@ -142,15 +177,18 @@ AddFile(n, f, v) ==
             value |-> v,
             log_pos |-> index,
             committed |-> FALSE,
-            num_sync |-> 0
+            num_need_sync |-> 0,
+            num_synced |-> 0
         ]
     IN
     /\ conf # nil
-    /\ conf.primary = n
+    /\ conf.leader = n
     /\ node_mem_file[n][f] = nil
 
     /\ node_log' = [node_log EXCEPT ![n] = Append(@, entry)]
     /\ node_mem_file' = [node_mem_file EXCEPT ![n][f] = mem_file]
+    /\ replicated_pos' = [replicated_pos EXCEPT ![n][n] = index]
+    /\ update_commit_pos(n)
 
     /\ UNCHANGED node_epoch
     /\ UNCHANGED node_db_file
@@ -168,7 +206,7 @@ ReplicateLog(l, n) ==
     IN
     /\ l # n
     /\ conf # nil
-    /\ conf.primary = l
+    /\ conf.leader = l
     /\ n \in conf.isr
     /\ index <= Len(node_log[l])
     /\ node_epoch[n] <= node_epoch[l]
@@ -177,6 +215,8 @@ ReplicateLog(l, n) ==
     /\ node_log' = [node_log EXCEPT ![n] = Append(@, entry)]
 
     /\ UNCHANGED node_mem_file
+    /\ UNCHANGED replicated_pos
+    /\ UNCHANGED commit_pos
     /\ UNCHANGED node_db_file
     /\ UNCHANGED node_config
     /\ UNCHANGED disk_file
@@ -207,6 +247,29 @@ ConfigEpochAndNodeEpochInv ==
     \A n \in Node:
         node_config[n] # nil =>
             node_config[n].epoch <= node_epoch[n]
+
+------------------
+
+LeaderFollowerInv ==
+    \A n \in Node:
+        node_config[n] # nil =>
+            IF node_config[n].leader = n THEN
+                /\ replicated_pos[n] # nil
+                /\ commit_pos[n] # nil
+            ELSE
+                /\ replicated_pos[n] = nil
+                /\ commit_pos[n] = nil
+
+------------------
+
+CommitPosMatchReplicatedPos ==
+    \A l \in Node:
+        LET
+            replicated_set == {replicated_pos[l][n]: n \in node_config[l].isr}
+        IN
+        commit_pos[l] # nil =>
+            commit_pos[l] = Min(replicated_set)
+
 
 ----------------------------------------------------------------------
 
