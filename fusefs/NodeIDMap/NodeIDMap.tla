@@ -34,7 +34,7 @@ KeyInfo == [
     refcount: Nat
 ]
 
-PC == {"Init", "SetIDMap", "Process", "DeleteKey", "Terminated"}
+PC == {"Init", "SetIDMap", "Process", "Terminated"}
 
 --------------------------------------------------------------
 
@@ -72,7 +72,7 @@ AddKey(n, k) ==
 
         key_info == [
             id |-> id,
-            refcount |-> 1
+            refcount |-> 2
         ]
 
         when_not_exist ==
@@ -120,7 +120,8 @@ SetIDMap(n) ==
         THEN when_not_exist
         ELSE when_exist
 
-    /\ UNCHANGED key_map
+    /\ key_map' = [key_map EXCEPT ![k].refcount = @ - 1]
+
     /\ UNCHANGED last_id
     /\ UNCHANGED <<local_id, local_key>>
 
@@ -129,37 +130,31 @@ SetIDMap(n) ==
 DeleteIDMap(n) ==
     LET
         id == local_id[n]
+        k == local_key[n]
+
+        do_delete_key_map ==
+            IF key_map[k].refcount = 1 THEN
+                key_map' = [key_map EXCEPT ![k] = nil]
+            ELSE
+                UNCHANGED key_map
+
+        on_delete ==
+            /\ id_map' = [id_map EXCEPT ![id] = nil]
+            /\ do_delete_key_map
+
+        on_dec_ref ==
+            /\ id_map' = [id_map EXCEPT ![id].refcount = @ - 1]
+            /\ UNCHANGED key_map
     IN
     /\ pc[n] = "Process"
-    /\ goto(n, "DeleteKey")
-
-    /\ IF id_map[id].refcount = 1
-        THEN id_map' = [id_map EXCEPT ![id] = nil]
-        ELSE id_map' = [id_map EXCEPT ![id].refcount = @ - 1]
-
-    /\ UNCHANGED key_map
-    /\ UNCHANGED last_id
-    /\ UNCHANGED <<local_id, local_key>>
-
---------------------------------------------------------------
-
-DeleteKey(n) ==
-    LET
-        k == local_key[n]
-    IN
-    /\ pc[n] = "DeleteKey"
-
-    /\ IF key_map[k].refcount = 1
-        THEN key_map' = [key_map EXCEPT ![k] = nil]
-        ELSE key_map' = [key_map EXCEPT ![k].refcount = @ - 1]
-
     /\ goto(n, "Terminated")
 
-    /\ set_local(n, local_id, nil)
-    /\ set_local(n, local_key, nil)
+    /\ IF id_map[id].refcount = 1
+        THEN on_delete
+        ELSE on_dec_ref
 
-    /\ UNCHANGED id_map
     /\ UNCHANGED last_id
+    /\ UNCHANGED <<local_id, local_key>>
 
 --------------------------------------------------------------
 
@@ -181,7 +176,6 @@ Next ==
     \/ \E n \in Node:
         \/ SetIDMap(n)
         \/ DeleteIDMap(n)
-        \/ DeleteKey(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
