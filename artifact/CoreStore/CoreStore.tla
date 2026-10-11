@@ -81,8 +81,8 @@ MemFile == [
     value: Value,
     log_pos: Nat,
     committed: BOOLEAN,
-    num_need_sync: Nat,
-    num_synced: Nat
+    need_sync: NonEmpty(Node),
+    synced: SUBSET Node
 ]
 
 ----------------------------------------------------------------------
@@ -177,8 +177,8 @@ AddFile(n, f, v) ==
             value |-> v,
             log_pos |-> index,
             committed |-> FALSE,
-            num_need_sync |-> 0,
-            num_synced |-> 0
+            need_sync |-> node_config[n].isr,
+            synced |-> {}
         ]
     IN
     /\ conf # nil
@@ -269,7 +269,6 @@ CommitPosMatchReplicatedPos ==
         IN
         commit_pos[l] # nil =>
             commit_pos[l] = Min(replicated_set)
-
 
 ----------------------------------------------------------------------
 
