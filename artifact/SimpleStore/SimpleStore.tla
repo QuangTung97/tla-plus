@@ -97,6 +97,7 @@ WriteData(d, s) ==
     IN
     /\ db[d] # nil
     /\ db[d].status = "Writing"
+    /\ s \in db[d].isr
     /\ d \notin files[s]
 
     /\ files' = [files EXCEPT ![s] = @ \union {d}]
@@ -114,6 +115,20 @@ AckWrite(d, s) ==
     /\ s \notin db[d].written
 
     /\ db' = [db EXCEPT ![d].written = @ \union {s}]
+
+    /\ UNCHANGED key_db
+    /\ UNCHANGED global_isr
+    /\ UNCHANGED disk_vars
+    /\ UNCHANGED stop_action
+
+--------------------------------------------------------------------------
+
+MarkReady(d) ==
+    /\ db[d] # nil
+    /\ db[d].status = "Writing"
+    /\ db[d].isr \subseteq db[d].written
+
+    /\ db' = [db EXCEPT ![d].status = "Ready"]
 
     /\ UNCHANGED key_db
     /\ UNCHANGED global_isr
@@ -148,6 +163,8 @@ Next ==
     \/ \E d \in Digest, s \in Disk:
         \/ WriteData(d, s)
         \/ AckWrite(d, s)
+    \/ \E d \in Digest:
+        \/ MarkReady(d)
     \/ StopMoreAction
     \/ Terminated
 
