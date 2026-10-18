@@ -51,13 +51,20 @@ DiskState == [
 Msg ==
     LET
         put_req == [
-            type: {"Put"},
+            type: {"PutReq"},
+            disk: Disk,
+            digest: Digest,
+            version: Version
+        ]
+
+        put_resp == [
+            type: {"PutResp"},
             disk: Disk,
             digest: Digest,
             version: Version
         ]
     IN
-    UNION {put_req}
+    UNION {put_req, put_resp}
 
 --------------------------------------------------------------------------
 
@@ -105,7 +112,7 @@ PutObject(k, d) ==
         ]
 
         put_req(s) == [
-            type |-> "Put",
+            type |-> "PutReq",
             disk |-> s,
             digest |-> d,
             version |-> 1
@@ -143,38 +150,60 @@ DeleteObject(k) ==
 
 --------------------------------------------------------------------------
 
-WriteData(d, s) ==
+doWriteData(req) ==
     LET
+        s == req.disk
+        d == req.digest
+
         state == [
             status |-> "Active",
-            version |-> db[d].version
+            version |-> req.version
+        ]
+
+        put_resp == [
+            type |-> "PutResp",
+            disk |-> s,
+            digest |-> d,
+            version |-> req.version
         ]
     IN
-    /\ db[d] # nil
-    /\ db[d].status = "Writing"
-    /\ s \in db[d].isr
     /\ d \notin files[s]
 
     /\ files' = [files EXCEPT ![s] = @ \union {d}]
     /\ disk_db' = [disk_db EXCEPT ![s][d] = state]
+    /\ msgs' = msgs \union {put_resp}
 
     /\ UNCHANGED core_vars
     /\ UNCHANGED num_action
 
+WriteData ==
+    \E req \in msgs:
+        /\ req.type = "PutReq"
+        /\ doWriteData(req)
+
 --------------------------------------------------------------------------
 
-AckWrite(d, s) ==
-    /\ db[d] # nil
-    /\ db[d].status = "Writing"
-    /\ d \in files[s]
-    /\ s \notin db[d].written
+doAckWrite(resp) ==
+    LET
+        d == resp.digest
+        s == resp.disk
+    IN
+    /\ s \in db[d].writing
 
-    /\ db' = [db EXCEPT ![d].written = @ \union {s}]
+    /\ db' = [db EXCEPT
+            ![d].writing = @ \ {s},
+            ![d].written = @ \union {s}
+        ]
 
     /\ UNCHANGED key_db
     /\ UNCHANGED global_isr
     /\ UNCHANGED disk_vars
     /\ UNCHANGED num_action
+
+AckWrite ==
+    \E resp \in msgs:
+        /\ resp.type = "PutResp"
+        /\ doAckWrite(resp)
 
 --------------------------------------------------------------------------
 
@@ -194,9 +223,8 @@ Next ==
         \/ PutObject(k, d)
     \/ \E k \in Key:
         \/ DeleteObject(k)
-    \/ \E d \in Digest, s \in Disk:
-        \/ WriteData(d, s)
-        \/ AckWrite(d, s)
+    \/ WriteData
+    \/ AckWrite
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
