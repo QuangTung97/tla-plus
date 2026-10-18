@@ -7,6 +7,7 @@ VARIABLES
     global_isr,
     db, key_db,
     disk_db, files,
+    msgs,
     num_action
 
 core_vars == <<global_isr, db, key_db>>
@@ -19,6 +20,7 @@ disk_vars == <<
 vars == <<
     core_vars,
     disk_vars,
+    msgs,
     num_action
 >>
 
@@ -33,11 +35,11 @@ NonEmpty(S) == (SUBSET S) \ {{}}
 Version == 1..9
 
 DBState == [
-    status: {"Writing", "Ready"},
-    expect_status: {"Ready"},
     refcount: Nat,
     isr: NonEmpty(Disk),
     written: SUBSET Disk,
+    writing: SUBSET Disk,
+    deleting: SUBSET Disk,
     version: Version
 ]
 
@@ -45,6 +47,17 @@ DiskState == [
     status: {"Active", "Deleted"},
     version: Version
 ]
+
+Msg ==
+    LET
+        put_req == [
+            type: {"Put"},
+            disk: Disk,
+            digest: Digest,
+            version: Version
+        ]
+    IN
+    UNION {put_req}
 
 --------------------------------------------------------------------------
 
@@ -56,6 +69,8 @@ TypeOK ==
     /\ disk_db \in [Disk -> [Digest -> Null(DiskState)]]
     /\ files \in [Disk -> SUBSET Digest]
 
+    /\ msgs \subseteq Msg
+
     /\ num_action \in 0..max_action
 
 Init ==
@@ -66,6 +81,8 @@ Init ==
     /\ disk_db = [s \in Disk |-> [d \in Digest |-> nil]]
     /\ files = [s \in Disk |-> {}]
 
+    /\ msgs = {}
+
     /\ num_action = 0
 
 --------------------------------------------------------------------------
@@ -74,16 +91,27 @@ inc_action ==
     /\ num_action < max_action
     /\ num_action' = num_action + 1
 
+--------------------------------------------------------------------------
+
 PutObject(k, d) ==
     LET
         db_state == [
-            status |-> "Writing",
-            expect_status |-> "Ready",
             refcount |-> 1,
             isr |-> global_isr,
             written |-> {},
+            writing |-> global_isr,
+            deleting |-> {},
             version |-> 1
         ]
+
+        put_req(s) == [
+            type |-> "Put",
+            disk |-> s,
+            digest |-> d,
+            version |-> 1
+        ]
+
+        put_req_list == {put_req(s): s \in global_isr}
 
         when_new ==
             /\ db' = [db EXCEPT ![d] = db_state]
@@ -97,6 +125,18 @@ PutObject(k, d) ==
     /\ IF db[d] = nil
         THEN when_new
         ELSE when_exist
+
+    /\ msgs' = msgs \union put_req_list
+
+    /\ UNCHANGED global_isr
+    /\ UNCHANGED disk_vars
+
+--------------------------------------------------------------------------
+
+DeleteObject(k) ==
+    /\ FALSE \* TODO
+    /\ inc_action
+    /\ key_db[k] # nil
 
     /\ UNCHANGED global_isr
     /\ UNCHANGED disk_vars
@@ -138,25 +178,10 @@ AckWrite(d, s) ==
 
 --------------------------------------------------------------------------
 
-MarkReady(d) ==
-    /\ db[d] # nil
-    /\ db[d].status = "Writing"
-    /\ db[d].isr \subseteq db[d].written
-
-    /\ db' = [db EXCEPT ![d].status = "Ready"]
-
-    /\ UNCHANGED key_db
-    /\ UNCHANGED global_isr
-    /\ UNCHANGED disk_vars
-    /\ UNCHANGED num_action
-
---------------------------------------------------------------------------
-
 TerminateCond ==
     /\ num_action = max_action
     /\ \A d \in Digest:
-        db[d] # nil =>
-            db[d].status = db[d].expect_status
+        db[d] # nil => db[d].isr = db[d].written
 
 Terminated ==
     /\ TerminateCond
@@ -167,16 +192,27 @@ Terminated ==
 Next ==
     \/ \E k \in Key, d \in Digest:
         \/ PutObject(k, d)
+    \/ \E k \in Key:
+        \/ DeleteObject(k)
     \/ \E d \in Digest, s \in Disk:
         \/ WriteData(d, s)
         \/ AckWrite(d, s)
-    \/ \E d \in Digest:
-        \/ MarkReady(d)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
 
 --------------------------------------------------------------------------
+
+DiskDBMatchFiles ==
+    \A s \in Disk, d \in Digest:
+        LET
+            digest_exist ==
+                /\ disk_db[s][d] # nil
+                /\ disk_db[s][d].status = "Active"
+        IN
+        d \in files[s] <=> digest_exist
+
+-------------------------
 
 \* TODO can not delete while refcount > 1
 
