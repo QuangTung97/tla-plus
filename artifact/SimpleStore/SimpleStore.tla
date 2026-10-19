@@ -191,14 +191,14 @@ get_req_disks(req_map) ==
 
 -------------------------
 
-set_req_map(input_map, digest_set, version) ==
+set_req_map(input_map, disks, version) ==
     LET
-        do_update(d, old) ==
-            IF d \in digest_set
+        do_update(s, old) ==
+            IF s \in disks
                 THEN version
                 ELSE old
     IN
-    [d \in Disk |-> do_update(d, input_map[d])]
+    [s \in Disk |-> do_update(s, input_map[s])]
 
 --------------------------------------------------------------------------
 
@@ -223,7 +223,7 @@ PutObject(k, d) ==
             !.refcount = 1,
             !.isr = global_isr,
             !.writing = set_req_map(@, global_isr, new_version),
-            !.deleting = init_req_map,
+            !.deleting = init_req_map, \* TODO handle
             !.version = new_version
         ]
 
@@ -235,13 +235,7 @@ PutObject(k, d) ==
             ELSE
                 db
 
-        when_new ==
-            /\ db' = [db_deleted EXCEPT ![d] = new_state]
-
-        when_exist ==
-            /\ db' = [db_deleted EXCEPT ![d].refcount = @ + 1]
-
-        put_reqs == build_put_requests(d, db', global_isr)
+        put_reqs == build_put_requests(d, db', db'[d].isr)
 
         delete_reqs ==
             IF old_digest # nil THEN
@@ -251,6 +245,14 @@ PutObject(k, d) ==
                 )
             ELSE
                 {}
+
+        when_new ==
+            /\ db' = [db_deleted EXCEPT ![d] = new_state]
+            /\ msgs' = msgs \union put_reqs \union delete_reqs
+
+        when_exist ==
+            /\ db' = [db_deleted EXCEPT ![d].refcount = @ + 1]
+            /\ msgs' = msgs \union delete_reqs
     IN
     /\ inc_action
     /\ key_db[k] # nil => key_db[k] # d
@@ -260,8 +262,6 @@ PutObject(k, d) ==
     /\ IF get_refcount(d) = 0
         THEN when_new
         ELSE when_exist
-
-    /\ msgs' = msgs \union put_reqs \union delete_reqs
 
     /\ UNCHANGED global_isr
     /\ UNCHANGED disk_vars
@@ -402,6 +402,57 @@ AckDelete ==
 
 --------------------------------------------------------------------------
 
+UpdateGlobalIsr ==
+    /\ inc_action
+
+    /\ global_isr' \in NonEmpty(Disk)
+    /\ global_isr' # global_isr
+
+    /\ UNCHANGED msgs
+    /\ UNCHANGED db
+    /\ UNCHANGED key_db
+    /\ UNCHANGED disk_vars
+
+--------------------------------------------------------------------------
+
+SyncGlobalIsr(d) ==
+    LET
+        put_set == global_isr \ get_isr(d)
+
+        new_version == db[d].version + 1
+
+        old_writing == db[d].writing
+
+        old_set == (db[d].written \union get_req_disks(old_writing)) \ global_isr
+
+        clear_writing ==
+            set_req_map(old_writing, old_set, nil)
+
+        new_writing ==
+            set_req_map(clear_writing, put_set, new_version)
+
+        put_reqs == build_put_requests(d, db', put_set)
+
+        delete_reqs == build_delete_requests(d, db', old_set)
+    IN
+    /\ get_isr(d) # {}
+    /\ get_isr(d) # global_isr
+
+    /\ db' = [db EXCEPT
+            ![d].isr = global_isr,
+            ![d].writing = new_writing,
+            ![d].deleting = set_req_map(init_req_map, old_set, new_version),
+            ![d].version = new_version
+        ]
+    /\ msgs' = msgs \union put_reqs \union delete_reqs
+
+    /\ UNCHANGED num_action
+    /\ UNCHANGED global_isr
+    /\ UNCHANGED key_db
+    /\ UNCHANGED disk_vars
+
+--------------------------------------------------------------------------
+
 StopWriteCond ==
     /\ ~(ENABLED WriteData)
     /\ ~(ENABLED DeleteData)
@@ -412,7 +463,9 @@ TerminateCond ==
     /\ num_action = max_action
     /\ StopWriteCond
     /\ \A d \in Digest:
-        db[d] # nil => db[d].isr = db[d].written
+        db[d] # nil =>
+            /\ db[d].isr = db[d].written
+            /\ db[d].isr # {} => db[d].isr = global_isr
 
 Terminated ==
     /\ TerminateCond
@@ -425,10 +478,13 @@ Next ==
         \/ PutObject(k, d)
     \/ \E k \in Key:
         \/ DeleteObject(k)
+    \/ \E d \in Digest:
+        \/ SyncGlobalIsr(d)
     \/ WriteData
     \/ AckWrite
     \/ DeleteData
     \/ AckDelete
+    \/ UpdateGlobalIsr
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
