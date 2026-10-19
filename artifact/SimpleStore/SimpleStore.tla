@@ -138,74 +138,90 @@ deleting_from_writing(old_written, old_writing, new_version) ==
 
 -------------------------
 
-dec_ref_and_delete(d, input_db) ==
-    LET
-        new_version == input_db[d].version + 1
-        old_written == input_db[d].written
-        old_writing == input_db[d].writing
-        new_deleting == deleting_from_writing(
-            old_written, old_writing, new_version
-        )
-    IN
-    IF input_db[d].refcount = 1 THEN
-        [input_db EXCEPT
-            ![d].refcount = @ - 1,
-            ![d].isr = {},
-            ![d].writing = init_req_map,
-            ![d].deleting = new_deleting,
-            ![d].version = new_version
-        ]
-    ELSE
-        [input_db EXCEPT ![d].refcount = @ - 1]
+get_req_disks(req_map) ==
+    {s \in Disk: req_map[s] # nil}
 
 -------------------------
 
-build_put_requests(d, input_db, disks) ==
+set_req_map(input_map, set_disks, clear_disks, new_value) ==
+    LET
+        do_update(s, old) ==
+            IF s \in set_disks THEN
+                new_value
+            ELSE IF s \in clear_disks THEN
+                nil
+            ELSE
+                old
+    IN
+    [s \in Disk |-> do_update(s, input_map[s])]
+
+-------------------------
+
+build_put_requests(d, disks, new_version) ==
     LET
         put_req(s) == [
             type |-> "PutReq",
             disk |-> s,
             digest |-> d,
-            version |-> input_db[d].version
+            version |-> new_version
         ]
     IN
     {put_req(s): s \in disks}
 
 -------------------------
 
-build_delete_requests(d, input_db, disks) ==
+build_delete_requests(d, disks, new_version) ==
     LET
         delete_req(s) == [
             type |-> "DeleteReq",
             disk |-> s,
             digest |-> d,
-            version |-> input_db[d].version
+            version |-> new_version
         ]
     IN
     {delete_req(s): s \in disks}
 
 -------------------------
 
-get_req_disks(req_map) ==
-    {s \in Disk: req_map[s] # nil}
-
--------------------------
-
-set_req_map(input_map, disks, version) ==
+build_action_info(d, input_db, new_isr, new_version) ==
     LET
-        do_update(s, old) ==
-            IF s \in disks
-                THEN version
-                ELSE old
+        writing_set == get_req_disks(input_db.writing)
+        deleting_set == get_req_disks(input_db.deleting)
+
+        existed_set == input_db.written \union writing_set
+
+        new_write_set == new_isr \ existed_set
+        clear_write_set == writing_set \ new_isr
+
+        extra_set == existed_set \ new_isr
+        new_delete_set == extra_set \ deleting_set
+        clear_delete_set == deleting_set \ extra_set
+
+        put_reqs == build_put_requests(
+            d, new_write_set, new_version
+        )
+
+        delete_reqs == build_delete_requests(
+            d, new_delete_set, new_version
+        )
     IN
-    [s \in Disk |-> do_update(s, input_map[s])]
+    [
+        written |-> (input_db.written \ new_write_set) \ new_delete_set,
+        writing |-> set_req_map(
+            input_db.writing, new_write_set, clear_write_set, new_version
+        ),
+        deleting |-> set_req_map(
+            input_db.deleting, new_delete_set, clear_delete_set, new_version
+        ),
+        msgs |-> put_reqs \union delete_reqs
+    ]
 
 --------------------------------------------------------------------------
 
-PutObject(k, d) ==
+doPutObject(d, input_db) ==
     LET
         old_state ==
-            IF db[d] = nil THEN
+            IF input_db = nil THEN
                 [
                     refcount |-> 0,
                     isr |-> {},
@@ -215,53 +231,88 @@ PutObject(k, d) ==
                     version |-> 0
                 ]
             ELSE
-                db[d]
+                input_db
 
         new_version == old_state.version + 1
+
+        actions == build_action_info(d, old_state, global_isr, new_version)
 
         new_state == [old_state EXCEPT
             !.refcount = 1,
             !.isr = global_isr,
-            !.writing = set_req_map(@, global_isr, new_version),
-            !.deleting = init_req_map, \* TODO handle
+            !.written = actions.written,
+            !.writing = actions.writing,
+            !.deleting = actions.deleting,
             !.version = new_version
         ]
+    IN
+        IF old_state.refcount = 0 THEN
+            [
+                db |-> new_state,
+                msgs |-> actions.msgs
+            ]
+        ELSE
+            [
+                db |-> [old_state EXCEPT !.refcount = @ + 1],
+                msgs |-> {}
+            ]
 
+--------------------------------------------------------------------------
+
+doDeleteObject(d) ==
+    LET
+        old_state == db[d]
+        new_version == old_state.version + 1
+
+        actions == build_action_info(d, old_state, {}, new_version)
+
+        new_state == [old_state EXCEPT
+            !.refcount = 0,
+            !.isr = {},
+            !.written = actions.written,
+            !.writing = actions.writing,
+            !.deleting = actions.deleting,
+            !.version = new_version
+        ]
+    IN
+        IF old_state.refcount = 1 THEN
+            [
+                db |-> new_state,
+                msgs |-> actions.msgs
+            ]
+        ELSE
+            [
+                db |-> [old_state EXCEPT !.refcount = @ - 1],
+                msgs |-> {}
+            ]
+
+--------------------------------------------------------------------------
+
+PutObject(k, d) ==
+    LET
         old_digest == key_db[k]
+
+        delete_actions == doDeleteObject(old_digest)
 
         db_deleted ==
             IF old_digest # nil THEN
-                dec_ref_and_delete(old_digest, db)
+                [db EXCEPT ![old_digest] = delete_actions.db]
             ELSE
                 db
 
-        put_reqs == build_put_requests(d, db', db'[d].isr)
-
         delete_reqs ==
-            IF old_digest # nil THEN
-                build_delete_requests(
-                    old_digest, db',
-                    get_req_disks(db'[old_digest].deleting)
-                )
-            ELSE
-                {}
+            IF old_digest # nil
+                THEN delete_actions.msgs
+                ELSE {}
 
-        when_new ==
-            /\ db' = [db_deleted EXCEPT ![d] = new_state]
-            /\ msgs' = msgs \union put_reqs \union delete_reqs
-
-        when_exist ==
-            /\ db' = [db_deleted EXCEPT ![d].refcount = @ + 1]
-            /\ msgs' = msgs \union delete_reqs
+        put_actions == doPutObject(d, db_deleted[d])
     IN
     /\ inc_action
     /\ key_db[k] # nil => key_db[k] # d
 
     /\ key_db' = [key_db EXCEPT ![k] = d]
-
-    /\ IF get_refcount(d) = 0
-        THEN when_new
-        ELSE when_exist
+    /\ db' = [db_deleted EXCEPT ![d] = put_actions.db]
+    /\ msgs' = msgs \union delete_reqs \union put_actions.msgs
 
     /\ UNCHANGED global_isr
     /\ UNCHANGED disk_vars
@@ -271,18 +322,14 @@ PutObject(k, d) ==
 DeleteObject(k) ==
     LET
         d == key_db[k]
-
-        delete_reqs == build_delete_requests(
-            d, db',
-            get_req_disks(db'[d].deleting)
-        )
+        actions == doDeleteObject(d)
     IN
     /\ inc_action
     /\ key_db[k] # nil
 
     /\ key_db' = [key_db EXCEPT ![k] = nil]
-    /\ db' = dec_ref_and_delete(d, db)
-    /\ msgs' = msgs \union delete_reqs
+    /\ db' = [db EXCEPT ![d] = actions.db]
+    /\ msgs' = msgs \union actions.msgs
 
     /\ UNCHANGED global_isr
     /\ UNCHANGED disk_vars
@@ -332,7 +379,7 @@ doAckWrite(resp) ==
     /\ db[d].writing[s] = resp.version
 
     /\ db' = [db EXCEPT
-            ![d].writing = set_req_map(@, {s}, nil),
+            ![d].writing = set_req_map(@, {s}, {}, nil),
             ![d].written = @ \union {s}
         ]
 
@@ -417,34 +464,21 @@ UpdateGlobalIsr ==
 
 SyncGlobalIsr(d) ==
     LET
-        put_set == global_isr \ get_isr(d)
-
         new_version == db[d].version + 1
 
-        old_writing == db[d].writing
-
-        old_set == (db[d].written \union get_req_disks(old_writing)) \ global_isr
-
-        clear_writing ==
-            set_req_map(old_writing, old_set, nil)
-
-        new_writing ==
-            set_req_map(clear_writing, put_set, new_version)
-
-        put_reqs == build_put_requests(d, db', put_set)
-
-        delete_reqs == build_delete_requests(d, db', old_set)
+        actions == build_action_info(d, db[d], global_isr, new_version)
     IN
     /\ get_isr(d) # {}
     /\ get_isr(d) # global_isr
 
     /\ db' = [db EXCEPT
             ![d].isr = global_isr,
-            ![d].writing = new_writing,
-            ![d].deleting = set_req_map(init_req_map, old_set, new_version),
+            ![d].written = actions.written,
+            ![d].writing = actions.writing,
+            ![d].deleting = actions.deleting,
             ![d].version = new_version
         ]
-    /\ msgs' = msgs \union put_reqs \union delete_reqs
+    /\ msgs' = msgs \union actions.msgs
 
     /\ UNCHANGED num_action
     /\ UNCHANGED global_isr
@@ -532,6 +566,31 @@ EveryDeletingIsNotInIsr ==
     LET
         cond(d) ==
             \A s \in Disk: db[d].deleting[s] # nil => s \notin db[d].isr
+    IN
+    \A d \in Digest:
+        db[d] # nil => cond(d)
+
+-------------------------
+
+WrittenNotContainWritingOrDeleting ==
+    LET
+        cond(d) ==
+            \A s \in Disk:
+                s \in db[d].written =>
+                    /\ db[d].writing[s] = nil
+                    /\ db[d].deleting[s] = nil
+    IN
+    \A d \in Digest:
+        db[d] # nil => cond(d)
+
+-------------------------
+
+NotBothWritingAndDeleting ==
+    LET
+        cond(d) ==
+            \A s \in Disk:
+                \/ db[d].deleting[s] = nil
+                \/ db[d].writing[s] = nil
     IN
     \A d \in Digest:
         db[d] # nil => cond(d)
