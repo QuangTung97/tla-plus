@@ -127,22 +127,25 @@ get_refcount(d) ==
 
 -------------------------
 
-deleting_from_writing(req_map, new_version) ==
+deleting_from_writing(old_written, old_writing, new_version) ==
     LET
-        do_update(old) ==
-            IF old # nil
+        do_delete(s, old) ==
+            IF s \in old_written \/ old # nil
                 THEN new_version
                 ELSE old
     IN
-    [s \in Disk |-> do_update(req_map[s])]
+    [s \in Disk |-> do_delete(s, old_writing[s])]
 
 -------------------------
 
 dec_ref_and_delete(d, input_db) ==
     LET
         new_version == input_db[d].version + 1
+        old_written == input_db[d].written
         old_writing == input_db[d].writing
-        new_deleting == deleting_from_writing(old_writing, new_version)
+        new_deleting == deleting_from_writing(
+            old_written, old_writing, new_version
+        )
     IN
     IF input_db[d].refcount = 1 THEN
         [input_db EXCEPT
@@ -226,10 +229,14 @@ PutObject(k, d) ==
 
         put_reqs == build_put_requests(d, db', global_isr)
 
-        delete_reqs == build_delete_requests(
-            d, db',
-            get_req_disks(db'[d].deleting)
-        )
+        delete_reqs ==
+            IF old_digest # nil THEN
+                build_delete_requests(
+                    old_digest, db',
+                    get_req_disks(db'[old_digest].deleting)
+                )
+            ELSE
+                {}
     IN
     /\ inc_action
     /\ key_db[k] # nil => key_db[k] # d
@@ -354,13 +361,40 @@ DeleteData ==
 
 --------------------------------------------------------------------------
 
+doAckDelete(resp) ==
+    LET
+        d == resp.digest
+        s == resp.disk
+    IN
+    /\ db[d].deleting[s] = resp.version
+
+    /\ db' = [db EXCEPT
+            ![d].deleting[s] = nil,
+            ![d].written = @ \ {s}
+        ]
+
+    /\ UNCHANGED msgs
+    /\ UNCHANGED key_db
+    /\ UNCHANGED global_isr
+    /\ UNCHANGED disk_vars
+    /\ UNCHANGED num_action
+
+AckDelete ==
+    \E resp \in msgs:
+        /\ resp.type = "DeleteResp"
+        /\ doAckDelete(resp)
+
+--------------------------------------------------------------------------
+
 StopWriteCond ==
     /\ ~(ENABLED WriteData)
     /\ ~(ENABLED DeleteData)
     /\ ~(ENABLED AckWrite)
+    /\ ~(ENABLED AckDelete)
 
 TerminateCond ==
     /\ num_action = max_action
+    /\ StopWriteCond
     /\ \A d \in Digest:
         db[d] # nil => db[d].isr = db[d].written
 
@@ -378,6 +412,7 @@ Next ==
     \/ WriteData
     \/ AckWrite
     \/ DeleteData
+    \/ AckDelete
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -428,6 +463,11 @@ EveryDeletingIsNotInIsr ==
     IN
     \A d \in Digest:
         db[d] # nil => cond(d)
+
+-------------------------
+
+TerminateCondImplyStopCond ==
+    TerminateCond => StopWriteCond
 
 --------------------------------------------------------------------------
 
