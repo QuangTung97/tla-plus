@@ -32,14 +32,18 @@ NonEmpty(S) == (SUBSET S) \ {{}}
 
 --------------------------------------------------------------------------
 
-Version == 1..9
+Version == 1..max_action
+
+ReqMap == [Disk -> Null(Version)]
+
+init_req_map == [d \in Disk |-> nil]
 
 DBState == [
     refcount: Nat,
-    isr: NonEmpty(Disk),
+    isr: SUBSET Disk,
     written: SUBSET Disk,
-    writing: SUBSET Disk,
-    deleting: SUBSET Disk,
+    writing: ReqMap,
+    deleting: ReqMap,
     version: Version
 ]
 
@@ -98,6 +102,43 @@ inc_action ==
     /\ num_action < max_action
     /\ num_action' = num_action + 1
 
+-------------------------
+
+get_isr(d) ==
+    IF db[d] = nil
+        THEN {}
+        ELSE db[d].isr
+
+-------------------------
+
+get_refcount(d) ==
+    IF db[d] = nil
+        THEN 0
+        ELSE db[d].refcount
+
+-------------------------
+
+dec_ref_and_delete(d, input_db) ==
+    IF input_db[d].refcount = 1 THEN
+        [input_db EXCEPT
+            ![d].refcount = @ - 1,
+            ![d].isr = {},
+            ![d].version = @ + 1
+        ]
+    ELSE
+        [input_db EXCEPT ![d].refcount = @ - 1]
+
+-------------------------
+
+set_req_map(input_map, digest_set, version) ==
+    LET
+        do_update(d, old) ==
+            IF d \in digest_set
+                THEN version
+                ELSE old
+    IN
+    [d \in Disk |-> do_update(d, input_map[d])]
+
 --------------------------------------------------------------------------
 
 PutObject(k, d) ==
@@ -106,8 +147,8 @@ PutObject(k, d) ==
             refcount |-> 1,
             isr |-> global_isr,
             written |-> {},
-            writing |-> global_isr,
-            deleting |-> {},
+            writing |-> set_req_map(init_req_map, global_isr, 1),
+            deleting |-> init_req_map,
             version |-> 1
         ]
 
@@ -118,13 +159,21 @@ PutObject(k, d) ==
             version |-> 1
         ]
 
+        old_digest == key_db[k]
+
+        db_deleted ==
+            IF old_digest # nil THEN
+                dec_ref_and_delete(old_digest, db)
+            ELSE
+                db
+
         put_req_list == {put_req(s): s \in global_isr}
 
         when_new ==
-            /\ db' = [db EXCEPT ![d] = db_state]
+            /\ db' = [db_deleted EXCEPT ![d] = db_state]
 
         when_exist ==
-            /\ db' = [db EXCEPT ![d].refcount = @ + 1]
+            /\ db' = [db_deleted EXCEPT ![d].refcount = @ + 1]
     IN
     /\ inc_action
     /\ key_db[k] # nil => key_db[k] # d
@@ -141,9 +190,15 @@ PutObject(k, d) ==
 --------------------------------------------------------------------------
 
 DeleteObject(k) ==
-    /\ FALSE \* TODO
+    LET
+        d == key_db[k]
+    IN
     /\ inc_action
     /\ key_db[k] # nil
+
+    /\ key_db' = [key_db EXCEPT ![k] = nil]
+    /\ db' = dec_ref_and_delete(d, db)
+    /\ UNCHANGED msgs \* TODO
 
     /\ UNCHANGED global_isr
     /\ UNCHANGED disk_vars
@@ -188,10 +243,10 @@ doAckWrite(resp) ==
         d == resp.digest
         s == resp.disk
     IN
-    /\ s \in db[d].writing
+    /\ db[d].writing[s] = resp.version
 
     /\ db' = [db EXCEPT
-            ![d].writing = @ \ {s},
+            ![d].writing = set_req_map(@, {s}, nil),
             ![d].written = @ \union {s}
         ]
 
@@ -247,12 +302,18 @@ DiskDBMatchFiles ==
 
 -------------------------
 
+KeyDBMatchRefCount ==
+    LET
+        keys_by_digest(d) == {k \in Key: key_db[k] = d}
+
+        num_keys(d) == Cardinality(keys_by_digest(d))
+    IN
+        \A d \in Digest: num_keys(d) = get_refcount(d)
+
+-------------------------
+
 WhenStopWriteInv ==
     LET
-        get_isr(d) ==
-            IF db[d] = nil
-                THEN {}
-                ELSE db[d].isr
 
         digest_inv(d) ==
             \A s \in Disk: s \in get_isr(d) <=> d \in files[s]
@@ -262,7 +323,13 @@ WhenStopWriteInv ==
 
 -------------------------
 
-\* TODO can not delete while refcount > 1
+DigestIsrInv ==
+    \A d \in Digest:
+        get_refcount(d) = 0 <=> get_isr(d) = {}
+
+-------------------------
+
+\* TODO handle deleting & writing req map
 
 --------------------------------------------------------------------------
 
