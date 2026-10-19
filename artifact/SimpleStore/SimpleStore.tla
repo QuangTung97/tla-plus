@@ -523,7 +523,13 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 --------------------------------------------------------------------------
+
+AlwaysTerminated == []<> TerminateCond
+
+-------------------------
 
 KeyDBMatchRefCount ==
     LET
