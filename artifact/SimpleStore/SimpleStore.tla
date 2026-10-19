@@ -204,13 +204,27 @@ set_req_map(input_map, digest_set, version) ==
 
 PutObject(k, d) ==
     LET
-        db_state == [
-            refcount |-> 1,
-            isr |-> global_isr,
-            written |-> {},
-            writing |-> set_req_map(init_req_map, global_isr, 1),
-            deleting |-> init_req_map,
-            version |-> 1
+        old_state ==
+            IF db[d] = nil THEN
+                [
+                    refcount |-> 0,
+                    isr |-> {},
+                    written |-> {},
+                    writing |-> init_req_map,
+                    deleting |-> init_req_map,
+                    version |-> 0
+                ]
+            ELSE
+                db[d]
+
+        new_version == old_state.version + 1
+
+        new_state == [old_state EXCEPT
+            !.refcount = 1,
+            !.isr = global_isr,
+            !.writing = set_req_map(@, global_isr, new_version),
+            !.deleting = init_req_map,
+            !.version = new_version
         ]
 
         old_digest == key_db[k]
@@ -222,7 +236,7 @@ PutObject(k, d) ==
                 db
 
         when_new ==
-            /\ db' = [db_deleted EXCEPT ![d] = db_state]
+            /\ db' = [db_deleted EXCEPT ![d] = new_state]
 
         when_exist ==
             /\ db' = [db_deleted EXCEPT ![d].refcount = @ + 1]
@@ -242,9 +256,11 @@ PutObject(k, d) ==
     /\ key_db[k] # nil => key_db[k] # d
 
     /\ key_db' = [key_db EXCEPT ![k] = d]
-    /\ IF db[d] = nil
+
+    /\ IF get_refcount(d) = 0
         THEN when_new
         ELSE when_exist
+
     /\ msgs' = msgs \union put_reqs \union delete_reqs
 
     /\ UNCHANGED global_isr
