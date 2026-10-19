@@ -195,6 +195,7 @@ doAckWrite(resp) ==
             ![d].written = @ \union {s}
         ]
 
+    /\ UNCHANGED msgs
     /\ UNCHANGED key_db
     /\ UNCHANGED global_isr
     /\ UNCHANGED disk_vars
@@ -206,6 +207,10 @@ AckWrite ==
         /\ doAckWrite(resp)
 
 --------------------------------------------------------------------------
+
+StopWriteCond ==
+    /\ ~(ENABLED WriteData)
+    /\ ~(ENABLED AckWrite)
 
 TerminateCond ==
     /\ num_action = max_action
@@ -239,6 +244,21 @@ DiskDBMatchFiles ==
                 /\ disk_db[s][d].status = "Active"
         IN
         d \in files[s] <=> digest_exist
+
+-------------------------
+
+WhenStopWriteInv ==
+    LET
+        get_isr(d) ==
+            IF db[d] = nil
+                THEN {}
+                ELSE db[d].isr
+
+        digest_inv(d) ==
+            \A s \in Disk: s \in get_isr(d) <=> d \in files[s]
+    IN
+    StopWriteCond =>
+        /\ \A d \in Digest: digest_inv(d)
 
 -------------------------
 
