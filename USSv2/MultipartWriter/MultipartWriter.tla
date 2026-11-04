@@ -4,14 +4,14 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 CONSTANTS Node, nil, max_num_upload, num_part
 
 VARIABLES
-    pc, local_sema,
+    pc, local_part, local_sema,
     upload_map,
     last_upload_id,
     part_map,
     global_sema
 
 local_vars == <<
-    pc, local_sema
+    pc, local_part, local_sema
 >>
 
 vars == <<
@@ -36,26 +36,36 @@ PartID == UploadID \X PartNum
 
 SemaAddr == DOMAIN global_sema
 
-PC == {"Init", "WaitOnSema", "Terminated"}
+PC == {"Init", "WaitOnSema", "SetWriting", "FinishWrite", "Terminated"}
 
 UploadState == [
-    status: {"Init", "Started", "Finished"}
+    status: {"Init", "Started", "Writing", "Finished"}
 ]
+
+PartState == [
+    sema: SemaAddr,
+    consumed: BOOLEAN,
+    notified: BOOLEAN
+]
+
+SemaData == 0..1
 
 --------------------------------------------------------------------
 
 TypeOK ==
     /\ pc \in [Node -> PC]
+    /\ local_part \in [Node -> Null(PartID)]
     /\ local_sema \in [Node -> Null(SemaAddr)]
 
     /\ last_upload_id \in (UploadID \union {10})
     /\ upload_map \in [UploadID -> Null(UploadState)]
 
-    /\ part_map \in [PartID -> Null(SemaAddr)]
-    /\ global_sema \in Seq(Nat)
+    /\ part_map \in [PartID -> Null(PartState)]
+    /\ global_sema \in Seq(SemaData)
 
 Init ==
     /\ pc = [n \in Node |-> "Init"]
+    /\ local_part = [n \in Node |-> nil]
     /\ local_sema = [n \in Node |-> nil]
 
     /\ last_upload_id = 10
@@ -89,13 +99,24 @@ GetMultipartUrls(id) ==
     LET
         state == upload_map[id]
 
-        new_sema_list == [idx \in 1..num_part |-> 0]
+        base_sema_list == [idx \in 1..num_part |-> 0]
+        new_sema_list == [base_sema_list EXCEPT ![1] = 1] \* init first
 
         last_sema_addr == Len(global_sema)
 
         update_part_map(x, num, old) ==
+            LET
+                init_state(notified) == [
+                    sema |-> last_sema_addr + num,
+                    consumed |-> FALSE,
+                    notified |-> notified
+                ]
+            IN
             IF x = id THEN
-                last_sema_addr + num
+                IF num = 1 THEN
+                    init_state(TRUE)
+                ELSE
+                    init_state(FALSE)
             ELSE
                 old
     IN
@@ -122,14 +143,17 @@ goto(n, l) ==
 
 GetPartWriter(n, p) ==
     LET
-        sem == part_map[p]
+        state == part_map[p]
     IN
     /\ pc[n] = "Init"
-    /\ sem # nil
+    /\ state # nil
+    /\ ~state.consumed
 
     /\ goto(n, "WaitOnSema")
-    /\ part_map' = [part_map EXCEPT ![p] = nil]
-    /\ set_local(n, local_sema, sem)
+    /\ part_map' = [part_map EXCEPT ![p].consumed = TRUE]
+
+    /\ set_local(n, local_part, p)
+    /\ set_local(n, local_sema, state.sema)
 
     /\ UNCHANGED upload_map
     /\ UNCHANGED global_sema
@@ -137,8 +161,78 @@ GetPartWriter(n, p) ==
 
 --------------------------------------------------------------------
 
+WaitOnSema(n) ==
+    LET
+        sem == local_sema[n]
+    IN
+    /\ pc[n] = "WaitOnSema"
+    /\ global_sema[sem] > 0
+
+    /\ global_sema' = [global_sema EXCEPT ![sem] = @ - 1]
+    /\ goto(n, "SetWriting")
+
+    /\ UNCHANGED local_part
+    /\ UNCHANGED local_sema
+    /\ UNCHANGED last_upload_id
+    /\ UNCHANGED upload_map
+    /\ UNCHANGED part_map
+
+--------------------------------------------------------------------
+
+SetWriting(n) ==
+    LET
+        p == local_part[n]
+        id == p[1]
+    IN
+    /\ pc[n] = "SetWriting"
+
+    /\ upload_map' = [upload_map EXCEPT ![id].status = "Writing"]
+    /\ goto(n, "FinishWrite")
+
+    /\ UNCHANGED part_map
+    /\ UNCHANGED <<local_part, local_sema>>
+    /\ UNCHANGED global_sema
+    /\ UNCHANGED last_upload_id
+
+--------------------------------------------------------------------
+
+FinishWrite(n) ==
+    LET
+        p == local_part[n]
+        id == p[1]
+        num == p[2]
+
+        next_num == num + 1
+        next_part == <<id, next_num>>
+        next_sem == part_map[next_part].sema
+
+        notify_next ==
+            IF next_num \in PartNum THEN
+                /\ part_map' = [part_map EXCEPT ![next_part].notified = TRUE]
+                /\ global_sema' = [global_sema EXCEPT ![next_sem] = @ + 1]
+            ELSE
+                /\ UNCHANGED global_sema
+                /\ UNCHANGED part_map
+    IN
+    /\ pc[n] = "FinishWrite"
+
+    /\ upload_map' = [upload_map EXCEPT ![id].status = "Started"]
+    /\ notify_next
+    /\ goto(n, "Terminated")
+
+    /\ set_local(n, local_part, nil)
+    /\ set_local(n, local_sema, nil)
+
+    /\ UNCHANGED last_upload_id
+
+--------------------------------------------------------------------
+
 TerminateCond ==
-    /\ FALSE
+    /\ last_upload_id = max_upload_id
+    /\ \A n \in Node:
+        pc[n] = "Terminated"
+    /\ \A id \in UploadID: upload_map[id] = nil
+    /\ \A p \in PartID: part_map[p] = nil
 
 Terminated ==
     /\ TerminateCond
@@ -152,6 +246,10 @@ Next ==
         \/ GetMultipartUrls(id)
     \/ \E n \in Node, p \in PartID:
         \/ GetPartWriter(n, p)
+    \/ \E n \in Node:
+        \/ WaitOnSema(n)
+        \/ SetWriting(n)
+        \/ FinishWrite(n)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
