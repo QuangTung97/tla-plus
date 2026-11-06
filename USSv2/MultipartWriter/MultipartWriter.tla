@@ -8,7 +8,8 @@ VARIABLES
     upload_map,
     last_upload_id,
     part_map,
-    global_sema
+    global_sema,
+    callback_pc
 
 local_vars == <<
     pc, local_part, local_sema
@@ -19,7 +20,8 @@ vars == <<
     upload_map,
     last_upload_id,
     part_map,
-    global_sema
+    global_sema,
+    callback_pc
 >>
 
 --------------------------------------------------------------------
@@ -39,7 +41,8 @@ SemaAddr == DOMAIN global_sema
 PC == {"Init", "WaitOnSema", "SetWriting", "FinishWrite", "Terminated"}
 
 UploadState == [
-    status: {"Init", "Started", "Writing", "Finished"}
+    status: {"Init", "Started", "Writing", "Finished"},
+    pending: SUBSET PartNum
 ]
 
 PartState == [
@@ -49,6 +52,8 @@ PartState == [
 ]
 
 SemaData == 0..1
+
+CallbackPC == {"Init", "Terminated"}
 
 --------------------------------------------------------------------
 
@@ -63,6 +68,8 @@ TypeOK ==
     /\ part_map \in [PartID -> Null(PartState)]
     /\ global_sema \in Seq(SemaData)
 
+    /\ callback_pc \in [UploadID -> Null(CallbackPC)]
+
 Init ==
     /\ pc = [n \in Node |-> "Init"]
     /\ local_part = [n \in Node |-> nil]
@@ -74,6 +81,8 @@ Init ==
     /\ part_map = [p \in PartID |-> nil]
     /\ global_sema = <<>>
 
+    /\ callback_pc = [id \in UploadID |-> nil]
+
 --------------------------------------------------------------------
 
 StartUpload ==
@@ -81,13 +90,15 @@ StartUpload ==
         id == last_upload_id + 1
 
         state == [
-            status |-> "Init"
+            status |-> "Init",
+            pending |-> {}
         ]
     IN
     /\ last_upload_id < max_upload_id
     /\ last_upload_id' = id
 
     /\ upload_map' = [upload_map EXCEPT ![id] = state]
+    /\ callback_pc' = [callback_pc EXCEPT ![id] = "Init"]
 
     /\ UNCHANGED part_map
     /\ UNCHANGED global_sema
@@ -95,40 +106,68 @@ StartUpload ==
 
 --------------------------------------------------------------------
 
+notify_sema_list(input_global_sema, sem_set) ==
+    LET
+        update_sema(sem, old) ==
+            IF sem \in sem_set
+                THEN old + 1
+                ELSE old
+    IN
+    [
+        sem \in DOMAIN input_global_sema |->
+            update_sema(sem, input_global_sema[sem])
+    ]
+
+---------------------------
+
+put_map(input_map, key_set, update_fn(_, _)) ==
+    LET
+        do_update(k, old) ==
+            IF k \in key_set
+                THEN update_fn(k, old)
+                ELSE old
+    IN
+    [k \in DOMAIN input_map |-> do_update(k, input_map[k])]
+
+--------------------------------------------------------------------
+
 GetMultipartUrls(id) ==
     LET
         state == upload_map[id]
 
-        base_sema_list == [idx \in 1..num_part |-> 0]
-        new_sema_list == [base_sema_list EXCEPT ![1] = 1] \* init first
+        append_sema_list == [num \in PartNum |-> 0]
+        appended_global_sema == global_sema \o append_sema_list
 
-        last_sema_addr == Len(global_sema)
+        first_sem == Len(global_sema) + 1
+        new_global_sema == notify_sema_list(appended_global_sema, {first_sem})
 
-        update_part_map(x, num, old) ==
-            LET
-                init_state(notified) == [
-                    sema |-> last_sema_addr + num,
-                    consumed |-> FALSE,
-                    notified |-> notified
-                ]
-            IN
-            IF x = id THEN
-                IF num = 1 THEN
-                    init_state(TRUE)
-                ELSE
-                    init_state(FALSE)
-            ELSE
-                old
+        part_id_set == {id} \X PartNum
+
+        init_part_state(p, _old) == [
+            sema |-> Len(global_sema) + p[2],
+            consumed |-> FALSE,
+            notified |-> FALSE
+        ]
+
+        base_part_map == put_map(part_map, part_id_set, init_part_state)
+
+        set_notified_fn(p, old) == [old EXCEPT !.notified = TRUE]
+
+        first_part_id == <<id, 1>>
+        new_part_map == put_map(base_part_map, {first_part_id}, set_notified_fn)
     IN
     /\ state # nil
     /\ state.status = "Init"
 
-    /\ upload_map' = [upload_map EXCEPT ![id].status = "Started"]
-    /\ part_map' = [p \in PartID |-> update_part_map(p[1], p[2], part_map[p])]
-
-    /\ global_sema' = global_sema \o new_sema_list
+    /\ upload_map' = [upload_map EXCEPT
+            ![id].status = "Started",
+            ![id].pending = PartNum
+        ]
+    /\ part_map' = new_part_map
+    /\ global_sema' = new_global_sema
 
     /\ UNCHANGED last_upload_id
+    /\ UNCHANGED callback_pc
     /\ UNCHANGED local_vars
 
 --------------------------------------------------------------------
@@ -157,6 +196,7 @@ GetPartWriter(n, p) ==
 
     /\ UNCHANGED upload_map
     /\ UNCHANGED global_sema
+    /\ UNCHANGED callback_pc
     /\ UNCHANGED last_upload_id
 
 --------------------------------------------------------------------
@@ -175,6 +215,7 @@ WaitOnSema(n) ==
     /\ UNCHANGED local_sema
     /\ UNCHANGED last_upload_id
     /\ UNCHANGED upload_map
+    /\ UNCHANGED callback_pc
     /\ UNCHANGED part_map
 
 --------------------------------------------------------------------
@@ -193,6 +234,7 @@ SetWriting(n) ==
     /\ UNCHANGED <<local_part, local_sema>>
     /\ UNCHANGED global_sema
     /\ UNCHANGED last_upload_id
+    /\ UNCHANGED callback_pc
 
 --------------------------------------------------------------------
 
@@ -216,7 +258,10 @@ FinishWrite(n) ==
     IN
     /\ pc[n] = "FinishWrite"
 
-    /\ upload_map' = [upload_map EXCEPT ![id].status = "Started"]
+    /\ upload_map' = [upload_map EXCEPT
+            ![id].status = "Started",
+            ![id].pending = @ \ {num}
+        ]
     /\ notify_next
     /\ goto(n, "Terminated")
 
@@ -224,14 +269,20 @@ FinishWrite(n) ==
     /\ set_local(n, local_sema, nil)
 
     /\ UNCHANGED last_upload_id
+    /\ UNCHANGED callback_pc
+
+--------------------------------------------------------------------
+
+CallbackComplete == TRUE
 
 --------------------------------------------------------------------
 
 TerminateCond ==
-    /\ last_upload_id = max_upload_id
     /\ \A n \in Node:
         pc[n] = "Terminated"
-    /\ \A id \in UploadID: upload_map[id] = nil
+    /\ \A id \in UploadID:
+        /\ upload_map[id] = nil
+        /\ callback_pc[id] \in {nil, "Terminated"}
     /\ \A p \in PartID: part_map[p] = nil
 
 Terminated ==
@@ -253,6 +304,17 @@ Next ==
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
+
+--------------------------------------------------------------------
+
+UploadPendingMatchPartMap ==
+    LET
+        in_pending(p) ==
+            /\ upload_map[p[1]] # nil
+            /\ p[2] \in upload_map[p[1]].pending
+    IN
+    \A p \in PartID:
+        part_map[p] # nil <=> in_pending(p)
 
 --------------------------------------------------------------------
 
