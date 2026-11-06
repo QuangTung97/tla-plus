@@ -112,8 +112,8 @@ StartUpload ==
 
     /\ global_sema' = Append(global_sema, 0)
     /\ upload_map' = [upload_map EXCEPT ![id] = state]
-    /\ callback_pc' = [callback_pc EXCEPT ![id] = "Init"]
 
+    /\ UNCHANGED callback_pc
     /\ UNCHANGED part_map
     /\ UNCHANGED local_vars
 
@@ -178,9 +178,9 @@ GetMultipartUrls(id) ==
         ]
     /\ part_map' = new_part_map
     /\ global_sema' = new_global_sema
+    /\ callback_pc' = [callback_pc EXCEPT ![id] = "Init"]
 
     /\ UNCHANGED last_upload_id
-    /\ UNCHANGED callback_pc
     /\ UNCHANGED local_vars
 
 --------------------------------------------------------------------
@@ -237,11 +237,26 @@ SetWriting(n) ==
     LET
         p == local_part[n]
         id == p[1]
+
+        state == upload_map[id]
+
+        normal_cond ==
+            /\ state # nil
+            /\ state.status = "Started"
+
+        on_normal ==
+            /\ upload_map' = [upload_map EXCEPT ![id].writing = @ + 1]
+            /\ goto(n, "FinishWrite")
+
+        on_fail ==
+            /\ goto(n, "Terminated")
+            /\ UNCHANGED upload_map
     IN
     /\ pc[n] = "SetWriting"
 
-    /\ upload_map' = [upload_map EXCEPT ![id].writing = @ + 1]
-    /\ goto(n, "FinishWrite")
+    /\ IF normal_cond
+        THEN on_normal
+        ELSE on_fail
 
     /\ UNCHANGED part_map
     /\ UNCHANGED <<local_part, local_sema>>
@@ -272,16 +287,32 @@ FinishWrite(n) ==
             ELSE
                 /\ part_map' = part_map_deleted
                 /\ UNCHANGED global_sema
+
+        state == upload_map[id]
+
+        normal_cond ==
+            /\ state # nil
+            /\ state.status = "Started"
+
+        on_normal ==
+            /\ upload_map' = [upload_map EXCEPT
+                    ![id].pending = @ \ {num},
+                    ![id].writing = @ - 1
+                ]
+            /\ notify_next
+
+        on_fail ==
+            /\ UNCHANGED upload_map
+            /\ UNCHANGED part_map
+            /\ UNCHANGED global_sema
     IN
     /\ pc[n] = "FinishWrite"
 
-    /\ upload_map' = [upload_map EXCEPT
-            ![id].pending = @ \ {num},
-            ![id].writing = @ - 1
-        ]
-    /\ notify_next
-    /\ goto(n, "Terminated")
+    /\ IF normal_cond
+        THEN on_normal
+        ELSE on_fail
 
+    /\ goto(n, "Terminated")
     /\ set_local(n, local_part, nil)
     /\ set_local(n, local_sema, nil)
 
@@ -296,13 +327,45 @@ CallbackComplete(id) ==
     IN
     /\ callback_pc[id] = "Init"
     /\ upload_map[id].pending = {}
-    /\ upload_map[id].status = "Started"
 
     /\ callback_pc' = [callback_pc EXCEPT ![id] = "Terminated"]
     /\ upload_map' = [upload_map EXCEPT ![id].status = "Finished"]
     /\ global_sema' = [global_sema EXCEPT ![finish_sem] = 1]
 
     /\ UNCHANGED part_map
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED last_upload_id
+
+--------------------------------------------------------------------
+
+CallbackError(id) ==
+    LET
+        pending_part_ids == {id} \X upload_map[id].pending
+
+        noti_cond(p) ==
+            /\ part_map[p].consumed
+            /\ ~part_map[p].notified
+
+        noti_part_ids == {p \in pending_part_ids: noti_cond(p)}
+
+        finish_sem == upload_map[id].finish_sema
+
+        notify_list ==
+            {part_map[p].sema: p \in noti_part_ids} \union {finish_sem}
+
+        clear_part_fn(p, old) == nil
+    IN
+    /\ callback_pc[id] = "Init"
+
+    /\ callback_pc' = [callback_pc EXCEPT ![id] = "Terminated"]
+    /\ upload_map' = [upload_map EXCEPT
+            ![id].status = "Finished",
+            ![id].pending = {},
+            ![id].writing = 0
+        ]
+    /\ global_sema' = notify_sema_list(global_sema, notify_list)
+    /\ part_map' = put_map(part_map, pending_part_ids, clear_part_fn)
+
     /\ UNCHANGED local_vars
     /\ UNCHANGED last_upload_id
 
@@ -350,7 +413,7 @@ WaitOnFinishSema(n) ==
 
 TerminateCond ==
     /\ \A n \in Node:
-        pc[n] = "Terminated"
+        /\ pc[n] \in {"Init", "Terminated"}
     /\ \A id \in UploadID:
         /\ upload_map[id] = nil
         /\ callback_pc[id] \in {nil, "Terminated"}
@@ -367,6 +430,7 @@ Next ==
     \/ \E id \in UploadID:
         \/ GetMultipartUrls(id)
         \/ CallbackComplete(id)
+        \/ CallbackError(id)
     \/ \E n \in Node, p \in PartID:
         \/ GetPartWriter(n, p)
     \/ \E n \in Node:
@@ -390,6 +454,20 @@ UploadPendingMatchPartMap ==
     IN
     \A p \in PartID:
         part_map[p] # nil <=> in_pending(p)
+
+---------------------------
+
+UploadStateInv ==
+    \A id \in UploadID:
+        LET
+            state == upload_map[id]
+
+            cond ==
+                state.status = "Finished" =>
+                    /\ state.pending = {}
+                    /\ state.writing = 0
+        IN
+        state # nil => cond
 
 --------------------------------------------------------------------
 
