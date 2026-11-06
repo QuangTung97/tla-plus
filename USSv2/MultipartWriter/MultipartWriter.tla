@@ -41,8 +41,9 @@ SemaAddr == DOMAIN global_sema
 PC == {"Init", "WaitOnSema", "SetWriting", "FinishWrite", "Terminated"}
 
 UploadState == [
-    status: {"Init", "Started", "Writing", "Finished"},
-    pending: SUBSET PartNum
+    status: {"Init", "Started", "Finished"},
+    pending: SUBSET PartNum,
+    writing: 0..1
 ]
 
 PartState == [
@@ -91,7 +92,8 @@ StartUpload ==
 
         state == [
             status |-> "Init",
-            pending |-> {}
+            pending |-> {},
+            writing |-> 0
         ]
     IN
     /\ last_upload_id < max_upload_id
@@ -227,7 +229,7 @@ SetWriting(n) ==
     IN
     /\ pc[n] = "SetWriting"
 
-    /\ upload_map' = [upload_map EXCEPT ![id].status = "Writing"]
+    /\ upload_map' = [upload_map EXCEPT ![id].writing = @ + 1]
     /\ goto(n, "FinishWrite")
 
     /\ UNCHANGED part_map
@@ -248,19 +250,23 @@ FinishWrite(n) ==
         next_part == <<id, next_num>>
         next_sem == part_map[next_part].sema
 
+        part_map_deleted == [part_map EXCEPT ![p] = nil]
+
         notify_next ==
             IF next_num \in PartNum THEN
-                /\ part_map' = [part_map EXCEPT ![next_part].notified = TRUE]
+                /\ part_map' = [part_map_deleted EXCEPT
+                        ![next_part].notified = TRUE
+                    ]
                 /\ global_sema' = [global_sema EXCEPT ![next_sem] = @ + 1]
             ELSE
+                /\ part_map' = part_map_deleted
                 /\ UNCHANGED global_sema
-                /\ UNCHANGED part_map
     IN
     /\ pc[n] = "FinishWrite"
 
     /\ upload_map' = [upload_map EXCEPT
-            ![id].status = "Started",
-            ![id].pending = @ \ {num}
+            ![id].pending = @ \ {num},
+            ![id].writing = @ - 1
         ]
     /\ notify_next
     /\ goto(n, "Terminated")
@@ -273,7 +279,17 @@ FinishWrite(n) ==
 
 --------------------------------------------------------------------
 
-CallbackComplete == TRUE
+CallbackComplete(id) ==
+    /\ callback_pc[id] = "Init"
+    /\ upload_map[id].pending = {}
+    /\ upload_map[id].status = "Started"
+
+    /\ callback_pc' = [callback_pc EXCEPT ![id] = "Terminated"]
+
+    /\ UNCHANGED part_map
+    /\ UNCHANGED global_sema
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED last_upload_id
 
 --------------------------------------------------------------------
 
@@ -295,6 +311,7 @@ Next ==
     \/ StartUpload
     \/ \E id \in UploadID:
         \/ GetMultipartUrls(id)
+        \/ CallbackComplete(id)
     \/ \E n \in Node, p \in PartID:
         \/ GetPartWriter(n, p)
     \/ \E n \in Node:
