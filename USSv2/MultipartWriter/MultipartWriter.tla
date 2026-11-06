@@ -377,6 +377,7 @@ StartWaitFinish(n, id) ==
     IN
     /\ pc[n] = "Init"
     /\ state # nil
+    /\ state.status = "Started"
     /\ ~state.finish_consumed
 
     /\ goto(n, "WaitOnFinishSema")
@@ -411,6 +412,20 @@ WaitOnFinishSema(n) ==
 
 --------------------------------------------------------------------
 
+DeleteUpload(id) ==
+    /\ upload_map[id] # nil
+    /\ upload_map[id].status \in {"Init", "Finished"}
+
+    /\ upload_map' = [upload_map EXCEPT ![id] = nil]
+
+    /\ UNCHANGED local_vars
+    /\ UNCHANGED global_sema
+    /\ UNCHANGED last_upload_id
+    /\ UNCHANGED part_map
+    /\ UNCHANGED callback_pc
+
+--------------------------------------------------------------------
+
 TerminateCond ==
     /\ \A n \in Node:
         /\ pc[n] \in {"Init", "Terminated"}
@@ -431,6 +446,7 @@ Next ==
         \/ GetMultipartUrls(id)
         \/ CallbackComplete(id)
         \/ CallbackError(id)
+        \/ DeleteUpload(id)
     \/ \E n \in Node, p \in PartID:
         \/ GetPartWriter(n, p)
     \/ \E n \in Node:
