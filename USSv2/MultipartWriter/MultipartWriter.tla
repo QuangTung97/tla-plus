@@ -38,11 +38,18 @@ PartID == UploadID \X PartNum
 
 SemaAddr == DOMAIN global_sema
 
-PC == {"Init", "WaitOnSema", "SetWriting", "FinishWrite", "Terminated"}
+PC == {
+    "Init", "WaitOnSema",
+    "SetWriting", "FinishWrite",
+    "WaitOnFinishSema",
+    "Terminated"
+}
 
 UploadState == [
     status: {"Init", "Started", "Finished"},
     pending: SUBSET PartNum,
+    finish_sema: SemaAddr,
+    finish_consumed: BOOLEAN,
     writing: 0..1
 ]
 
@@ -90,20 +97,24 @@ StartUpload ==
     LET
         id == last_upload_id + 1
 
+        sem == Len(global_sema) + 1
+
         state == [
             status |-> "Init",
             pending |-> {},
+            finish_sema |-> sem,
+            finish_consumed |-> FALSE,
             writing |-> 0
         ]
     IN
     /\ last_upload_id < max_upload_id
     /\ last_upload_id' = id
 
+    /\ global_sema' = Append(global_sema, 0)
     /\ upload_map' = [upload_map EXCEPT ![id] = state]
     /\ callback_pc' = [callback_pc EXCEPT ![id] = "Init"]
 
     /\ UNCHANGED part_map
-    /\ UNCHANGED global_sema
     /\ UNCHANGED local_vars
 
 --------------------------------------------------------------------
@@ -280,16 +291,60 @@ FinishWrite(n) ==
 --------------------------------------------------------------------
 
 CallbackComplete(id) ==
+    LET
+        finish_sem == upload_map[id].finish_sema
+    IN
     /\ callback_pc[id] = "Init"
     /\ upload_map[id].pending = {}
     /\ upload_map[id].status = "Started"
 
     /\ callback_pc' = [callback_pc EXCEPT ![id] = "Terminated"]
+    /\ upload_map' = [upload_map EXCEPT ![id].status = "Finished"]
+    /\ global_sema' = [global_sema EXCEPT ![finish_sem] = 1]
 
     /\ UNCHANGED part_map
-    /\ UNCHANGED global_sema
     /\ UNCHANGED local_vars
     /\ UNCHANGED last_upload_id
+
+--------------------------------------------------------------------
+
+StartWaitFinish(n, id) ==
+    LET
+        state == upload_map[id]
+    IN
+    /\ pc[n] = "Init"
+    /\ state # nil
+    /\ ~state.finish_consumed
+
+    /\ goto(n, "WaitOnFinishSema")
+    /\ set_local(n, local_sema, state.finish_sema)
+    /\ set_local(n, local_part, <<id, 1>>)
+    /\ upload_map' = [upload_map EXCEPT ![id].finish_consumed = TRUE]
+
+    /\ UNCHANGED part_map
+    /\ UNCHANGED callback_pc
+    /\ UNCHANGED global_sema
+    /\ UNCHANGED last_upload_id
+
+--------------------------------------------------------------------
+
+WaitOnFinishSema(n) ==
+    LET
+        id == local_part[n][1]
+        sem == local_sema[n]
+    IN
+    /\ pc[n] = "WaitOnFinishSema"
+    /\ global_sema[sem] = 1
+
+    /\ upload_map' = [upload_map EXCEPT ![id] = nil]
+    /\ goto(n, "Terminated")
+    /\ set_local(n, local_sema, nil)
+    /\ set_local(n, local_part, nil)
+
+    /\ UNCHANGED global_sema
+    /\ UNCHANGED last_upload_id
+    /\ UNCHANGED part_map
+    /\ UNCHANGED callback_pc
 
 --------------------------------------------------------------------
 
@@ -318,6 +373,9 @@ Next ==
         \/ WaitOnSema(n)
         \/ SetWriting(n)
         \/ FinishWrite(n)
+        \/ WaitOnFinishSema(n)
+    \/ \E n \in Node, id \in UploadID:
+        \/ StartWaitFinish(n, id)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
