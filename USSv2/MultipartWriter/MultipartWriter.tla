@@ -40,7 +40,7 @@ SemaAddr == DOMAIN global_sema
 
 PC == {
     "Init", "WaitOnSema",
-    "SetWriting", "FinishWrite",
+    "FinishWrite",
     "WaitOnFinishSema",
     "Terminated"
 }
@@ -49,8 +49,7 @@ UploadState == [
     status: {"Init", "Started", "Finished"},
     pending: SUBSET PartNum,
     finish_sema: SemaAddr,
-    finish_consumed: BOOLEAN,
-    writing: 0..1
+    finish_consumed: BOOLEAN
 ]
 
 PartState == [
@@ -103,8 +102,7 @@ StartUpload ==
             status |-> "Init",
             pending |-> {},
             finish_sema |-> sem,
-            finish_consumed |-> FALSE,
-            writing |-> 0
+            finish_consumed |-> FALSE
         ]
     IN
     /\ last_upload_id < max_upload_id
@@ -222,7 +220,7 @@ WaitOnSema(n) ==
     /\ global_sema[sem] > 0
 
     /\ global_sema' = [global_sema EXCEPT ![sem] = @ - 1]
-    /\ goto(n, "SetWriting")
+    /\ goto(n, "FinishWrite")
 
     /\ UNCHANGED local_part
     /\ UNCHANGED local_sema
@@ -230,39 +228,6 @@ WaitOnSema(n) ==
     /\ UNCHANGED upload_map
     /\ UNCHANGED callback_pc
     /\ UNCHANGED part_map
-
---------------------------------------------------------------------
-
-SetWriting(n) ==
-    LET
-        p == local_part[n]
-        id == p[1]
-
-        state == upload_map[id]
-
-        normal_cond ==
-            /\ state # nil
-            /\ state.status = "Started"
-
-        on_normal ==
-            /\ upload_map' = [upload_map EXCEPT ![id].writing = @ + 1]
-            /\ goto(n, "FinishWrite")
-
-        on_fail ==
-            /\ goto(n, "Terminated")
-            /\ UNCHANGED upload_map
-    IN
-    /\ pc[n] = "SetWriting"
-
-    /\ IF normal_cond
-        THEN on_normal
-        ELSE on_fail
-
-    /\ UNCHANGED part_map
-    /\ UNCHANGED <<local_part, local_sema>>
-    /\ UNCHANGED global_sema
-    /\ UNCHANGED last_upload_id
-    /\ UNCHANGED callback_pc
 
 --------------------------------------------------------------------
 
@@ -296,8 +261,7 @@ FinishWrite(n) ==
 
         on_normal ==
             /\ upload_map' = [upload_map EXCEPT
-                    ![id].pending = @ \ {num},
-                    ![id].writing = @ - 1
+                    ![id].pending = @ \ {num}
                 ]
             /\ notify_next
 
@@ -360,8 +324,7 @@ CallbackError(id) ==
     /\ callback_pc' = [callback_pc EXCEPT ![id] = "Terminated"]
     /\ upload_map' = [upload_map EXCEPT
             ![id].status = "Finished",
-            ![id].pending = {},
-            ![id].writing = 0
+            ![id].pending = {}
         ]
     /\ global_sema' = notify_sema_list(global_sema, notify_list)
     /\ part_map' = put_map(part_map, pending_part_ids, clear_part_fn)
@@ -451,7 +414,6 @@ Next ==
         \/ GetPartWriter(n, p)
     \/ \E n \in Node:
         \/ WaitOnSema(n)
-        \/ SetWriting(n)
         \/ FinishWrite(n)
         \/ WaitOnFinishSema(n)
     \/ \E n \in Node, id \in UploadID:
@@ -487,7 +449,6 @@ UploadStateInv ==
             cond ==
                 state.status = "Finished" =>
                     /\ state.pending = {}
-                    /\ state.writing = 0
         IN
         state # nil => cond
 
