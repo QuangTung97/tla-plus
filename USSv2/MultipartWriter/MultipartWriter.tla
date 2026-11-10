@@ -340,7 +340,7 @@ StartWaitFinish(n, id) ==
     IN
     /\ pc[n] = "Init"
     /\ state # nil
-    /\ state.status = "Started"
+    /\ state.status \in {"Started", "Finished"}
     /\ ~state.finish_consumed
 
     /\ goto(n, "WaitOnFinishSema")
