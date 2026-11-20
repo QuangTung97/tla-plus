@@ -26,6 +26,16 @@ ASSUME NonEmpty({1, 2}) = {{1, 2}, {1}, {2}}
 
 Null(S) == S \union {nil}
 
+Max(S) == CHOOSE x \in S: \A y \in S: y <= x
+
+ASSUME Max({11, 12, 13}) = 13
+
+Min(S) == CHOOSE x \in S: \A y \in S: y >= x
+
+ASSUME Min({11, 12, 13}) = 11
+
+Range(f) == {f[x]: x \in DOMAIN f}
+
 --------------------------------------------------------------
 
 Epoch == 10..19
@@ -117,9 +127,12 @@ acceptEpoch(n, epoch) ==
     /\ local_epoch[n] # nil => local_epoch[n] <= epoch
     /\ updateEpoch(n, epoch)
 
-isLeader(n) ==
+isLocalLeader(n) ==
     /\ local_config[n] # nil
     /\ local_config[n].leader = n
+
+isLeader(n) ==
+    /\ isLocalLeader(n)
     /\ local_config[n].epoch = global_config.epoch
 
 allowAction ==
@@ -139,7 +152,10 @@ SyncConfig(n) ==
     /\ local_config[n] # nil => local_config[n].epoch < epoch
     /\ local_config' = [local_config EXCEPT ![n] = global_config]
     /\ updateEpoch(n, epoch)
-    /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
+
+    /\ IF global_config.leader = n
+        THEN leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
+        ELSE UNCHANGED leader_pos_map
 
     /\ UNCHANGED num_action
     /\ UNCHANGED commit_pos
@@ -148,6 +164,14 @@ SyncConfig(n) ==
     /\ UNCHANGED msgs
 
 --------------------------------------------------------------
+
+updateCommitPos(n) ==
+    LET
+        leader_pos == Len(log'[n])
+        repl_pos_list == Range(leader_pos_map'[n])
+        new_pos == Min({leader_pos} \union repl_pos_list)
+    IN
+    /\ commit_pos' = [commit_pos EXCEPT ![n] = new_pos]
 
 AddEntry(n, v) ==
     LET
@@ -173,7 +197,7 @@ AddEntry(n, v) ==
     /\ log' = [log EXCEPT ![n] = Append(@, entry)]
     /\ msgs' = msgs \union {msg}
     /\ UNCHANGED leader_pos_map
-    /\ UNCHANGED commit_pos
+    /\ updateCommitPos(n)
 
     /\ UNCHANGED local_config
     /\ UNCHANGED local_epoch
@@ -214,7 +238,16 @@ RecvEntry(n) ==
 --------------------------------------------------------------
 
 TerminateCond ==
-    /\ FALSE
+    LET
+        leader == global_config.leader
+        isr == global_config.isr
+    IN
+    /\ num_action = max_num_action
+    /\ Len(log[leader]) = commit_pos[leader]
+    /\ \A n \in isr:
+        /\ local_config[n] # nil
+        /\ local_config[n].epoch = global_config.epoch
+        /\ commit_pos[n] = commit_pos[leader]
 
 Terminated ==
     /\ TerminateCond
@@ -233,5 +266,23 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 --------------------------------------------------------------
+
+LeaderInv ==
+    \A n \in Node:
+        isLocalLeader(n) <=> leader_pos_map[n] # nil
+
+----------------------
+
+computed_commit_pos(n) ==
+    LET
+        leader_pos == Len(log[n])
+        repl_pos_list == Range(leader_pos_map[n])
+    IN
+    Min({leader_pos} \union repl_pos_list)
+
+CommitPosInv ==
+    \A n \in Node:
+        isLocalLeader(n) =>
+            commit_pos[n] = computed_commit_pos(n)
 
 ====
