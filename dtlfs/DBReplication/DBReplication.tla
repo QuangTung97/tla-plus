@@ -147,15 +147,23 @@ SyncConfig(n) ==
         isr == global_config.isr
         pos_map_domain == isr \ {n}
 
+
         init_pos_map == [x \in pos_map_domain |-> 0]
+
+        on_leader ==
+            /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
+            /\ updateEpoch(n, epoch)
+
+        on_follower ==
+            /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
+            /\ UNCHANGED local_epoch
     IN
     /\ local_config[n] # nil => local_config[n].epoch < epoch
     /\ local_config' = [local_config EXCEPT ![n] = global_config]
-    /\ updateEpoch(n, epoch)
 
     /\ IF global_config.leader = n
-        THEN leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
-        ELSE UNCHANGED leader_pos_map
+        THEN on_leader
+        ELSE on_follower
 
     /\ UNCHANGED num_action
     /\ UNCHANGED commit_pos
@@ -237,6 +245,74 @@ RecvEntry(n) ==
 
 --------------------------------------------------------------
 
+IncLeaderLogPos(l, n) ==
+    LET
+        pos == Len(log[n])
+    IN
+    /\ isLocalLeader(l)
+    /\ local_epoch[n] = local_config[l].epoch
+    /\ l # n
+    /\ leader_pos_map[l][n] < pos
+
+    /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][n] = pos]
+    /\ UNCHANGED log
+    /\ updateCommitPos(l)
+
+    /\ UNCHANGED msgs
+    /\ UNCHANGED num_action
+    /\ UNCHANGED global_config
+    /\ UNCHANGED local_config
+    /\ UNCHANGED local_epoch
+
+--------------------------------------------------------------
+
+IncFollowerCommitPos(l, n) ==
+    /\ isLocalLeader(l)
+    /\ local_epoch[n] = local_config[l].epoch
+    /\ l # n
+    /\ commit_pos[n] < commit_pos[l]
+
+    /\ commit_pos' = [commit_pos EXCEPT ![n] = commit_pos[l]]
+
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED log
+    /\ UNCHANGED msgs
+    /\ UNCHANGED num_action
+    /\ UNCHANGED global_config
+    /\ UNCHANGED local_config
+    /\ UNCHANGED local_epoch
+
+--------------------------------------------------------------
+
+UpdateGlobalConfig(new_nodes) ==
+    LET
+        isr == global_config.isr
+        new_isr == isr \intersect new_nodes
+
+        \* TODO add syncing set
+
+        new_config(l) == [
+            epoch |-> global_config.epoch + 1,
+            isr |-> new_isr,
+            leader |-> l
+        ]
+    IN
+    /\ allowAction
+    /\ isr # new_nodes
+    /\ new_isr # {}
+
+    /\ \E l \in new_isr:
+        /\ global_config' = new_config(l)
+
+    /\ UNCHANGED local_config
+    /\ UNCHANGED local_epoch
+    /\ UNCHANGED commit_pos
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED msgs
+    /\ UNCHANGED log
+
+--------------------------------------------------------------
+
 TerminateCond ==
     LET
         leader == global_config.leader
@@ -261,6 +337,11 @@ Next ==
         \/ RecvEntry(n)
     \/ \E n \in Node, v \in Value:
         \/ AddEntry(n, v)
+    \/ \E l \in Node, n \in Node:
+        \/ IncLeaderLogPos(l, n)
+        \/ IncFollowerCommitPos(l, n)
+    \/ \E nodes \in NonEmpty(Node):
+        \/ UpdateGlobalConfig(nodes)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -284,5 +365,22 @@ CommitPosInv ==
     \A n \in Node:
         isLocalLeader(n) =>
             commit_pos[n] = computed_commit_pos(n)
+
+----------------------
+
+commitPosNeverDecStep ==
+    \A n \in Node: commit_pos[n] <= commit_pos'[n]
+
+CommitPosNeverDec ==
+    [][commitPosNeverDecStep]_commit_pos
+
+----------------------
+
+CommitLogMatchingInv ==
+    \A n1, n2 \in Node:
+        LET
+            min_pos == Min({commit_pos[n1], commit_pos[n2]})
+        IN
+            SubSeq(log[n1], 1, min_pos) = SubSeq(log[n2], 1, min_pos)
 
 ====
