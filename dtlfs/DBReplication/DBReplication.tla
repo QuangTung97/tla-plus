@@ -141,38 +141,6 @@ allowAction ==
 
 --------------------------------------------------------------
 
-SyncConfig(n) ==
-    LET
-        epoch == global_config.epoch
-        isr == global_config.isr
-        pos_map_domain == isr \ {n}
-
-
-        init_pos_map == [x \in pos_map_domain |-> 0]
-
-        on_leader ==
-            /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
-            /\ updateEpoch(n, epoch)
-
-        on_follower ==
-            /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
-            /\ UNCHANGED local_epoch
-    IN
-    /\ local_config[n] # nil => local_config[n].epoch < epoch
-    /\ local_config' = [local_config EXCEPT ![n] = global_config]
-
-    /\ IF global_config.leader = n
-        THEN on_leader
-        ELSE on_follower
-
-    /\ UNCHANGED num_action
-    /\ UNCHANGED commit_pos
-    /\ UNCHANGED log
-    /\ UNCHANGED global_config
-    /\ UNCHANGED msgs
-
---------------------------------------------------------------
-
 updateCommitPos(n) ==
     LET
         leader_pos == Len(log'[n])
@@ -180,6 +148,40 @@ updateCommitPos(n) ==
         new_pos == Min({leader_pos} \union repl_pos_list)
     IN
     /\ commit_pos' = [commit_pos EXCEPT ![n] = new_pos]
+
+--------------------------------------------------------------
+
+SyncConfig(n) ==
+    LET
+        epoch == global_config.epoch
+        isr == global_config.isr
+        pos_map_domain == isr \ {n}
+
+        init_pos_map == [x \in pos_map_domain |-> 0]
+
+        on_leader ==
+            /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
+            /\ updateEpoch(n, epoch)
+            /\ updateCommitPos(n)
+
+        on_follower ==
+            /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
+            /\ UNCHANGED commit_pos
+            /\ UNCHANGED local_epoch
+    IN
+    /\ local_config[n] # nil => local_config[n].epoch < epoch
+    /\ local_config' = [local_config EXCEPT ![n] = global_config]
+
+    /\ UNCHANGED log
+    /\ IF global_config.leader = n
+        THEN on_leader
+        ELSE on_follower
+
+    /\ UNCHANGED num_action
+    /\ UNCHANGED global_config
+    /\ UNCHANGED msgs
+
+--------------------------------------------------------------
 
 AddEntry(n, v) ==
     LET
@@ -291,8 +293,13 @@ UpdateGlobalConfig(new_nodes) ==
 
         \* TODO add syncing set
 
+        new_epoch(l) ==
+            IF l = global_config.leader
+                THEN global_config.epoch
+                ELSE global_config.epoch + 1 \* inc when leader change
+
         new_config(l) == [
-            epoch |-> global_config.epoch + 1,
+            epoch |-> new_epoch(l),
             isr |-> new_isr,
             leader |-> l
         ]
