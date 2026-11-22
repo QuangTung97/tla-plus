@@ -130,6 +130,7 @@ acceptEpoch(n, epoch) ==
 isLocalLeader(n) ==
     /\ local_config[n] # nil
     /\ local_config[n].leader = n
+    /\ local_config[n].epoch = local_epoch[n]
 
 isLeader(n) ==
     /\ isLocalLeader(n)
@@ -149,6 +150,9 @@ updateCommitPos(n) ==
     IN
     /\ commit_pos' = [commit_pos EXCEPT ![n] = new_pos]
 
+stepDownToFollower(n) ==
+    /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
+
 --------------------------------------------------------------
 
 SyncConfig(n) ==
@@ -157,7 +161,7 @@ SyncConfig(n) ==
         isr == global_config.isr
         pos_map_domain == isr \ {n}
 
-        init_pos_map == [x \in pos_map_domain |-> 0]
+        init_pos_map == [x \in pos_map_domain |-> commit_pos[n]]
 
         on_leader ==
             /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
@@ -232,7 +236,8 @@ doRecvEntry(n, req) ==
 
     /\ log' = [log EXCEPT ![n] = Append(@, req.entry)]
 
-    /\ UNCHANGED leader_pos_map
+    /\ stepDownToFollower(n)
+
     /\ UNCHANGED commit_pos
     /\ UNCHANGED msgs
     /\ UNCHANGED global_config
@@ -358,6 +363,12 @@ Spec == Init /\ [][Next]_vars
 LeaderInv ==
     \A n \in Node:
         isLocalLeader(n) <=> leader_pos_map[n] # nil
+
+----------------------
+
+LogPosInv ==
+    \A n \in Node: \A pos \in DOMAIN log[n]:
+        log[n][pos].pos = pos
 
 ----------------------
 
