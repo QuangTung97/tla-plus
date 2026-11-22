@@ -5,17 +5,15 @@ CONSTANTS Node, Value, nil, max_num_action
 
 VARIABLES
     global_config,
-    local_config, local_epoch, log,
+    local_config, log,
     leader_pos_map, commit_pos,
-    num_action,
-    msgs
+    num_action
 
 vars == <<
     global_config,
-    local_config, local_epoch, log,
+    local_config, log,
     leader_pos_map, commit_pos,
-    num_action,
-    msgs
+    num_action
 >>
 
 --------------------------------------------------------------
@@ -66,18 +64,6 @@ LogEntry == [
 
 ----------------------
 
-Msg ==
-    LET
-        send_req == [
-            type: {"SendReq"},
-            entry: LogEntry,
-            recv: SUBSET Node
-        ]
-    IN
-    UNION {send_req}
-
-----------------------
-
 IsPosMap(m) ==
     /\ DOMAIN m \subseteq Node
     /\ \A x \in DOMAIN m: m[x] \in LogPos
@@ -93,44 +79,27 @@ TypeOK ==
     /\ global_config \in Config
 
     /\ local_config \in [Node -> Null(Config)]
-    /\ local_epoch \in [Node -> Null(Epoch)]
     /\ log \in [Node -> Seq(LogEntry)]
     /\ commit_pos \in [Node -> LogPos]
 
     /\ num_action \in 0..max_num_action
-
-    /\ msgs \subseteq Msg
 
 Init ==
     /\ \E nodes \in NonEmpty(Node): \E l \in nodes:
         /\ global_config = init_config(nodes, l)
 
     /\ local_config = [n \in Node |-> nil]
-    /\ local_epoch = [n \in Node |-> nil]
     /\ log = [n \in Node |-> <<>>]
     /\ leader_pos_map = [n \in Node |-> nil]
     /\ commit_pos = [n \in Node |-> 0]
 
     /\ num_action = 0
 
-    /\ msgs = {}
-
 --------------------------------------------------------------
-
-updateEpoch(n, epoch) ==
-    IF local_epoch[n] # nil => local_epoch[n] < epoch THEN
-        local_epoch' = [local_epoch EXCEPT ![n] = epoch]
-    ELSE
-        UNCHANGED local_epoch
-
-acceptEpoch(n, epoch) ==
-    /\ local_epoch[n] # nil => local_epoch[n] <= epoch
-    /\ updateEpoch(n, epoch)
 
 isLocalLeader(n) ==
     /\ local_config[n] # nil
     /\ local_config[n].leader = n
-    /\ local_config[n].epoch = local_epoch[n]
 
 isLeader(n) ==
     /\ isLocalLeader(n)
@@ -150,9 +119,6 @@ updateCommitPos(n) ==
     IN
     /\ commit_pos' = [commit_pos EXCEPT ![n] = new_pos]
 
-stepDownToFollower(n) ==
-    /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
-
 --------------------------------------------------------------
 
 SyncConfig(n) ==
@@ -165,13 +131,11 @@ SyncConfig(n) ==
 
         on_leader ==
             /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
-            /\ updateEpoch(n, epoch)
             /\ updateCommitPos(n)
 
         on_follower ==
             /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
             /\ UNCHANGED commit_pos
-            /\ UNCHANGED local_epoch
     IN
     /\ local_config[n] # nil => local_config[n].epoch < epoch
     /\ local_config' = [local_config EXCEPT ![n] = global_config]
@@ -183,7 +147,6 @@ SyncConfig(n) ==
 
     /\ UNCHANGED num_action
     /\ UNCHANGED global_config
-    /\ UNCHANGED msgs
 
 --------------------------------------------------------------
 
@@ -198,24 +161,25 @@ AddEntry(n, v) ==
             pos |-> pos,
             value |-> v
         ]
-
-        msg == [
-            type |-> "SendReq",
-            entry |-> entry,
-            recv |-> local_config[n].isr \ {n}
-        ]
     IN
     /\ isLeader(n)
     /\ allowAction
 
     /\ log' = [log EXCEPT ![n] = Append(@, entry)]
-    /\ msgs' = msgs \union {msg}
     /\ UNCHANGED leader_pos_map
     /\ updateCommitPos(n)
 
     /\ UNCHANGED local_config
-    /\ UNCHANGED local_epoch
     /\ UNCHANGED global_config
+
+--------------------------------------------------------------
+
+isFollowerOf(l, n) ==
+    /\ isLocalLeader(l)
+    /\ n \in local_config[l].isr
+    /\ n # l
+    /\ local_config[n] # nil
+    /\ local_config[n].epoch = local_config[l].epoch
 
 --------------------------------------------------------------
 
@@ -226,29 +190,21 @@ recvAcceptEntry(n, entry) ==
     IN
     /\ pos = highest_pos + 1
 
-doRecvEntry(n, req) ==
+RecvEntry(l, n) ==
     LET
-        epoch == req.entry.epoch
-        pos == req.entry.pos
+        handle_entry(entry) ==
+            /\ recvAcceptEntry(n, entry)
+            /\ log' = [log EXCEPT ![n] = Append(@, entry)]
     IN
-    /\ acceptEpoch(n, epoch)
-    /\ recvAcceptEntry(n, req.entry)
+    /\ isFollowerOf(l, n)
+    /\ \E entry \in Range(log[l]):
+        \/ handle_entry(entry)
 
-    /\ log' = [log EXCEPT ![n] = Append(@, req.entry)]
-
-    /\ stepDownToFollower(n)
-
+    /\ UNCHANGED leader_pos_map
     /\ UNCHANGED commit_pos
-    /\ UNCHANGED msgs
     /\ UNCHANGED global_config
     /\ UNCHANGED local_config
     /\ UNCHANGED num_action
-
-RecvEntry(n) ==
-    \E req \in msgs:
-        /\ req.type = "SendReq"
-        /\ n \in req.recv
-        /\ doRecvEntry(n, req)
 
 --------------------------------------------------------------
 
@@ -256,38 +212,30 @@ IncLeaderLogPos(l, n) ==
     LET
         pos == Len(log[n])
     IN
-    /\ isLocalLeader(l)
-    /\ local_epoch[n] = local_config[l].epoch
-    /\ l # n
+    /\ isFollowerOf(l, n)
     /\ leader_pos_map[l][n] < pos
 
     /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][n] = pos]
     /\ UNCHANGED log
     /\ updateCommitPos(l)
 
-    /\ UNCHANGED msgs
     /\ UNCHANGED num_action
     /\ UNCHANGED global_config
     /\ UNCHANGED local_config
-    /\ UNCHANGED local_epoch
 
 --------------------------------------------------------------
 
 IncFollowerCommitPos(l, n) ==
-    /\ isLocalLeader(l)
-    /\ local_epoch[n] = local_config[l].epoch
-    /\ l # n
+    /\ isFollowerOf(l, n)
     /\ commit_pos[n] < commit_pos[l]
 
     /\ commit_pos' = [commit_pos EXCEPT ![n] = commit_pos[l]]
 
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED log
-    /\ UNCHANGED msgs
     /\ UNCHANGED num_action
     /\ UNCHANGED global_config
     /\ UNCHANGED local_config
-    /\ UNCHANGED local_epoch
 
 --------------------------------------------------------------
 
@@ -317,10 +265,8 @@ UpdateGlobalConfig(new_nodes) ==
         /\ global_config' = new_config(l)
 
     /\ UNCHANGED local_config
-    /\ UNCHANGED local_epoch
     /\ UNCHANGED commit_pos
     /\ UNCHANGED leader_pos_map
-    /\ UNCHANGED msgs
     /\ UNCHANGED log
 
 --------------------------------------------------------------
@@ -346,10 +292,10 @@ Terminated ==
 Next ==
     \/ \E n \in Node:
         \/ SyncConfig(n)
-        \/ RecvEntry(n)
     \/ \E n \in Node, v \in Value:
         \/ AddEntry(n, v)
     \/ \E l \in Node, n \in Node:
+        \/ RecvEntry(l, n)
         \/ IncLeaderLogPos(l, n)
         \/ IncFollowerCommitPos(l, n)
     \/ \E nodes \in NonEmpty(Node):
