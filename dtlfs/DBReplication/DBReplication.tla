@@ -233,12 +233,38 @@ isFollowerOf(l, n) ==
 
 --------------------------------------------------------------
 
+getLogEntry(n, pos) ==
+    IF pos > Len(log[n])
+        THEN nil
+        ELSE log[n][pos]
+
+----------------------
+
+RECURSIVE firstNonEqualLogEntry(_, _, _)
+
+firstNonEqualLogEntry(l, n, pos) ==
+    LET
+        entry1 == getLogEntry(l, pos)
+        entry2 == getLogEntry(n, pos)
+    IN
+        IF entry1 = nil \/ entry2 = nil THEN
+            pos
+        ELSE IF entry1.epoch = entry2.epoch THEN
+            firstNonEqualLogEntry(l, n, pos + 1)
+        ELSE
+            pos
+
+--------------------------------------------------------------
+
 TruncateFollowerLog(l, n) ==
+    LET
+        match_pos == firstNonEqualLogEntry(l, n, 1) - 1
+    IN
     /\ isFollowerOf(l, n)
     /\ ~follower_ready[n]
 
     /\ follower_ready' = [follower_ready EXCEPT ![n] = TRUE]
-    /\ UNCHANGED log \* TODO
+    /\ log' = [log EXCEPT ![n] = SubSeq(@, 1, match_pos)]
 
     /\ UNCHANGED commit_pos
     /\ UNCHANGED leader_pos_map
@@ -401,6 +427,12 @@ LeaderPosMapInv ==
 
 ----------------------
 
+CommitPosInv ==
+    \A n \in Node:
+        commit_pos[n] <= Len(log[n])
+
+----------------------
+
 computed_commit_pos(n) ==
     LET
         leader_pos == Len(log[n])
@@ -408,7 +440,7 @@ computed_commit_pos(n) ==
     IN
     Min({leader_pos} \union repl_pos_list)
 
-CommitPosInv ==
+LeaderCommitPosInv ==
     \A n \in Node:
         isLocalLeader(n) =>
             commit_pos[n] = computed_commit_pos(n)
