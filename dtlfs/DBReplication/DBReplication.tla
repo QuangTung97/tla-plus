@@ -337,11 +337,15 @@ IncLeaderLogPos(l, n) ==
 --------------------------------------------------------------
 
 IncFollowerCommitPos(l, n) ==
+    LET
+        pos == commit_pos[l]
+    IN
     /\ isFollowerOf(l, n)
     /\ follower_ready[n]
-    /\ commit_pos[n] < commit_pos[l]
+    /\ commit_pos[n] < pos
+    /\ Len(log[n]) >= pos
 
-    /\ commit_pos' = [commit_pos EXCEPT ![n] = commit_pos[l]]
+    /\ commit_pos' = [commit_pos EXCEPT ![n] = pos]
 
     /\ UNCHANGED follower_ready
     /\ UNCHANGED leader_pos_map
@@ -355,6 +359,8 @@ IncFollowerCommitPos(l, n) ==
 UpdateGlobalConfig(new_nodes) ==
     LET
         isr == global_config.isr
+        old_nodes == global_config.isr \union global_config.adding
+
         new_isr == isr \intersect new_nodes
 
         new_epoch(l) ==
@@ -371,7 +377,7 @@ UpdateGlobalConfig(new_nodes) ==
         ]
     IN
     /\ allowAction
-    /\ isr # new_nodes
+    /\ old_nodes # new_nodes
     /\ new_isr # {}
 
     /\ \E l \in new_isr:
