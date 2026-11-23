@@ -49,6 +49,7 @@ LogPos == 0..max_num_action
 Config == [
     epoch: Epoch,
     isr: NonEmpty(Node),
+    adding: SUBSET Node,
     leader: Node,
     revision: Revision
 ]
@@ -56,6 +57,7 @@ Config == [
 init_config(nodes, l) == [
     epoch |-> 10,
     isr |-> nodes,
+    adding |-> {},
     leader |-> l,
     revision |-> 20
 ]
@@ -113,16 +115,24 @@ isLeader(n) ==
     /\ isLocalLeader(n)
     /\ local_config[n].epoch = global_config.epoch
 
+-------------------
+
 allowAction ==
     /\ num_action < max_num_action
     /\ num_action' = num_action + 1
 
+-------------------
+
+computePosMapDomain(n, isr, adding) ==
+    adding \union (isr \ {n})
+
 --------------------------------------------------------------
 
-updateCommitPos(n) ==
+updateCommitPos(n, input_config) ==
     LET
         leader_pos == Len(log'[n])
-        repl_pos_list == Range(leader_pos_map'[n])
+        check_set == input_config.isr \ {n}
+        repl_pos_list == {leader_pos_map'[n][x]: x \in check_set}
         new_pos == Min({leader_pos} \union repl_pos_list)
     IN
     /\ commit_pos' = [commit_pos EXCEPT ![n] = new_pos]
@@ -160,7 +170,7 @@ SyncConfig(n) ==
                 local_config[n].epoch < global_config.epoch
 
         isr == global_config.isr
-        pos_map_domain == isr \ {n}
+        pos_map_domain == computePosMapDomain(n, isr, global_config.adding)
         init_pos_map == [x \in pos_map_domain |-> commit_pos[n]]
 
         on_leader_epoch_changed ==
@@ -168,7 +178,7 @@ SyncConfig(n) ==
 
         on_leader ==
             /\ updatePosMapDomain(n, pos_map_domain, commit_pos[n])
-            /\ updateCommitPos(n)
+            /\ updateCommitPos(n, local_config'[n])
             /\ IF epoch_changed
                 THEN on_leader_epoch_changed
                 ELSE UNCHANGED follower_ready
@@ -216,7 +226,7 @@ AddEntry(n, v) ==
 
     /\ log' = [log EXCEPT ![n] = Append(@, entry)]
     /\ UNCHANGED leader_pos_map
-    /\ updateCommitPos(n)
+    /\ updateCommitPos(n, local_config[n])
 
     /\ UNCHANGED follower_ready
     /\ UNCHANGED local_config
@@ -224,9 +234,14 @@ AddEntry(n, v) ==
 
 --------------------------------------------------------------
 
+getFollowerSetOf(l) ==
+    local_config[l].isr \union local_config[l].adding
+
+--------------------------------------------------------------
+
 isFollowerOf(l, n) ==
     /\ isLocalLeader(l)
-    /\ n \in local_config[l].isr
+    /\ n \in getFollowerSetOf(l)
     /\ n # l
     /\ local_config[n] # nil
     /\ local_config[n].epoch = local_config[l].epoch
@@ -312,7 +327,7 @@ IncLeaderLogPos(l, n) ==
 
     /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][n] = pos]
     /\ UNCHANGED log
-    /\ updateCommitPos(l)
+    /\ updateCommitPos(l, local_config[l])
 
     /\ UNCHANGED follower_ready
     /\ UNCHANGED num_action
@@ -342,8 +357,6 @@ UpdateGlobalConfig(new_nodes) ==
         isr == global_config.isr
         new_isr == isr \intersect new_nodes
 
-        \* TODO add syncing set
-
         new_epoch(l) ==
             IF l = global_config.leader
                 THEN global_config.epoch
@@ -352,6 +365,7 @@ UpdateGlobalConfig(new_nodes) ==
         new_config(l) == [
             epoch |-> new_epoch(l),
             isr |-> new_isr,
+            adding |-> new_nodes \ isr,
             leader |-> l,
             revision |-> global_config.revision + 1
         ]
@@ -377,6 +391,7 @@ TerminateCond ==
         isr == global_config.isr
     IN
     /\ num_action = max_num_action
+    /\ global_config.adding = {}
     /\ Len(log[leader]) = commit_pos[leader]
     /\ \A n \in isr:
         /\ local_config[n] # nil
@@ -407,6 +422,12 @@ Spec == Init /\ [][Next]_vars
 
 --------------------------------------------------------------
 
+GlobalConfigInv ==
+    /\ global_config.isr \intersect global_config.adding = {}
+    /\ global_config.leader \in global_config.isr
+
+----------------------
+
 LeaderInv ==
     \A n \in Node:
         /\ isLocalLeader(n) <=> leader_pos_map[n] # nil
@@ -422,8 +443,15 @@ LogPosInv ==
 
 LeaderPosMapInv ==
     \A n \in Node:
+        LET
+            expected == computePosMapDomain(
+                n,
+                local_config[n].isr,
+                local_config[n].adding
+            )
+        IN
         isLocalLeader(n) =>
-            DOMAIN leader_pos_map[n] = local_config[n].isr \ {n}
+            DOMAIN leader_pos_map[n] = expected
 
 ----------------------
 
@@ -436,7 +464,8 @@ CommitPosInv ==
 computed_commit_pos(n) ==
     LET
         leader_pos == Len(log[n])
-        repl_pos_list == Range(leader_pos_map[n])
+        isr == local_config[n].isr \ {n}
+        repl_pos_list == {leader_pos_map[n][x]: x \in isr}
     IN
     Min({leader_pos} \union repl_pos_list)
 
