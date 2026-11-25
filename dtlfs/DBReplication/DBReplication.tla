@@ -40,7 +40,7 @@ Range(f) == {f[x]: x \in DOMAIN f}
 
 Epoch == 10..(10 + max_num_action)
 
-Revision == 20..(20 + max_num_action)
+Revision == 20..29
 
 LogPos == 0..max_num_action
 
@@ -431,6 +431,26 @@ UpdateGlobalConfig(new_nodes) ==
 
 --------------------------------------------------------------
 
+AddToGlobalISR(n, x) ==
+    /\ isLocalLeader(n)
+    /\ x \in local_need_add[n]
+
+    /\ local_need_add' = [local_need_add EXCEPT ![n] = @ \ {x}]
+    /\ global_config' = [global_config EXCEPT
+            !.adding = @ \ {x},
+            !.isr = @ \union {x},
+            !.revision = @ + 1
+        ]
+
+    /\ UNCHANGED follower_ready
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED num_action
+    /\ UNCHANGED log
+    /\ UNCHANGED local_config
+    /\ UNCHANGED commit_pos
+
+--------------------------------------------------------------
+
 TerminateCond ==
     LET
         leader == global_config.leader
@@ -461,6 +481,7 @@ Next ==
         \/ RecvEntry(l, n)
         \/ IncLeaderLogPos(l, n)
         \/ IncFollowerCommitPos(l, n)
+        \/ AddToGlobalISR(l, n)
     \/ \E nodes \in NonEmpty(Node):
         \/ UpdateGlobalConfig(nodes)
     \/ Terminated
