@@ -156,9 +156,16 @@ updateCommitPos(n, input_config) ==
 
 -------------------
 
-updatePosMapDomain(n, new_domain, init_val) ==
+updateLeaderPosMap(n, isr, adding, init_val) ==
     LET
-        init_pos_map == [x \in new_domain |-> init_val]
+        new_domain == computePosMapDomain(n, isr, adding)
+
+        init_fn(x) ==
+            IF x \in isr
+                THEN init_val
+                ELSE 0
+
+        init_pos_map == [x \in new_domain |-> init_fn(x)]
 
         old_domain == DOMAIN leader_pos_map[n]
 
@@ -208,8 +215,6 @@ SyncConfig(n) ==
                 local_config[n].epoch < conf.epoch
 
         isr == conf.isr
-        pos_map_domain == computePosMapDomain(n, isr, conf.adding)
-        init_pos_map == [x \in pos_map_domain |-> commit_pos[n]]
 
         on_leader_epoch_changed ==
             /\ follower_ready' = [follower_ready EXCEPT ![n] = nil]
@@ -224,7 +229,7 @@ SyncConfig(n) ==
             /\ UNCHANGED follower_ready
 
         on_leader ==
-            /\ updatePosMapDomain(n, pos_map_domain, commit_pos[n])
+            /\ updateLeaderPosMap(n, isr, conf.adding, commit_pos[n])
             /\ updateCommitPos(n, conf)
             /\ IF epoch_changed
                 THEN on_leader_epoch_changed
