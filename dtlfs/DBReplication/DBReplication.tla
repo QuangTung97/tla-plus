@@ -242,7 +242,6 @@ SyncConfig(n) ==
             /\ follower_ready' = [follower_ready EXCEPT ![n] = FALSE]
             /\ local_need_add' = [local_need_add EXCEPT ![n] = {}]
             /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT ![n] = {}]
-            /\ UNCHANGED commit_pos
 
         on_follower_epoch_not_changed ==
             /\ UNCHANGED leader_pos_map
@@ -503,6 +502,21 @@ AddToGlobalISR(n, x) ==
 
 --------------------------------------------------------------
 
+RestartNode(n) ==
+    /\ allowAction
+
+    /\ local_config' = [local_config EXCEPT ![n] = nil]
+    /\ follower_ready' = [follower_ready EXCEPT ![n] = nil]
+    /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
+    /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT ![n] = {}]
+    /\ local_need_add' = [local_need_add EXCEPT ![n] = {}]
+
+    /\ UNCHANGED global_config
+    /\ UNCHANGED <<log, god_log>>
+    /\ UNCHANGED commit_pos
+
+--------------------------------------------------------------
+
 TerminateCond ==
     LET
         leader == global_config.leader
@@ -527,6 +541,7 @@ Terminated ==
 Next ==
     \/ \E n \in Node:
         \/ SyncConfig(n)
+        \/ RestartNode(n)
     \/ \E n \in Node, v \in Value:
         \/ AddEntry(n, v)
     \/ \E l \in Node, n \in Node:
