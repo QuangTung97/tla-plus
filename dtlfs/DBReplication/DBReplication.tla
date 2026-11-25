@@ -18,6 +18,8 @@ vars == <<
     num_action
 >>
 
+\* TODO add god log
+
 --------------------------------------------------------------
 
 NonEmpty(S) == (SUBSET S) \ {{}}
@@ -179,6 +181,8 @@ moveAddingToLocalNeedAdd(n, conf) ==
             !.adding = @ \ move_set,
             !.isr = @ \union move_set
         ]
+
+        \* TODO handle when leader syncing nodes is non empty
     IN
     /\ local_config' = [local_config EXCEPT ![n] = new_conf]
     /\ local_need_add' = [local_need_add EXCEPT ![n] = move_set]
@@ -364,6 +368,7 @@ IncLeaderLogPos(l, n) ==
     /\ isFollowerOf(l, n)
     /\ follower_ready[n]
     /\ leader_pos_map[l][n] < pos
+    \* TODO change leader syncing nodes
 
     /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][n] = pos]
     /\ UNCHANGED log
@@ -577,15 +582,17 @@ LocalNeedAddMatchConfig ==
 
 ----------------------
 
-LocalNeedAddMatchLeaderPos ==
+LocalAddingSetMatchLeaderPos ==
     \A n \in Node:
         LET
             pos_map == leader_pos_map[n]
 
             cond ==
                 \A x \in local_config[n].adding:
-                    pos_map[x] >= commit_pos[n] <=> x \in local_need_add[n]
+                    pos_map[x] < commit_pos[n]
         IN
         isLocalLeader(n) => cond
+
+\* TODO leader syncing nodes inv and isr
 
 ====
