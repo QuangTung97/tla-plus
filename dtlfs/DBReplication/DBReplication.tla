@@ -145,16 +145,16 @@ updateCommitPos(n, input_config) ==
 
 -------------------
 
-updatePosMapDomain(n, new_domain, default_val) ==
+updatePosMapDomain(n, new_domain, init_val) ==
     LET
-        init_pos_map == [x \in new_domain |-> default_val]
+        init_pos_map == [x \in new_domain |-> init_val]
 
         old_domain == DOMAIN leader_pos_map[n]
 
         update_fn(x, old) ==
             IF x \in old_domain
                 THEN old
-                ELSE default_val
+                ELSE 0
 
         do_update(old_map) ==
             [x \in new_domain |-> update_fn(x, old_map[x])]
@@ -166,17 +166,37 @@ updatePosMapDomain(n, new_domain, default_val) ==
 
 --------------------------------------------------------------
 
+moveAddingToLocalNeedAdd(n, conf) ==
+    LET
+        pos_map == leader_pos_map'[n]
+
+        allow_move(x) ==
+            pos_map[x] >= commit_pos'[n]
+
+        move_set == {x \in conf.adding: allow_move(x)}
+
+        new_conf == [conf EXCEPT
+            !.adding = @ \ move_set,
+            !.isr = @ \union move_set
+        ]
+    IN
+    /\ local_config' = [local_config EXCEPT ![n] = new_conf]
+    /\ local_need_add' = [local_need_add EXCEPT ![n] = move_set]
+
+--------------------------------------------------------------
+
 SyncConfig(n) ==
     LET
-        revision == global_config.revision
+        conf == global_config
+        revision == conf.revision
 
-        epoch == global_config.epoch
+        epoch == conf.epoch
         epoch_changed ==
             local_config[n] # nil =>
-                local_config[n].epoch < global_config.epoch
+                local_config[n].epoch < conf.epoch
 
-        isr == global_config.isr
-        pos_map_domain == computePosMapDomain(n, isr, global_config.adding)
+        isr == conf.isr
+        pos_map_domain == computePosMapDomain(n, isr, conf.adding)
         init_pos_map == [x \in pos_map_domain |-> commit_pos[n]]
 
         on_leader_epoch_changed ==
@@ -187,11 +207,11 @@ SyncConfig(n) ==
 
         on_leader ==
             /\ updatePosMapDomain(n, pos_map_domain, commit_pos[n])
-            /\ updateCommitPos(n, local_config'[n])
+            /\ updateCommitPos(n, conf)
             /\ IF epoch_changed
                 THEN on_leader_epoch_changed
                 ELSE on_leader_epoch_not_changed
-            /\ UNCHANGED local_need_add \* TODO
+            /\ moveAddingToLocalNeedAdd(n, conf)
 
         on_follower_epoch_changed ==
             /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
@@ -199,20 +219,22 @@ SyncConfig(n) ==
             /\ UNCHANGED commit_pos
             /\ UNCHANGED local_need_add \* TODO
 
+        on_follower_epoch_not_changed ==
+            /\ UNCHANGED leader_pos_map
+            /\ UNCHANGED follower_ready
+            /\ UNCHANGED local_need_add
+
         on_follower ==
-            IF epoch_changed THEN
-                on_follower_epoch_changed
-            ELSE
-                /\ UNCHANGED leader_pos_map
-                /\ UNCHANGED follower_ready
-                /\ UNCHANGED commit_pos
-                /\ UNCHANGED local_need_add
+            /\ local_config' = [local_config EXCEPT ![n] = conf]
+            /\ IF epoch_changed
+                THEN on_follower_epoch_changed
+                ELSE on_follower_epoch_not_changed
+            /\ UNCHANGED commit_pos
     IN
     /\ local_config[n] # nil => local_config[n].revision < revision
-    /\ local_config' = [local_config EXCEPT ![n] = global_config]
 
     /\ UNCHANGED log
-    /\ IF global_config.leader = n
+    /\ IF conf.leader = n
         THEN on_leader
         ELSE on_follower
 
@@ -526,8 +548,8 @@ CommitLogMatchingInv ==
 LocalNeedAddMatchConfig ==
     \A n \in Node:
         local_config[n] # nil =>
-            /\ local_need_add[n] \subseteq local_config[n].adding
-            /\ local_need_add[n] \intersect local_config[n].isr = {}
+            /\ local_need_add[n] \subseteq local_config[n].isr
+            /\ local_need_add[n] \intersect local_config[n].adding = {}
 
 ----------------------
 
