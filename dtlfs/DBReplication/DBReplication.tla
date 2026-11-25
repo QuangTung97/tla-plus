@@ -87,6 +87,7 @@ TypeOK ==
     /\ global_config \in Config
 
     /\ local_config \in [Node -> Null(Config)]
+
     /\ log \in [Node -> Seq(LogEntry)]
     /\ god_log \in Seq(LogEntry)
     /\ commit_pos \in [Node -> LogPos]
@@ -101,6 +102,7 @@ Init ==
         /\ global_config = init_config(nodes, l)
 
     /\ local_config = [n \in Node |-> nil]
+
     /\ log = [n \in Node |-> <<>>]
     /\ god_log = <<>>
     /\ leader_pos_map = [n \in Node |-> nil]
@@ -138,10 +140,10 @@ computePosMapDomain(n, isr, adding) ==
 
 --------------------------------------------------------------
 
-updateCommitPos(n, input_config) ==
+updateCommitPos(n, isr) ==
     LET
         leader_pos == Len(log'[n])
-        check_set == input_config.isr \ {n}
+        check_set == isr \ {n}
         repl_pos_list == {leader_pos_map'[n][x]: x \in check_set}
         new_pos == Min({leader_pos} \union repl_pos_list)
 
@@ -193,13 +195,7 @@ moveAddingToLocalNeedAdd(n, conf) ==
             /\ pos_map[x] >= commit_pos'[n]
 
         move_set == {x \in conf.adding: allow_move(x)}
-
-        new_conf == [conf EXCEPT
-            !.adding = @ \ move_set,
-            !.isr = @ \union move_set
-        ]
     IN
-    /\ local_config' = [local_config EXCEPT ![n] = new_conf]
     /\ local_need_add' = [local_need_add EXCEPT ![n] = move_set]
 
 --------------------------------------------------------------
@@ -230,7 +226,7 @@ SyncConfig(n) ==
 
         on_leader ==
             /\ updateLeaderPosMap(n, isr, conf.adding, commit_pos[n])
-            /\ updateCommitPos(n, conf)
+            /\ updateCommitPos(n, isr)
             /\ IF epoch_changed
                 THEN on_leader_epoch_changed
                 ELSE on_leader_epoch_not_changed
@@ -250,7 +246,6 @@ SyncConfig(n) ==
             /\ UNCHANGED leader_syncing_nodes
 
         on_follower ==
-            /\ local_config' = [local_config EXCEPT ![n] = conf]
             /\ IF epoch_changed
                 THEN on_follower_epoch_changed
                 ELSE on_follower_epoch_not_changed
@@ -259,6 +254,7 @@ SyncConfig(n) ==
     IN
     /\ local_config[n] # nil => local_config[n].revision < revision
 
+    /\ local_config' = [local_config EXCEPT ![n] = conf]
     /\ UNCHANGED log
     /\ IF conf.leader = n
         THEN on_leader
@@ -266,6 +262,11 @@ SyncConfig(n) ==
 
     /\ UNCHANGED num_action
     /\ UNCHANGED global_config
+
+--------------------------------------------------------------
+
+getEffectiveISR(n) ==
+    local_config[n].isr \union local_need_add[n]
 
 --------------------------------------------------------------
 
@@ -286,7 +287,7 @@ AddEntry(n, v) ==
 
     /\ log' = [log EXCEPT ![n] = Append(@, entry)]
     /\ UNCHANGED leader_pos_map
-    /\ updateCommitPos(n, local_config[n])
+    /\ updateCommitPos(n, getEffectiveISR(n))
 
     /\ UNCHANGED leader_syncing_nodes
     /\ UNCHANGED local_need_add
@@ -404,9 +405,10 @@ IncLeaderLogPos(l, x) ==
     /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][x] = pos]
     /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT ![l] = @ \ {x}]
     /\ UNCHANGED log
-    /\ updateCommitPos(l, local_config[l])
+    /\ updateCommitPos(l, getEffectiveISR(l))
     /\ moveAddingToLocalNeedAdd(l, local_config[l])
 
+    /\ UNCHANGED local_config
     /\ UNCHANGED follower_ready
     /\ UNCHANGED num_action
     /\ UNCHANGED global_config
@@ -482,13 +484,16 @@ AddToGlobalISR(n, x) ==
             !.isr = @ \union {x},
             !.revision = @ + 1
         ]
+    /\ local_config' = [local_config EXCEPT
+            ![n].adding = @ \ {x},
+            ![n].isr = @ \union {x}
+        ]
 
     /\ UNCHANGED follower_ready
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED leader_syncing_nodes
     /\ UNCHANGED num_action
     /\ UNCHANGED <<log, god_log>>
-    /\ UNCHANGED local_config
     /\ UNCHANGED commit_pos
 
 --------------------------------------------------------------
@@ -584,7 +589,7 @@ CommitPosInv ==
 computed_commit_pos(n) ==
     LET
         leader_pos == Len(log[n])
-        isr == local_config[n].isr \ {n}
+        isr == getEffectiveISR(n) \ {n}
         repl_pos_list == {leader_pos_map[n][x]: x \in isr}
     IN
     Min({leader_pos} \union repl_pos_list)
@@ -630,9 +635,8 @@ GodLogLenMatchCommitPos ==
 
 LocalNeedAddMatchConfig ==
     \A n \in Node:
-        local_config[n] # nil =>
-            /\ local_need_add[n] \subseteq local_config[n].isr
-            /\ local_need_add[n] \intersect local_config[n].adding = {}
+        isLocalLeader(n) =>
+            /\ local_need_add[n] \subseteq local_config[n].adding
 
 ----------------------
 
@@ -645,8 +649,11 @@ LocalAddingSetMatchLeaderPos ==
 
             pos_map == leader_pos_map[n]
 
+            adding_set ==
+                local_config[n].adding \ local_need_add[n]
+
             cond ==
-                \A x \in local_config[n].adding:
+                \A x \in adding_set:
                     /\ pos_map[x] < commit_pos[n]
         IN
             pre_cond => cond
