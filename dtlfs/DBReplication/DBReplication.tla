@@ -7,14 +7,14 @@ VARIABLES
     global_config,
     local_config, log, god_log,
     leader_pos_map, commit_pos,
-    follower_ready, local_need_add,
+    follower_ready, leader_syncing_nodes, local_need_add,
     num_action
 
 vars == <<
     global_config,
     local_config, log, god_log,
     leader_pos_map, commit_pos,
-    follower_ready, local_need_add,
+    follower_ready, leader_syncing_nodes, local_need_add,
     num_action
 >>
 
@@ -91,6 +91,7 @@ TypeOK ==
     /\ god_log \in Seq(LogEntry)
     /\ commit_pos \in [Node -> LogPos]
     /\ follower_ready \in [Node -> Null(BOOLEAN)]
+    /\ leader_syncing_nodes \in [Node -> SUBSET Node]
     /\ local_need_add \in [Node -> SUBSET Node]
 
     /\ num_action \in 0..max_num_action
@@ -105,6 +106,7 @@ Init ==
     /\ leader_pos_map = [n \in Node |-> nil]
     /\ commit_pos = [n \in Node |-> 0]
     /\ follower_ready = [n \in Node |-> nil]
+    /\ leader_syncing_nodes = [n \in Node |-> {}]
     /\ local_need_add = [n \in Node |-> {}]
 
     /\ num_action = 0
@@ -180,7 +182,8 @@ moveAddingToLocalNeedAdd(n, conf) ==
         pos_map == leader_pos_map'[n]
 
         allow_move(x) ==
-            pos_map[x] >= commit_pos'[n]
+            /\ leader_syncing_nodes'[n] = {}
+            /\ pos_map[x] >= commit_pos'[n]
 
         move_set == {x \in conf.adding: allow_move(x)}
 
@@ -188,8 +191,6 @@ moveAddingToLocalNeedAdd(n, conf) ==
             !.adding = @ \ move_set,
             !.isr = @ \union move_set
         ]
-
-        \* TODO handle when leader syncing nodes is non empty
     IN
     /\ local_config' = [local_config EXCEPT ![n] = new_conf]
     /\ local_need_add' = [local_need_add EXCEPT ![n] = move_set]
@@ -212,8 +213,14 @@ SyncConfig(n) ==
 
         on_leader_epoch_changed ==
             /\ follower_ready' = [follower_ready EXCEPT ![n] = nil]
+            /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT
+                    ![n] = conf.isr \ {n}
+                ]
 
         on_leader_epoch_not_changed ==
+            /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT
+                    ![n] = @ \intersect conf.isr
+                ]
             /\ UNCHANGED follower_ready
 
         on_leader ==
@@ -228,12 +235,14 @@ SyncConfig(n) ==
             /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
             /\ follower_ready' = [follower_ready EXCEPT ![n] = FALSE]
             /\ local_need_add' = [local_need_add EXCEPT ![n] = {}]
+            /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT ![n] = {}]
             /\ UNCHANGED commit_pos
 
         on_follower_epoch_not_changed ==
             /\ UNCHANGED leader_pos_map
             /\ UNCHANGED follower_ready
             /\ UNCHANGED local_need_add
+            /\ UNCHANGED leader_syncing_nodes
 
         on_follower ==
             /\ local_config' = [local_config EXCEPT ![n] = conf]
@@ -274,6 +283,7 @@ AddEntry(n, v) ==
     /\ UNCHANGED leader_pos_map
     /\ updateCommitPos(n, local_config[n])
 
+    /\ UNCHANGED leader_syncing_nodes
     /\ UNCHANGED local_need_add
     /\ UNCHANGED follower_ready
     /\ UNCHANGED local_config
@@ -286,12 +296,12 @@ getFollowerSetOf(l) ==
 
 --------------------------------------------------------------
 
-isFollowerOf(l, n) ==
+isFollowerOf(l, x) ==
     /\ isLocalLeader(l)
-    /\ n \in getFollowerSetOf(l)
-    /\ n # l
-    /\ local_config[n] # nil
-    /\ local_config[n].epoch = local_config[l].epoch
+    /\ x \in getFollowerSetOf(l)
+    /\ x # l
+    /\ local_config[x] # nil
+    /\ local_config[x].epoch = local_config[l].epoch
 
 --------------------------------------------------------------
 
@@ -335,6 +345,7 @@ TruncateFollowerLog(l, n) ==
     /\ follower_ready' = [follower_ready EXCEPT ![n] = TRUE]
     /\ log' = [log EXCEPT ![n] = SubSeq(@, 1, match_pos)]
 
+    /\ UNCHANGED leader_syncing_nodes
     /\ UNCHANGED local_need_add
     /\ UNCHANGED commit_pos
     /\ UNCHANGED god_log
@@ -363,6 +374,7 @@ RecvEntry(l, n) ==
         \/ handle_entry(entry)
 
     /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_syncing_nodes
     /\ UNCHANGED follower_ready
     /\ UNCHANGED commit_pos
     /\ UNCHANGED god_log
@@ -371,16 +383,21 @@ RecvEntry(l, n) ==
 
 --------------------------------------------------------------
 
-IncLeaderLogPos(l, n) ==
+IncLeaderLogPos(l, x) ==
     LET
-        pos == Len(log[n])
-    IN
-    /\ isFollowerOf(l, n)
-    /\ follower_ready[n]
-    /\ leader_pos_map[l][n] < pos
-    \* TODO change leader syncing nodes
+        pos == Len(log[x])
 
-    /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][n] = pos]
+        allow_cond ==
+            \/ leader_pos_map[l][x] < pos
+            \/ /\ leader_pos_map[l][x] = pos
+               /\ x \in leader_syncing_nodes[l]
+    IN
+    /\ isFollowerOf(l, x)
+    /\ follower_ready[x]
+    /\ allow_cond
+
+    /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][x] = pos]
+    /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT ![l] = @ \ {x}]
     /\ UNCHANGED log
     /\ updateCommitPos(l, local_config[l])
     /\ moveAddingToLocalNeedAdd(l, local_config[l])
@@ -405,6 +422,7 @@ IncFollowerCommitPos(l, n) ==
     /\ UNCHANGED local_need_add
     /\ UNCHANGED follower_ready
     /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_syncing_nodes
     /\ UNCHANGED log
     /\ UNCHANGED god_log
     /\ configUnchanged
@@ -442,6 +460,7 @@ UpdateGlobalConfig(new_nodes) ==
     /\ UNCHANGED commit_pos
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED follower_ready
+    /\ UNCHANGED leader_syncing_nodes
     /\ UNCHANGED local_need_add
     /\ UNCHANGED <<log, god_log>>
 
@@ -461,6 +480,7 @@ AddToGlobalISR(n, x) ==
 
     /\ UNCHANGED follower_ready
     /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_syncing_nodes
     /\ UNCHANGED num_action
     /\ UNCHANGED <<log, god_log>>
     /\ UNCHANGED local_config
@@ -481,6 +501,7 @@ TerminateCond ==
         /\ local_config[n] = global_config
         /\ commit_pos[n] = commit_pos[leader]
         /\ local_need_add[n] = {}
+        /\ leader_syncing_nodes[n] = {}
 
 Terminated ==
     /\ TerminateCond
@@ -522,8 +543,10 @@ LeaderInv ==
 
 FollowerInv ==
     \A n \in Node:
-        /\ isLocalFollower(n) => follower_ready[n] \in BOOLEAN
-        /\ isLocalFollower(n) => local_need_add[n] = {}
+        isLocalFollower(n) =>
+            /\ follower_ready[n] \in BOOLEAN
+            /\ leader_syncing_nodes[n] = {}
+            /\ local_need_add[n] = {}
 
 ----------------------
 
@@ -611,14 +634,30 @@ LocalNeedAddMatchConfig ==
 LocalAddingSetMatchLeaderPos ==
     \A n \in Node:
         LET
+            pre_cond ==
+                /\ isLocalLeader(n)
+                /\ leader_syncing_nodes[n] = {}
+
             pos_map == leader_pos_map[n]
 
             cond ==
                 \A x \in local_config[n].adding:
-                    pos_map[x] < commit_pos[n]
+                    /\ pos_map[x] < commit_pos[n]
         IN
-        isLocalLeader(n) => cond
+            pre_cond => cond
 
-\* TODO leader syncing nodes inv and isr
+----------------------
+
+LocalNeedAddAndSyncingNodes ==
+    \A n \in Node:
+        local_need_add[n] # {} => leader_syncing_nodes[n] = {}
+
+----------------------
+
+LeaderSyncingNodesInv ==
+    \A n \in Node:
+        local_config[n] # nil =>
+            /\ leader_syncing_nodes[n] \subseteq local_config[n].isr
+            /\ n \notin leader_syncing_nodes[n]
 
 ====
