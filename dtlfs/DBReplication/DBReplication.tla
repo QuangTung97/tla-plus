@@ -434,6 +434,7 @@ UpdateGlobalConfig(new_nodes) ==
 AddToGlobalISR(n, x) ==
     /\ isLocalLeader(n)
     /\ x \in local_need_add[n]
+    /\ local_config[n].revision = global_config.revision
 
     /\ local_need_add' = [local_need_add EXCEPT ![n] = @ \ {x}]
     /\ global_config' = [global_config EXCEPT
