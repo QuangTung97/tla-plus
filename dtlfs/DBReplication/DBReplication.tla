@@ -7,14 +7,14 @@ VARIABLES
     global_config,
     local_config, log,
     leader_pos_map, commit_pos,
-    follower_ready,
+    follower_ready, local_need_add,
     num_action
 
 vars == <<
     global_config,
     local_config, log,
     leader_pos_map, commit_pos,
-    follower_ready,
+    follower_ready, local_need_add,
     num_action
 >>
 
@@ -90,6 +90,7 @@ TypeOK ==
     /\ log \in [Node -> Seq(LogEntry)]
     /\ commit_pos \in [Node -> LogPos]
     /\ follower_ready \in [Node -> Null(BOOLEAN)]
+    /\ local_need_add \in [Node -> SUBSET Node]
 
     /\ num_action \in 0..max_num_action
 
@@ -102,6 +103,7 @@ Init ==
     /\ leader_pos_map = [n \in Node |-> nil]
     /\ commit_pos = [n \in Node |-> 0]
     /\ follower_ready = [n \in Node |-> nil]
+    /\ local_need_add = [n \in Node |-> {}]
 
     /\ num_action = 0
 
@@ -114,6 +116,10 @@ isLocalLeader(n) ==
 isLeader(n) ==
     /\ isLocalLeader(n)
     /\ local_config[n].epoch = global_config.epoch
+
+isLocalFollower(n) ==
+    /\ local_config[n] # nil
+    /\ local_config[n].leader # n
 
 -------------------
 
@@ -176,17 +182,22 @@ SyncConfig(n) ==
         on_leader_epoch_changed ==
             /\ follower_ready' = [follower_ready EXCEPT ![n] = nil]
 
+        on_leader_epoch_not_changed ==
+            /\ UNCHANGED follower_ready
+
         on_leader ==
             /\ updatePosMapDomain(n, pos_map_domain, commit_pos[n])
             /\ updateCommitPos(n, local_config'[n])
             /\ IF epoch_changed
                 THEN on_leader_epoch_changed
-                ELSE UNCHANGED follower_ready
+                ELSE on_leader_epoch_not_changed
+            /\ UNCHANGED local_need_add \* TODO
 
         on_follower_epoch_changed ==
             /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
             /\ follower_ready' = [follower_ready EXCEPT ![n] = FALSE]
             /\ UNCHANGED commit_pos
+            /\ UNCHANGED local_need_add \* TODO
 
         on_follower ==
             IF epoch_changed THEN
@@ -195,6 +206,7 @@ SyncConfig(n) ==
                 /\ UNCHANGED leader_pos_map
                 /\ UNCHANGED follower_ready
                 /\ UNCHANGED commit_pos
+                /\ UNCHANGED local_need_add
     IN
     /\ local_config[n] # nil => local_config[n].revision < revision
     /\ local_config' = [local_config EXCEPT ![n] = global_config]
@@ -228,6 +240,7 @@ AddEntry(n, v) ==
     /\ UNCHANGED leader_pos_map
     /\ updateCommitPos(n, local_config[n])
 
+    /\ UNCHANGED local_need_add
     /\ UNCHANGED follower_ready
     /\ UNCHANGED local_config
     /\ UNCHANGED global_config
@@ -248,12 +261,19 @@ isFollowerOf(l, n) ==
 
 --------------------------------------------------------------
 
+configUnchanged ==
+    /\ UNCHANGED local_config
+    /\ UNCHANGED num_action
+    /\ UNCHANGED global_config
+
+--------------------------------------------------------------
+
 getLogEntry(n, pos) ==
     IF pos > Len(log[n])
         THEN nil
         ELSE log[n][pos]
 
-----------------------
+--------------------------------------------------------------
 
 RECURSIVE firstNonEqualLogEntry(_, _, _)
 
@@ -281,11 +301,10 @@ TruncateFollowerLog(l, n) ==
     /\ follower_ready' = [follower_ready EXCEPT ![n] = TRUE]
     /\ log' = [log EXCEPT ![n] = SubSeq(@, 1, match_pos)]
 
+    /\ UNCHANGED local_need_add
     /\ UNCHANGED commit_pos
     /\ UNCHANGED leader_pos_map
-    /\ UNCHANGED global_config
-    /\ UNCHANGED local_config
-    /\ UNCHANGED num_action
+    /\ configUnchanged
 
 --------------------------------------------------------------
 
@@ -311,9 +330,8 @@ RecvEntry(l, n) ==
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED follower_ready
     /\ UNCHANGED commit_pos
-    /\ UNCHANGED global_config
-    /\ UNCHANGED local_config
-    /\ UNCHANGED num_action
+    /\ UNCHANGED local_need_add
+    /\ configUnchanged
 
 --------------------------------------------------------------
 
@@ -328,11 +346,10 @@ IncLeaderLogPos(l, n) ==
     /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][n] = pos]
     /\ UNCHANGED log
     /\ updateCommitPos(l, local_config[l])
+    /\ UNCHANGED local_need_add \* TODO handle
 
     /\ UNCHANGED follower_ready
-    /\ UNCHANGED num_action
-    /\ UNCHANGED global_config
-    /\ UNCHANGED local_config
+    /\ configUnchanged
 
 --------------------------------------------------------------
 
@@ -347,12 +364,11 @@ IncFollowerCommitPos(l, n) ==
 
     /\ commit_pos' = [commit_pos EXCEPT ![n] = pos]
 
+    /\ UNCHANGED local_need_add
     /\ UNCHANGED follower_ready
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED log
-    /\ UNCHANGED num_action
-    /\ UNCHANGED global_config
-    /\ UNCHANGED local_config
+    /\ configUnchanged
 
 --------------------------------------------------------------
 
@@ -387,6 +403,7 @@ UpdateGlobalConfig(new_nodes) ==
     /\ UNCHANGED commit_pos
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED follower_ready
+    /\ UNCHANGED local_need_add
     /\ UNCHANGED log
 
 --------------------------------------------------------------
@@ -438,6 +455,13 @@ LeaderInv ==
     \A n \in Node:
         /\ isLocalLeader(n) <=> leader_pos_map[n] # nil
         /\ isLocalLeader(n) => follower_ready[n] = nil
+
+----------------------
+
+FollowerInv ==
+    \A n \in Node:
+        /\ isLocalFollower(n) => follower_ready[n] \in BOOLEAN
+        /\ isLocalFollower(n) => local_need_add[n] = {}
 
 ----------------------
 
@@ -496,5 +520,26 @@ CommitLogMatchingInv ==
             min_pos == Min({commit_pos[n1], commit_pos[n2]})
         IN
             SubSeq(log[n1], 1, min_pos) = SubSeq(log[n2], 1, min_pos)
+
+----------------------
+
+LocalNeedAddMatchConfig ==
+    \A n \in Node:
+        local_config[n] # nil =>
+            /\ local_need_add[n] \subseteq local_config[n].adding
+            /\ local_need_add[n] \intersect local_config[n].isr = {}
+
+----------------------
+
+LocalNeedAddMatchLeaderPos ==
+    \A n \in Node:
+        LET
+            pos_map == leader_pos_map[n]
+
+            cond ==
+                \A x \in local_config[n].adding:
+                    pos_map[x] >= commit_pos[n] <=> x \in local_need_add[n]
+        IN
+        isLocalLeader(n) => cond
 
 ====
