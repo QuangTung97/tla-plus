@@ -216,8 +216,8 @@ SyncConfig(n) ==
         on_follower_epoch_changed ==
             /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
             /\ follower_ready' = [follower_ready EXCEPT ![n] = FALSE]
+            /\ local_need_add' = [local_need_add EXCEPT ![n] = {}]
             /\ UNCHANGED commit_pos
-            /\ UNCHANGED local_need_add \* TODO
 
         on_follower_epoch_not_changed ==
             /\ UNCHANGED leader_pos_map
@@ -368,10 +368,11 @@ IncLeaderLogPos(l, n) ==
     /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][n] = pos]
     /\ UNCHANGED log
     /\ updateCommitPos(l, local_config[l])
-    /\ UNCHANGED local_need_add \* TODO handle
+    /\ moveAddingToLocalNeedAdd(l, local_config[l])
 
     /\ UNCHANGED follower_ready
-    /\ configUnchanged
+    /\ UNCHANGED num_action
+    /\ UNCHANGED global_config
 
 --------------------------------------------------------------
 
@@ -440,8 +441,9 @@ TerminateCond ==
     /\ Len(log[leader]) = commit_pos[leader]
     /\ \A n \in isr:
         /\ local_config[n] # nil
-        /\ local_config[n].epoch = global_config.epoch
+        /\ local_config[n] = global_config
         /\ commit_pos[n] = commit_pos[leader]
+        /\ local_need_add[n] = {}
 
 Terminated ==
     /\ TerminateCond
