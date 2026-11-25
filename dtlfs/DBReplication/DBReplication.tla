@@ -158,7 +158,7 @@ updateCommitPos(n, isr) ==
 
 -------------------
 
-updateLeaderPosMap(n, isr, adding, init_val) ==
+initLeaderPosMap(n, isr, adding, init_val) ==
     LET
         new_domain == computePosMapDomain(n, isr, adding)
 
@@ -168,7 +168,14 @@ updateLeaderPosMap(n, isr, adding, init_val) ==
                 ELSE 0
 
         init_pos_map == [x \in new_domain |-> init_fn(x)]
+    IN
+    /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
 
+-------------------
+
+updateLeaderPosMap(n, isr, adding) ==
+    LET
+        new_domain == computePosMapDomain(n, isr, adding)
         old_domain == DOMAIN leader_pos_map[n]
 
         update_fn(x, old) ==
@@ -179,10 +186,7 @@ updateLeaderPosMap(n, isr, adding, init_val) ==
         do_update(old_map) ==
             [x \in new_domain |-> update_fn(x, old_map[x])]
     IN
-    IF leader_pos_map[n] = nil THEN
-        leader_pos_map' = [leader_pos_map EXCEPT ![n] = init_pos_map]
-    ELSE
-        leader_pos_map' = [leader_pos_map EXCEPT ![n] = do_update(@)]
+    /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = do_update(@)]
 
 --------------------------------------------------------------
 
@@ -213,23 +217,24 @@ SyncConfig(n) ==
         isr == conf.isr
 
         on_leader_epoch_changed ==
+            /\ initLeaderPosMap(n, isr, conf.adding, commit_pos[n])
             /\ follower_ready' = [follower_ready EXCEPT ![n] = nil]
             /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT
                     ![n] = conf.isr \ {n}
                 ]
 
         on_leader_epoch_not_changed ==
+            /\ updateLeaderPosMap(n, isr, conf.adding)
             /\ leader_syncing_nodes' = [leader_syncing_nodes EXCEPT
                     ![n] = @ \intersect conf.isr
                 ]
             /\ UNCHANGED follower_ready
 
         on_leader ==
-            /\ updateLeaderPosMap(n, isr, conf.adding, commit_pos[n])
-            /\ updateCommitPos(n, isr)
             /\ IF epoch_changed
                 THEN on_leader_epoch_changed
                 ELSE on_leader_epoch_not_changed
+            /\ updateCommitPos(n, isr)
             /\ moveAddingToLocalNeedAdd(n, conf)
 
         on_follower_epoch_changed ==
