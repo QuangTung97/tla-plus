@@ -541,7 +541,13 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+FairSpec == Spec /\ WF_vars(Next)
+
 --------------------------------------------------------------
+
+AlwaysTerminated == []<>TerminateCond
+
+----------------------
 
 GlobalConfigInv ==
     /\ global_config.isr \intersect global_config.adding = {}
