@@ -5,20 +5,18 @@ CONSTANTS Node, Value, nil, max_num_action
 
 VARIABLES
     global_config,
-    local_config, log,
+    local_config, log, god_log,
     leader_pos_map, commit_pos,
     follower_ready, local_need_add,
     num_action
 
 vars == <<
     global_config,
-    local_config, log,
+    local_config, log, god_log,
     leader_pos_map, commit_pos,
     follower_ready, local_need_add,
     num_action
 >>
-
-\* TODO add god log
 
 --------------------------------------------------------------
 
@@ -90,6 +88,7 @@ TypeOK ==
 
     /\ local_config \in [Node -> Null(Config)]
     /\ log \in [Node -> Seq(LogEntry)]
+    /\ god_log \in Seq(LogEntry)
     /\ commit_pos \in [Node -> LogPos]
     /\ follower_ready \in [Node -> Null(BOOLEAN)]
     /\ local_need_add \in [Node -> SUBSET Node]
@@ -102,6 +101,7 @@ Init ==
 
     /\ local_config = [n \in Node |-> nil]
     /\ log = [n \in Node |-> <<>>]
+    /\ god_log = <<>>
     /\ leader_pos_map = [n \in Node |-> nil]
     /\ commit_pos = [n \in Node |-> 0]
     /\ follower_ready = [n \in Node |-> nil]
@@ -142,8 +142,15 @@ updateCommitPos(n, input_config) ==
         check_set == input_config.isr \ {n}
         repl_pos_list == {leader_pos_map'[n][x]: x \in check_set}
         new_pos == Min({leader_pos} \union repl_pos_list)
+
+        new_god_entries ==
+            IF new_pos > Len(god_log) THEN
+                SubSeq(log'[n], Len(god_log) + 1, new_pos)
+            ELSE
+                <<>>
     IN
     /\ commit_pos' = [commit_pos EXCEPT ![n] = new_pos]
+    /\ god_log' = god_log \o new_god_entries
 
 -------------------
 
@@ -234,6 +241,7 @@ SyncConfig(n) ==
                 THEN on_follower_epoch_changed
                 ELSE on_follower_epoch_not_changed
             /\ UNCHANGED commit_pos
+            /\ UNCHANGED god_log
     IN
     /\ local_config[n] # nil => local_config[n].revision < revision
 
@@ -329,6 +337,7 @@ TruncateFollowerLog(l, n) ==
 
     /\ UNCHANGED local_need_add
     /\ UNCHANGED commit_pos
+    /\ UNCHANGED god_log
     /\ UNCHANGED leader_pos_map
     /\ configUnchanged
 
@@ -356,6 +365,7 @@ RecvEntry(l, n) ==
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED follower_ready
     /\ UNCHANGED commit_pos
+    /\ UNCHANGED god_log
     /\ UNCHANGED local_need_add
     /\ configUnchanged
 
@@ -396,6 +406,7 @@ IncFollowerCommitPos(l, n) ==
     /\ UNCHANGED follower_ready
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED log
+    /\ UNCHANGED god_log
     /\ configUnchanged
 
 --------------------------------------------------------------
@@ -432,7 +443,7 @@ UpdateGlobalConfig(new_nodes) ==
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED follower_ready
     /\ UNCHANGED local_need_add
-    /\ UNCHANGED log
+    /\ UNCHANGED <<log, god_log>>
 
 --------------------------------------------------------------
 
@@ -451,7 +462,7 @@ AddToGlobalISR(n, x) ==
     /\ UNCHANGED follower_ready
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED num_action
-    /\ UNCHANGED log
+    /\ UNCHANGED <<log, god_log>>
     /\ UNCHANGED local_config
     /\ UNCHANGED commit_pos
 
@@ -571,6 +582,21 @@ CommitLogMatchingInv ==
             min_pos == Min({commit_pos[n1], commit_pos[n2]})
         IN
             SubSeq(log[n1], 1, min_pos) = SubSeq(log[n2], 1, min_pos)
+
+----------------------
+
+GodLogMatchISR ==
+    \A n \in Node:
+        n \in global_config.isr =>
+            /\ Len(god_log) <= Len(log[n])
+            /\ god_log = SubSeq(log[n], 1, Len(god_log))
+
+----------------------
+
+GodLogLenMatchCommitPos ==
+    \A n \in Node:
+        isLocalLeader(n) =>
+            commit_pos[n] <= Len(god_log)
 
 ----------------------
 
