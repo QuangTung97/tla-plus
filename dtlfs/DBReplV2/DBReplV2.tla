@@ -34,6 +34,10 @@ Min(S) == CHOOSE x \in S: \A y \in S: x <= y
 
 ASSUME Min({11, 12, 13}) = 11
 
+Max(S) == CHOOSE x \in S: \A y \in S: x >= y
+
+ASSUME Max({11, 12, 13}) = 13
+
 ----------------------------------------------------------------------
 
 Epoch == 10..(11 + max_num_action)
@@ -389,16 +393,17 @@ UpdateLeaderPosMap(l, x) ==
 FollowerSyncCommitPos(l, x) ==
     LET
         pos == commit_pos[l]
+        new_valid_pos == Max({valid_log_pos[x], pos})
     IN
     /\ isFollowerOf(l, x)
     /\ pos > commit_pos[x]
     /\ pos <= Len(log[x])
 
     /\ commit_pos' = [commit_pos EXCEPT ![x] = pos]
+    /\ valid_log_pos' = [valid_log_pos EXCEPT ![x] = new_valid_pos]
 
     /\ UNCHANGED log
     /\ UNCHANGED god_log
-    /\ UNCHANGED valid_log_pos
     /\ UNCHANGED leader_pos_map
     /\ UNCHANGED leader_syncing
     /\ UNCHANGED leader_need_add
