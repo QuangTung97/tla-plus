@@ -30,6 +30,10 @@ ASSUME NonEmpty({11, 12}) = {{11}, {12}, {11, 12}}
 
 Null(S) == S \union {nil}
 
+Min(S) == CHOOSE x \in S: \A y \in S: x <= y
+
+ASSUME Min({11, 12, 13}) = 11
+
 ----------------------------------------------------------------------
 
 Epoch == 10..(10 + max_num_action)
@@ -122,6 +126,28 @@ updateLocalEpoch(n, new_epoch) ==
     ELSE
         UNCHANGED local_epoch
 
+--------------------
+
+updateCommitPos(n) ==
+    /\ UNCHANGED commit_pos \* TODO
+    /\ UNCHANGED god_log \* TODO
+
+--------------------
+
+updateLeaderNeedAdd(n, conf) ==
+    /\ UNCHANGED leader_need_add \* TODO
+
+--------------------
+
+allowAction ==
+    /\ num_action < max_num_action
+    /\ num_action' = num_action + 1
+
+--------------------
+
+getEffectiveISR(n) ==
+    local_config[n].isr \* TODO
+
 ----------------------------------------------------------------------
 
 initLeaderPosMap(n, conf) ==
@@ -159,9 +185,15 @@ SyncConfig(n) ==
             /\ IF epoch_changed
                 THEN on_leader_epoch_changed
                 ELSE on_leader_epoch_same
+            /\ updateCommitPos(n)
+            /\ updateLeaderNeedAdd(n, conf)
 
         on_follower ==
-            /\ TRUE
+            /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = nil]
+            /\ leader_syncing' = [leader_syncing EXCEPT ![n] = {}]
+            /\ leader_need_add' = [leader_need_add EXCEPT ![n] = {}]
+            /\ UNCHANGED commit_pos
+            /\ UNCHANGED god_log
     IN
     /\ local_config[n] # nil => local_config[n].revision < conf.revision
 
@@ -180,6 +212,34 @@ SyncConfig(n) ==
 
 ----------------------------------------------------------------------
 
+AddLogEntry(n, v) ==
+    LET
+        pos == Len(log[n]) + 1
+
+        entry == [
+            pos |-> pos,
+            epoch |-> local_epoch[n],
+            value |-> v
+        ]
+    IN
+    /\ isLocalLeader(n)
+    /\ local_epoch[n] = global_config.epoch
+    /\ allowAction
+
+    /\ log' = [log EXCEPT ![n] = Append(@, entry)]
+    /\ updateCommitPos(n)
+
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_need_add
+    /\ UNCHANGED leader_syncing
+
+    /\ UNCHANGED retention_pos
+    /\ UNCHANGED local_epoch
+    /\ UNCHANGED local_config
+    /\ UNCHANGED global_config
+
+----------------------------------------------------------------------
+
 TerminateCond ==
     /\ TRUE
 
@@ -192,6 +252,8 @@ Terminated ==
 Next ==
     \/ \E n \in Node:
         \/ SyncConfig(n)
+    \/ \E n \in Node, v \in Value:
+        \/ AddLogEntry(n, v)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -226,6 +288,28 @@ LeaderPosMapDomainInv ==
 
 --------------------
 
-\* TODO inv between commit pos and retention pos
+LeaderCommitPosInv ==
+    \A n \in Node:
+        LET
+            self_pos == Len(log[n])
+
+            pos_map == leader_pos_map[n]
+
+            check_set == getEffectiveISR(n) \ {n}
+
+            pos_list == {pos_map[x]: x \in check_set}
+
+            expected == Min({self_pos} \union pos_list)
+        IN
+        /\ isLocalLeader(n) => commit_pos[n] = expected
+
+--------------------
+
+NodeLogPosInv ==
+    \A n \in Node:
+        /\ commit_pos[n] <= Len(log[n])
+        /\ retention_pos[n] <= commit_pos[n]
+
+--------------------
 
 ====
