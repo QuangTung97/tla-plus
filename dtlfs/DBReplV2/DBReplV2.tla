@@ -359,6 +359,30 @@ SyncLogEntry(l, x) ==
 
 ----------------------------------------------------------------------
 
+SyncLatestLogPos(l, x) ==
+    LET
+        pos_map == leader_pos_map[l]
+        pos == pos_map[x]
+    IN
+    /\ isFollowerOf(l, x)
+    /\ pos = Len(log[l])
+    /\ Len(log[x]) > pos
+    /\ pos = valid_log_pos[x]
+
+    /\ log' = [log EXCEPT ![x] = SubSeq(@, 1, pos)]
+
+    /\ UNCHANGED valid_log_pos
+    /\ UNCHANGED commit_pos
+    /\ UNCHANGED god_log
+
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_syncing
+    /\ UNCHANGED leader_need_add
+
+    /\ configUnchanged
+
+----------------------------------------------------------------------
+
 UpdateLeaderPosMap(l, x) ==
     LET
         pos == valid_log_pos[x]
@@ -505,6 +529,7 @@ TerminateCond ==
         /\ local_config[n] # nil
         /\ local_config[n] = global_config
         /\ local_epoch[n] = global_config.epoch
+        /\ Len(log[n]) = commit_pos[n]
         /\ commit_pos[n] = commit_pos[leader]
 
 Terminated ==
@@ -520,6 +545,7 @@ Next ==
         \/ AddLogEntry(n, v)
     \/ \E l \in Node, x \in Node:
         \/ SyncLogEntry(l, x)
+        \/ SyncLatestLogPos(l, x)
         \/ UpdateLeaderPosMap(l, x)
         \/ FollowerSyncCommitPos(l, x)
         \/ AddToGlobalISR(l, x)
