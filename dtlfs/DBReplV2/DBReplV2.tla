@@ -366,9 +366,9 @@ UpdateLeaderPosMap(l, x) ==
     /\ IF is_last_entry
         THEN clear_syncing
         ELSE UNCHANGED leader_syncing
+    /\ updateLeaderNeedAdd(l, local_config[l])
 
     /\ UNCHANGED valid_log_pos
-    /\ UNCHANGED leader_need_add
     /\ configUnchanged
 
 ----------------------------------------------------------------------
@@ -443,6 +443,34 @@ UpdateGlobalConfig(nodes) ==
 
 ----------------------------------------------------------------------
 
+AddToGlobalISR(l, x) ==
+    /\ isLocalLeader(l)
+    /\ x \in leader_need_add[l]
+
+    /\ leader_need_add' = [leader_need_add EXCEPT ![l] = @ \ {x}]
+    /\ local_config' = [local_config EXCEPT
+            ![l].adding = @ \ {x},
+            ![l].isr = @ \union {x}
+        ]
+    /\ global_config' = [global_config EXCEPT
+            !.adding = @ \ {x},
+            !.isr = @ \union {x}
+        ]
+
+    /\ UNCHANGED log
+    /\ UNCHANGED god_log
+    /\ UNCHANGED local_epoch
+    /\ UNCHANGED commit_pos
+    /\ UNCHANGED num_action
+    /\ UNCHANGED valid_log_pos
+    /\ UNCHANGED retention_pos
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_syncing
+
+\* TODO sync follower epoch
+
+----------------------------------------------------------------------
+
 TerminateCond ==
     LET
         leader == global_config.leader
@@ -474,6 +502,7 @@ Next ==
         \/ SyncLogEntry(l, x)
         \/ UpdateLeaderPosMap(l, x)
         \/ FollowerSyncCommitPos(l, x)
+        \/ AddToGlobalISR(l, x)
     \/ \E nodes \in NonEmpty(Node):
         \/ UpdateGlobalConfig(nodes)
     \/ Terminated
