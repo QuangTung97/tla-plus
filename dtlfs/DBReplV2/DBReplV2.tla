@@ -152,8 +152,17 @@ updateCommitPos(n, isr) ==
 
 --------------------
 
-updateLeaderNeedAdd(n, conf) ==
-    /\ UNCHANGED leader_need_add \* TODO
+updateLeaderNeedAdd(l, conf) ==
+    LET
+        pos_map == leader_pos_map'[l]
+
+        allow_move(x) ==
+            /\ leader_syncing'[l] = {}
+            /\ pos_map[x] >= commit_pos'[l]
+
+        move_set == {x \in conf.adding: allow_move(x)}
+    IN
+    /\ leader_need_add' = [leader_need_add EXCEPT ![l] = move_set]
 
 --------------------
 
@@ -192,6 +201,27 @@ initLeaderPosMap(n, conf) ==
     IN
         [x \in new_domain |-> init_fn(x)]
 
+----------------------------------------------------------------------
+
+updateLeaderPosMap(n, conf) ==
+    LET
+        new_domain == computePosMapDomain(n, conf)
+
+        pos_map == leader_pos_map[n]
+        old_domain == DOMAIN pos_map
+
+        update_fn(x) ==
+            IF x \in old_domain THEN
+                pos_map[x]
+            ELSE
+                retention_pos[n]
+
+        new_map == [x \in new_domain |-> update_fn(x)]
+    IN
+    /\ leader_pos_map' = [leader_pos_map EXCEPT ![n] = new_map]
+
+----------------------------------------------------------------------
+
 SyncConfig(n) ==
     LET
         conf == global_config
@@ -210,7 +240,10 @@ SyncConfig(n) ==
             /\ leader_syncing' = [leader_syncing EXCEPT ![n] = conf.isr \ {n}]
 
         on_leader_epoch_same ==
-            /\ UNCHANGED leader_syncing \* TODO
+            /\ updateLeaderPosMap(n, conf)
+            /\ leader_syncing' = [leader_syncing EXCEPT
+                    ![n] = @ \intersect conf.isr
+                ]
 
         on_leader ==
             /\ IF epoch_changed
@@ -309,6 +342,11 @@ UpdateLeaderPosMap(l, x) ==
     LET
         pos == valid_log_pos[x]
         pos_map == leader_pos_map[l]
+
+        is_last_entry == pos = Len(log[x])
+
+        clear_syncing ==
+            leader_syncing' = [leader_syncing EXCEPT ![l] = @ \ {x}]
     IN
     /\ isFollowerOf(l, x)
     /\ pos > pos_map[x]
@@ -316,9 +354,11 @@ UpdateLeaderPosMap(l, x) ==
     /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][x] = pos]
     /\ UNCHANGED log
     /\ updateCommitPos(l, getEffectiveISR(l))
+    /\ IF is_last_entry
+        THEN clear_syncing
+        ELSE UNCHANGED leader_syncing
 
     /\ UNCHANGED valid_log_pos
-    /\ UNCHANGED leader_syncing
     /\ UNCHANGED leader_need_add
     /\ configUnchanged
 
@@ -340,6 +380,56 @@ FollowerSyncCommitPos(l, x) ==
     /\ UNCHANGED leader_syncing
     /\ UNCHANGED leader_need_add
     /\ configUnchanged
+
+----------------------------------------------------------------------
+
+UpdateGlobalConfig(nodes) ==
+    LET
+        old_nodes == global_config.isr \union global_config.adding
+
+        old_isr == global_config.isr
+        new_isr == old_isr \intersect nodes
+
+        new_adding == nodes \ new_isr
+
+        leader_unchanged ==
+            global_config.leader \in new_isr
+
+        update_member_only ==
+            global_config' = [global_config EXCEPT
+                !.isr = new_isr,
+                !.adding = new_adding,
+                !.revision = @ + 1
+            ]
+
+        update_leader(l) ==
+            global_config' = [
+                epoch |-> global_config.epoch + 1,
+                isr |-> new_isr,
+                adding |-> new_adding,
+                leader |-> l,
+                revision |-> global_config.revision + 1
+            ]
+    IN
+    /\ allowAction
+    /\ nodes # old_nodes
+    /\ new_isr # {}
+
+    /\ IF leader_unchanged
+        THEN update_member_only
+        ELSE \E l \in new_isr: update_leader(l)
+
+    /\ UNCHANGED commit_pos
+    /\ UNCHANGED retention_pos
+    /\ UNCHANGED log
+    /\ UNCHANGED god_log
+
+    /\ UNCHANGED local_config
+    /\ UNCHANGED local_epoch
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_syncing
+    /\ UNCHANGED leader_need_add
+    /\ UNCHANGED valid_log_pos
 
 ----------------------------------------------------------------------
 
@@ -374,6 +464,8 @@ Next ==
         \/ SyncLogEntry(l, x)
         \/ UpdateLeaderPosMap(l, x)
         \/ FollowerSyncCommitPos(l, x)
+    \/ \E nodes \in NonEmpty(Node):
+        \/ UpdateGlobalConfig(nodes)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
@@ -490,5 +582,31 @@ FollowerValidLogMatching ==
         isFollowerOf(l, x) =>
             /\ valid_log_pos[x] <= Len(log[l])
             /\ leader_log = follower_log
+
+--------------------
+
+LeaderNeedAddAndSyncingNodes ==
+    \A n \in Node:
+        leader_need_add[n] # {} => leader_syncing[n] = {}
+
+--------------------
+
+LeaderNeedAddSetMatchLeaderPos ==
+    \A n \in Node:
+        LET
+            pre_cond ==
+                /\ isLocalLeader(n)
+                /\ leader_syncing[n] = {}
+
+            pos_map == leader_pos_map[n]
+
+            adding_set ==
+                local_config[n].adding \ leader_need_add[n]
+
+            cond ==
+                \A x \in adding_set:
+                    /\ pos_map[x] < commit_pos[n]
+        IN
+            pre_cond => cond
 
 ====
