@@ -128,9 +128,23 @@ updateLocalEpoch(n, new_epoch) ==
 
 --------------------
 
-updateCommitPos(n) ==
-    /\ UNCHANGED commit_pos \* TODO
-    /\ UNCHANGED god_log \* TODO
+updateCommitPos(n, isr) ==
+    LET
+        self_pos == Len(log'[n])
+        pos_map == leader_pos_map'[n]
+        check_set == isr \ {n}
+
+        pos_list == {pos_map[x]: x \in check_set}
+        new_pos == Min({self_pos} \union pos_list)
+
+        new_god_entries ==
+            IF new_pos > Len(god_log) THEN
+                SubSeq(log'[n], Len(god_log) + 1, new_pos)
+            ELSE
+                <<>>
+    IN
+    /\ commit_pos' = [commit_pos EXCEPT ![n] = new_pos]
+    /\ god_log' = god_log \o new_god_entries
 
 --------------------
 
@@ -185,7 +199,7 @@ SyncConfig(n) ==
             /\ IF epoch_changed
                 THEN on_leader_epoch_changed
                 ELSE on_leader_epoch_same
-            /\ updateCommitPos(n)
+            /\ updateCommitPos(n, conf.isr)
             /\ updateLeaderNeedAdd(n, conf)
 
         on_follower ==
@@ -227,9 +241,9 @@ AddLogEntry(n, v) ==
     /\ allowAction
 
     /\ log' = [log EXCEPT ![n] = Append(@, entry)]
-    /\ updateCommitPos(n)
-
     /\ UNCHANGED leader_pos_map
+    /\ updateCommitPos(n, getEffectiveISR(n))
+
     /\ UNCHANGED leader_need_add
     /\ UNCHANGED leader_syncing
 
@@ -241,7 +255,20 @@ AddLogEntry(n, v) ==
 ----------------------------------------------------------------------
 
 TerminateCond ==
-    /\ TRUE
+    LET
+        leader == global_config.leader
+        isr == global_config.isr
+    IN
+    /\ num_action = max_num_action
+    /\ global_config.adding = {}
+    /\ Len(log[leader]) = commit_pos[leader]
+    /\ leader_need_add[leader] = {}
+    /\ leader_syncing[leader] = {}
+    /\ \A n \in isr:
+        /\ local_config[n] # nil
+        /\ local_config[n] = global_config
+        /\ local_epoch[n] = global_config.epoch
+        /\ commit_pos[n] = commit_pos[leader]
 
 Terminated ==
     /\ TerminateCond
@@ -311,5 +338,40 @@ NodeLogPosInv ==
         /\ retention_pos[n] <= commit_pos[n]
 
 --------------------
+
+FollowerInv ==
+    \A n \in Node:
+        ~isLocalLeader(n) =>
+            /\ leader_need_add[n] = {}
+            /\ leader_syncing[n] = {}
+
+--------------------
+
+LeaderInv ==
+    \A n \in Node:
+        isLocalLeader(n) =>
+            /\ leader_need_add[n] \subseteq local_config[n].adding
+            /\ leader_syncing[n] \subseteq local_config[n].isr
+
+--------------------
+
+LocalEpochInv ==
+    \A n \in Node:
+        local_config[n] # nil => local_config[n].epoch <= local_epoch[n]
+
+--------------------
+
+GodLogMatchISR ==
+    \A n \in Node:
+        n \in global_config.isr =>
+            /\ Len(god_log) <= Len(log[n])
+            /\ god_log = SubSeq(log[n], 1, Len(god_log))
+
+--------------------
+
+GodLogLenMatchCommitPos ==
+    \A n \in Node:
+        isLocalLeader(n) =>
+            commit_pos[n] <= Len(god_log)
 
 ====
