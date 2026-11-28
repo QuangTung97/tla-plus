@@ -352,13 +352,18 @@ UpdateLeaderPosMap(l, x) ==
         pos == valid_log_pos[x]
         pos_map == leader_pos_map[l]
 
+        allow_cond ==
+            \/ pos > pos_map[x]
+            \/ /\ pos = pos_map[x]
+               /\ x \in leader_syncing[l]
+
         is_last_entry == pos = Len(log[x])
 
         clear_syncing ==
             leader_syncing' = [leader_syncing EXCEPT ![l] = @ \ {x}]
     IN
     /\ isFollowerOf(l, x)
-    /\ pos > pos_map[x]
+    /\ allow_cond
 
     /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][x] = pos]
     /\ UNCHANGED log
@@ -455,7 +460,8 @@ AddToGlobalISR(l, x) ==
         ]
     /\ global_config' = [global_config EXCEPT
             !.adding = @ \ {x},
-            !.isr = @ \union {x}
+            !.isr = @ \union {x},
+            !.revision = @ + 1
         ]
 
     /\ UNCHANGED log
