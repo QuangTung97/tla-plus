@@ -166,6 +166,19 @@ allowAction ==
 getEffectiveISR(n) ==
     local_config[n].isr \* TODO
 
+--------------------
+
+getFollowerSet(n) ==
+    local_config[n].isr \union local_config[n].adding
+
+--------------------
+
+isFollowerOf(l, x) ==
+    /\ isLocalLeader(l)
+    /\ local_epoch[l] = local_epoch[x]
+    /\ x \in getFollowerSet(l)
+    /\ x # l
+
 ----------------------------------------------------------------------
 
 initLeaderPosMap(n, conf) ==
@@ -389,5 +402,19 @@ LogPosInv ==
     \A n \in Node:
         \A pos \in DOMAIN log[n]:
             log[n][pos].pos = pos
+
+--------------------
+
+FollowerValidLogMatching ==
+    \A l \in Node, x \in Node:
+        LET
+            end_pos == valid_log_pos[x]
+
+            leader_log == SubSeq(log[l], 1, end_pos)
+            follower_log == SubSeq(log[x], 1, end_pos)
+        IN
+        isFollowerOf(l, x) =>
+            /\ valid_log_pos[x] <= Len(log[l])
+            /\ leader_log = follower_log
 
 ====
