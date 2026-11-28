@@ -9,7 +9,7 @@ VARIABLES
     log, god_log,
     commit_pos, retention_pos,
     leader_pos_map, leader_syncing,
-    leader_need_add,
+    leader_need_add, valid_log_pos,
     num_action
 
 vars == <<
@@ -18,7 +18,7 @@ vars == <<
     log, god_log,
     commit_pos, retention_pos,
     leader_pos_map, leader_syncing,
-    leader_need_add,
+    leader_need_add, valid_log_pos,
     num_action
 >>
 
@@ -85,6 +85,8 @@ TypeOK ==
     /\ leader_syncing \in [Node -> SUBSET Node]
     /\ leader_need_add \in [Node -> SUBSET Node]
 
+    /\ valid_log_pos \in [Node -> LogPos]
+
     /\ num_action \in 0..max_num_action
 
 Init ==
@@ -103,6 +105,8 @@ Init ==
     /\ leader_pos_map = [n \in Node |-> nil]
     /\ leader_syncing = [n \in Node |-> {}]
     /\ leader_need_add = [n \in Node |-> {}]
+
+    /\ valid_log_pos = [n \in Node |-> 0]
 
     /\ num_action = 0
 
@@ -220,6 +224,7 @@ SyncConfig(n) ==
         THEN on_leader
         ELSE on_follower
 
+    /\ UNCHANGED valid_log_pos
     /\ UNCHANGED retention_pos
     /\ UNCHANGED num_action
     /\ UNCHANGED global_config
@@ -241,6 +246,7 @@ AddLogEntry(n, v) ==
     /\ allowAction
 
     /\ log' = [log EXCEPT ![n] = Append(@, entry)]
+    /\ valid_log_pos' = [valid_log_pos EXCEPT ![n] = pos]
     /\ UNCHANGED leader_pos_map
     /\ updateCommitPos(n, getEffectiveISR(n))
 
@@ -335,6 +341,8 @@ LeaderCommitPosInv ==
 NodeLogPosInv ==
     \A n \in Node:
         /\ commit_pos[n] <= Len(log[n])
+        /\ valid_log_pos[n] <= Len(log[n])
+        /\ valid_log_pos[n] >= commit_pos[n]
         /\ retention_pos[n] <= commit_pos[n]
 
 --------------------
@@ -352,6 +360,7 @@ LeaderInv ==
         isLocalLeader(n) =>
             /\ leader_need_add[n] \subseteq local_config[n].adding
             /\ leader_syncing[n] \subseteq local_config[n].isr
+            /\ valid_log_pos[n] = Len(log[n])
 
 --------------------
 
@@ -373,5 +382,12 @@ GodLogLenMatchCommitPos ==
     \A n \in Node:
         isLocalLeader(n) =>
             commit_pos[n] <= Len(god_log)
+
+--------------------
+
+LogPosInv ==
+    \A n \in Node:
+        \A pos \in DOMAIN log[n]:
+            log[n][pos].pos = pos
 
 ====
