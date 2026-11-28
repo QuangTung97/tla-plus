@@ -273,6 +273,76 @@ AddLogEntry(n, v) ==
 
 ----------------------------------------------------------------------
 
+configUnchanged ==
+    /\ UNCHANGED num_action
+    /\ UNCHANGED retention_pos
+    /\ UNCHANGED local_epoch
+    /\ UNCHANGED local_config
+    /\ UNCHANGED global_config
+
+SyncLogEntry(l, x) ==
+    LET
+        pos_map == leader_pos_map[l]
+        pos == pos_map[x] + 1
+
+        entry == log[l][pos]
+    IN
+    /\ isFollowerOf(l, x)
+    /\ pos <= Len(log[l])
+    /\ pos > valid_log_pos[x]
+
+    /\ valid_log_pos' = [valid_log_pos EXCEPT ![x] = pos]
+    /\ log' = [log EXCEPT ![x] = Append(@, entry)]
+
+    /\ UNCHANGED commit_pos
+    /\ UNCHANGED god_log
+
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_syncing
+    /\ UNCHANGED leader_need_add
+
+    /\ configUnchanged
+
+----------------------------------------------------------------------
+
+UpdateLeaderPosMap(l, x) ==
+    LET
+        pos == valid_log_pos[x]
+        pos_map == leader_pos_map[l]
+    IN
+    /\ isFollowerOf(l, x)
+    /\ pos > pos_map[x]
+
+    /\ leader_pos_map' = [leader_pos_map EXCEPT ![l][x] = pos]
+    /\ UNCHANGED log
+    /\ updateCommitPos(l, getEffectiveISR(l))
+
+    /\ UNCHANGED valid_log_pos
+    /\ UNCHANGED leader_syncing
+    /\ UNCHANGED leader_need_add
+    /\ configUnchanged
+
+----------------------------------------------------------------------
+
+FollowerSyncCommitPos(l, x) ==
+    LET
+        pos == commit_pos[l]
+    IN
+    /\ isFollowerOf(l, x)
+    /\ pos > commit_pos[x]
+
+    /\ commit_pos' = [commit_pos EXCEPT ![x] = pos]
+
+    /\ UNCHANGED log
+    /\ UNCHANGED god_log
+    /\ UNCHANGED valid_log_pos
+    /\ UNCHANGED leader_pos_map
+    /\ UNCHANGED leader_syncing
+    /\ UNCHANGED leader_need_add
+    /\ configUnchanged
+
+----------------------------------------------------------------------
+
 TerminateCond ==
     LET
         leader == global_config.leader
@@ -300,6 +370,10 @@ Next ==
         \/ SyncConfig(n)
     \/ \E n \in Node, v \in Value:
         \/ AddLogEntry(n, v)
+    \/ \E l \in Node, x \in Node:
+        \/ SyncLogEntry(l, x)
+        \/ UpdateLeaderPosMap(l, x)
+        \/ FollowerSyncCommitPos(l, x)
     \/ Terminated
 
 Spec == Init /\ [][Next]_vars
