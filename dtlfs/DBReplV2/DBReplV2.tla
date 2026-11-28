@@ -36,7 +36,7 @@ ASSUME Min({11, 12, 13}) = 11
 
 ----------------------------------------------------------------------
 
-Epoch == 10..(10 + max_num_action)
+Epoch == 10..(11 + max_num_action)
 
 Revision == 20..29
 
@@ -173,7 +173,7 @@ allowAction ==
 --------------------
 
 getEffectiveISR(n) ==
-    local_config[n].isr \* TODO
+    local_config[n].isr \union leader_need_add[n]
 
 --------------------
 
@@ -445,6 +445,7 @@ UpdateGlobalConfig(nodes) ==
 
 AddToGlobalISR(l, x) ==
     /\ isLocalLeader(l)
+    /\ local_config[l].revision = global_config.revision
     /\ x \in leader_need_add[l]
 
     /\ leader_need_add' = [leader_need_add EXCEPT ![l] = @ \ {x}]
