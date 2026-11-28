@@ -251,7 +251,7 @@ SyncConfig(n) ==
                 ELSE on_leader_epoch_same
             /\ updateCommitPos(n, conf.isr)
             /\ updateLeaderNeedAdd(n, conf)
-            /\ UNCHANGED valid_log_pos \* TODO
+            /\ valid_log_pos' = [valid_log_pos EXCEPT ![n] = Len(log[n])]
 
         on_follower_epoch_changed ==
             /\ valid_log_pos' = [valid_log_pos EXCEPT ![n] = commit_pos[n]]
@@ -328,13 +328,21 @@ SyncLogEntry(l, x) ==
         pos == pos_map[x] + 1
 
         entry == log[l][pos]
+
+        on_append ==
+            /\ log' = [log EXCEPT ![x] = Append(@, entry)]
+
+        on_update ==
+            /\ log' = [log EXCEPT ![x][pos] = entry]
     IN
     /\ isFollowerOf(l, x)
     /\ pos <= Len(log[l])
     /\ pos > valid_log_pos[x]
 
     /\ valid_log_pos' = [valid_log_pos EXCEPT ![x] = pos]
-    /\ log' = [log EXCEPT ![x] = Append(@, entry)]
+    /\ IF pos > Len(log[x])
+        THEN on_append
+        ELSE on_update
 
     /\ UNCHANGED commit_pos
     /\ UNCHANGED god_log
